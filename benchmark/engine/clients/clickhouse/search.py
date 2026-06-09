@@ -76,12 +76,20 @@ class ClickHouseSearcher(BaseSearcher):
         connect_timeout = _to_int(conn.get("connect_timeout", None), 10)
         send_receive_timeout = _to_int(conn.get("send_receive_timeout", base_timeout), base_timeout)
         sync_request_timeout = _to_int(conn.get("sync_request_timeout", base_timeout), base_timeout)
-        # ClickHouse 使用 system.data_skipping_indices 来检查向量索引状态
-        status_sql = (
-            f"SELECT count() FROM system.data_skipping_indices "
+        # ClickHouse 26.6.1.1 使用 system.data_skipping_indices 来检查向量索引是否存在
+        # 注意：该表没有 status 列，只有 data_compressed_bytes 等列
+        # ADD INDEX 只是创建索引定义，实际索引数据在 MATERIALIZE INDEX 或 merge 时构建
+        check_index_sql = (
+            f"SELECT name, type, data_compressed_bytes FROM system.data_skipping_indices "
             f"WHERE database = 'default' AND table = '{table_name}' AND name = 'vector_index'"
         )
+        # 同时检查是否有未完成的 mutation（MATERIALIZE INDEX 会创建 mutation）
+        check_mutation_sql = (
+            f"SELECT count() FROM system.mutations "
+            f"WHERE database = 'default' AND table = '{table_name}' AND is_done = 0"
+        )
         rows = None
+        pending_mutations = 0
         if protocol.lower() == "tcp":
             client = DriverClient(
                 host=host_val,
@@ -94,7 +102,10 @@ class ClickHouseSearcher(BaseSearcher):
                 sync_request_timeout=sync_request_timeout,
             )
             try:
-                rows = client.execute(status_sql)
+                rows = client.execute(check_index_sql)
+                mutation_rows = client.execute(check_mutation_sql)
+                if mutation_rows:
+                    pending_mutations = int(mutation_rows[0][0] or 0)
             except Exception:
                 try:
                     client.disconnect()
@@ -116,7 +127,10 @@ class ClickHouseSearcher(BaseSearcher):
                 send_receive_timeout=send_receive_timeout,
             )
             try:
-                rows = client.query(status_sql).result_rows
+                rows = client.query(check_index_sql).result_rows
+                mutation_rows = client.query(check_mutation_sql).result_rows
+                if mutation_rows:
+                    pending_mutations = int(mutation_rows[0][0] or 0)
             except Exception:
                 try:
                     client.close()
@@ -130,11 +144,18 @@ class ClickHouseSearcher(BaseSearcher):
         if not rows:
             warn(f"no vector_index found for table={table_name}, warmup skipped")
             return
-        index_count = int(rows[0][0] or 0)
-        if index_count > 0:
-            step(f"vector index exists for table={table_name}, index_count={index_count}")
+        index_name = rows[0][0]
+        index_type = rows[0][1]
+        compressed_bytes = int(rows[0][2] or 0)
+        if pending_mutations > 0:
+            warn(f"vector index still building for table={table_name}: "
+                 f"name={index_name} type={index_type} pending_mutations={pending_mutations}")
+        elif compressed_bytes > 0:
+            step(f"vector index ready for table={table_name}: "
+                 f"name={index_name} type={index_type} size={compressed_bytes} bytes")
         else:
-            warn(f"no vector_index found for table={table_name}")
+            warn(f"vector_index found but no data yet for table={table_name}: "
+                 f"name={index_name} type={index_type} (may need MATERIALIZE INDEX or merge)")
 
     @classmethod
     def init_client(
@@ -191,35 +212,25 @@ class ClickHouseSearcher(BaseSearcher):
         cls.host = host
         cls.distance = DISTANCE_MAPPING[distance]
         cls.search_params = search_params
-        cls.apply_query_plan_cache_settings(search_params, protocol)
+        # cls.apply_query_plan_cache_settings(search_params, protocol)
 
     @classmethod
     def apply_query_plan_cache_settings(cls, search_params: dict, protocol: str):
+        # ClickHouse 26.6.1.1 没有 MyScale 的 query plan cache 设置
+        # 这些设置是 MyScale 特有的：use_query_plan_cache, query_plan_cache_enable_CAST 等
+        # ClickHouse 使用 use_query_cache（查询缓存），但功能不同
+        # 因此跳过这些设置，只记录日志
         cache_mode = _to_int((search_params or {}).get("use_query_plan_cache", 0), 0)
         CAST_mode = _to_int((search_params or {}).get("query_plan_cache_enable_CAST", 0), 0)
         only_vector = _to_int((search_params or {}).get("query_plan_cache_only_vector", 0), 0)
         use_number = _to_int((search_params or {}).get("query_plan_cache_use_number", 0), 0)
-        if cache_mode == 0:
-            only_vector = 0
-            use_number = 0
-        set_cache_sql = f"SET use_query_plan_cache = {cache_mode}"
-        set_replace_sql = f"SET query_plan_cache_enable_CAST = {CAST_mode}"
-        set_only_vector_sql = f"SET query_plan_cache_only_vector = {only_vector}"
-        set_use_number_sql = f"SET query_plan_cache_use_number = {use_number}"
-        try:
-            client = cls.get_client()
-            if protocol == "tcp":
-                client.execute(set_cache_sql)
-                client.execute(set_replace_sql)
-                client.execute(set_only_vector_sql)
-                client.execute(set_use_number_sql)
-            else:
-                client.command(set_cache_sql)
-                client.command(set_replace_sql)
-                client.command(set_only_vector_sql)
-                client.command(set_use_number_sql)
-        except Exception as e:
-            warn(f"failed to set query plan cache settings: {e}")
+
+        if cache_mode != 0 or CAST_mode != 0 or only_vector != 0 or use_number != 0:
+            warn(f"ClickHouse does not support MyScale query plan cache settings, "
+                 f"skipping: use_query_plan_cache={cache_mode}, query_plan_cache_enable_CAST={CAST_mode}, "
+                 f"query_plan_cache_only_vector={only_vector}, query_plan_cache_use_number={use_number}")
+        else:
+            step(f"query plan cache settings: all disabled (ClickHouse does not support these MyScale settings)")
 
     @classmethod
     def get_client(cls):
@@ -233,16 +244,9 @@ class ClickHouseSearcher(BaseSearcher):
         search_params_dict = (cls.search_params or {}).get("params") or {}
 
         # ClickHouse 26.6.1.1 使用标准的距离函数
-        # 根据距离类型选择对应的函数
-        if cls.distance == "L2":
-            dist_expr = f"L2Distance(vector, {vector})"
-        elif cls.distance == "cosine":
-            dist_expr = f"cosineDistance(vector, {vector})"
-        elif cls.distance == "dotProduct":
-            dist_expr = f"dotProduct(vector, {vector})"
-        else:
-            # 默认使用 L2 距离
-            dist_expr = f"L2Distance(vector, {vector})"
+        # 从 DISTANCE_MAPPING 获取正确的距离函数名（L2Distance, cosineDistance, dotProduct）
+        dist_func = cls.distance  # 已经通过 DISTANCE_MAPPING 转换为 ClickHouse 函数名
+        dist_expr = f"{dist_func}(vector, {vector})"
 
         search_str = f"SELECT id, {dist_expr} as dis FROM {table_name}"
 
@@ -250,10 +254,21 @@ class ClickHouseSearcher(BaseSearcher):
             search_str += f" prewhere {cls.parser.parse(meta_conditions=meta_conditions)}"
 
         # ClickHouse 距离函数返回的是距离值，越小越相似（除了点积）
+        # dotProduct 返回的是相似度分数，越大越相似
         if cls.distance == "dotProduct":
             search_str += f" order by dis DESC limit {top}"
         else:
-            search_str += f" order by dis limit {top}"
+            search_str += f" order by dis ASC limit {top}"
+
+        # 添加 ClickHouse 特定的搜索参数
+        # ClickHouse 26.6.1.1 使用 hnsw_candidate_list_size_for_search 设置（相当于 HNSW 的 ef_search）
+        settings_parts = []
+        ef_s = search_params_dict.get("ef_s", None)
+        if ef_s is not None:
+            settings_parts.append(f"hnsw_candidate_list_size_for_search = {ef_s}")
+
+        if settings_parts:
+            search_str += " SETTINGS " + ", ".join(settings_parts)
 
         res_list = []
         try:

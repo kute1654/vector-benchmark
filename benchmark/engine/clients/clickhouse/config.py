@@ -10,10 +10,11 @@ CLICKHOUSE_DEFAULT_USER = "default"
 CLICKHOUSE_DEFAULT_PASSWD = ""
 
 # ClickHouse 26.6.1.1 向量距离函数映射
+# 用于 vector_similarity 索引创建和搜索函数
 DISTANCE_MAPPING = {
-    Distance.L2: "L2",
+    Distance.L2: "L2Distance",
     Distance.DOT: "dotProduct",
-    Distance.COSINE: "cosine"  # cosine problem, when normalized, IP=COSINE
+    Distance.COSINE: "cosineDistance"
 }
 
 H5_COLUMN_TYPES_MAPPING = {

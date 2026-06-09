@@ -1,0 +1,148 @@
+[
+  {
+    "name": "clickhouse-deep-image-96-angular",
+    "dataset": "deep-image-96-angular",
+    "upload_params": {
+      "index_params": {
+        "ef_c": 200,
+        "m": 32
+      },
+      "optimize": true,
+      "index_type": "HNSWFLAT",
+      "search_number": 1
+    }, 
+    "search_params": {
+      "parallel": 16,
+      "top": 10,
+      "test_duration": 20,
+      "params": {
+        "ef_s": [100]
+      }
+    }
+  },
+  {
+    "name": "clickhouse-sift-128-euclidean",
+    "dataset": "sift-128-euclidean",
+    "upload_params": {
+      "index_params": {
+        "ef_c": 200,
+        "m": 32
+      },
+      "optimize": true,
+      "index_type": "HNSWFLAT",
+      "search_number": 10
+    }, 
+    "search_params": {
+      "parallel": 16,
+      "top": 10,
+      "test_duration": 20,
+      "params": {
+        "ef_s": [100]
+      }
+    }
+  },
+  {
+    "name": "clickhouse-hnsw-laion-768-1m-ip",
+    "dataset": "laion-768-1m-ip",
+    "upload_params": {
+      "index_params": {
+        "ef_c": 200,
+        "m": 32
+      },
+      "optimize": true,
+      "index_type": "HNSWFLAT",
+      "search_number": 10
+    }, 
+    "search_params": {
+      "parallel": 16,
+      "top": 10,
+      "test_duration": 20,
+      "params": {
+        "ef_s": [100]
+      }
+    }
+  },
+  {
+    "name": "clickhouse-hnsw-gist-960-euclidean-l2",
+    "dataset": "gist-960-euclidean-l2",
+    "upload_params": {
+      "index_params": {
+        "ef_c": 200,
+        "m": 32
+      },
+      "optimize": true,
+      "index_type": "HNSWFLAT",
+      "search_number": 10
+    },
+    "search_params": {
+      "parallel": 16,
+      "top": 10,
+      "test_duration": 10,
+      "params": {
+        "ef_s": [100]
+      }
+    }
+  },
+  {
+    "name": "clickhouse-dbpedia-openai-1000k-angular",
+    "dataset": "dbpedia-openai-1000k-angular",
+    "upload_params": {
+      "index_params": {
+        "ef_c": 200,
+        "m": 32
+      },
+      "optimize": true,
+      "index_type": "HNSWFLAT",
+      "search_number": 10
+    },
+    "search_params": {
+      "parallel": 16,
+      "top": 10,
+      "test_duration": 20,
+      "params": {
+        "ef_s": [100]
+      }
+    }
+  },
+  {
+    "name": "clickhouse-text-quora-mini-dev",
+    "dataset": "quora-mini-text-dev",
+    "upload_params": {
+      "fts_idx_cols": ["body"],
+      "fts_idx_params": {
+        "body": { "tokenizer": { "type": "stem", "stop_word_filters": ["english"] } }
+      },
+      "search_number": 1
+    },
+    "search_params": {
+      "parallel": 16,
+      "top": 10,
+      "test_duration": 20,
+      "params": {
+        "enable_nlq": "true",
+        "operator": "OR"
+      }
+    }
+  },
+  {
+    "name": "clickhouse-mstg-hybrid-quora-mini-dev",
+    "dataset": "quora-mini-hybrid-dev",
+    "upload_params": {
+      "index_type": "HNSWFLAT",
+      "optimize": true,
+      "fts_idx_cols": ["body"],
+      "fts_idx_params": {
+        "body": { "tokenizer": { "type": "stem", "stop_word_filters": ["english"] } }
+      },
+      "search_number": 1
+    },
+    "search_params": {
+      "parallel": 16,
+      "top": 10,
+      "test_duration": 20,
+      "params": {
+        "ef_s": [100]
+      }
+    }
+  }
+]

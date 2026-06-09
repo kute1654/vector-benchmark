@@ -109,67 +109,109 @@ class ClickHouseUploader(BaseUploader):
             warn("no index_type specified, skipping vector index creation")
             return {}
 
-        # ClickHouse 26.6.1.1 支持的向量索引类型：annoy, usearch, flat
-        # 将索引类型转换为小写
-        clickhouse_index_type = index_type.lower()
+        # ClickHouse 26.6.1.1 向量索引语法（从源码确认）：
+        # INDEX name vector TYPE vector_similarity('hnsw', 'distance_function', dimensions,
+        #     [quantization, hnsw_max_connections_per_layer, hnsw_candidate_list_size_for_construction])
+        #
+        # 参数说明：
+        # 1. method: 'hnsw'（目前只支持 hnsw）
+        # 2. distance_function: 'L2Distance', 'cosineDistance', 'dotProduct'
+        # 3. dimensions: 向量维度
+        # 4. quantization（可选）: 'f64', 'f32', 'f16', 'bf16', 'i8', 'b1'，默认 'bf16'
+        # 5. hnsw_max_connections_per_layer（可选）: 类似 HNSW 的 m 参数
+        # 6. hnsw_candidate_list_size_for_construction（可选）: 类似 HNSW 的 ef_construction 参数
 
-        # 检查索引类型是否支持
-        supported_index_types = ["annoy", "usearch", "flat"]
-        if clickhouse_index_type not in supported_index_types:
+        # 将索引类型映射到 ClickHouse 的 vector_similarity
+        supported_index_types = ["hnswflat", "hnsw", "annoy", "usearch", "flat", "vector_similarity"]
+        if index_type.lower() not in supported_index_types:
             warn(f"unsupported index type for ClickHouse: {index_type}. Supported types: {supported_index_types}")
             return {}
 
-        # 构建索引参数
+        # 距离函数：cls.distance 已经通过 DISTANCE_MAPPING 转换为 ClickHouse 函数名
+        # （L2Distance, cosineDistance, dotProduct）
+        distance_func = cls.distance
+        print(cls.upload_params)
+        # 构建索引参数（位置参数，不是键值对）
         index_params = cls.upload_params.get("index_params") or {}
-        param_items = [f"'metric_type={cls.distance}'"]
-        for key, value in index_params.items():
-            if str(key).lower() == "metric_type":
-                continue
-            param_items.append(f"'{key}={value}'")
-        index_parameter_str = ",".join(param_items)
+        # 获取向量维度（从 configure 阶段设置的 vector_size）
+        vector_size = cls.upload_params.get("_vector_size", 0)
 
-        # 创建向量索引
+        # 获取 HNSW 参数
+        m = index_params.get("m", 16)  # hnsw_max_connections_per_layer，默认 16
+        ef_c = index_params.get("ef_c", 200)  # hnsw_candidate_list_size_for_construction，默认 200
+
+        # 量化类型（默认 bf16）
+        quantization = index_params.get("quantization", "bf16")
+
+        if vector_size > 0:
+            # 有向量维度信息，使用完整参数
+            index_args = f"'hnsw', '{distance_func}', {vector_size}, '{quantization}', {m}, {ef_c}"
+        else:
+            # 没有向量维度信息，使用简化参数（只支持 3 个参数的情况）
+            warn(f"vector_size not available, using simplified index args (3 parameters)")
+            index_args = f"'hnsw', '{distance_func}'"
+
+        # 创建向量索引定义
+        # ClickHouse 26.6.1.1 使用 vector_similarity 索引类型
+        # ADD INDEX 只是创建索引定义，不会立即构建索引数据
         index_create_str = (
-            f"ALTER TABLE {cls.table_name} ADD INDEX vector_index vector "
-            f"TYPE {clickhouse_index_type}({index_parameter_str})"
+            f"ALTER TABLE {cls.table_name} ADD INDEX vector_index "
+            f"vector TYPE vector_similarity({index_args}) GRANULARITY 1000"
         )
         vector_index_begin_time = time.perf_counter()
         sql(index_create_str)
         try:
             cls.command(index_create_str)
+            step(f"vector index definition added successfully")
         except Exception as e:
             warn(f"failed to add vector index: {e}")
             return {}
 
-        # 等待向量索引构建完成
-        # ClickHouse 使用 system.parts 表来检查索引状态
-        check_index_status = f"""
-        SELECT name, type, status
-        FROM system.data_skipping_indices
-        WHERE database = 'default' AND table = '{cls.table_name}' AND name = 'vector_index'
-        """
-        sql(check_index_status)
-        last_status = None
+        # 使用 MATERIALIZE INDEX 触发实际的索引构建
+        # 这会创建一个 mutation 来在现有数据上构建索引
+        materialize_str = f"ALTER TABLE {cls.table_name} MATERIALIZE INDEX vector_index"
+        sql(materialize_str)
+        try:
+            cls.command(materialize_str)
+            step(f"MATERIALIZE INDEX triggered")
+        except Exception as e:
+            warn(f"failed to materialize vector index: {e}")
+            return {}
+
+        # 等待 MATERIALIZE INDEX mutation 完成
+        # 通过检查 system.mutations 表来跟踪 mutation 状态
+        check_mutation_sql = (
+            f"SELECT mutation_id, command, is_done, latest_fail_reason "
+            f"FROM system.mutations "
+            f"WHERE database = 'default' AND table = '{cls.table_name}' AND is_done = 0 "
+            f"ORDER BY create_time DESC LIMIT 1"
+        )
         last_log = 0.0
         index_wait_begin = time.perf_counter()
         while True:
             time.sleep(5)
             try:
-                rows = cls.query(check_index_status)
-                if rows:
-                    current_status = str(rows[0][2]) if len(rows[0]) > 2 else "unknown"
-                else:
-                    current_status = "not found"
-                elapsed = time.perf_counter() - index_wait_begin
-                if current_status != last_status or (elapsed - last_log) >= 60.0:
-                    status("vector index", current_status, detail=f"elapsed {elapsed:.0f}s")
-                    last_status = current_status
-                    last_log = elapsed
-                # ClickHouse 索引状态可能是 "Built" 或其他表示完成的状态
-                if current_status in ("Built", "COMPLETE", "done"):
+                rows = cls.query(check_mutation_sql)
+                if not rows:
+                    # 没有未完成的 mutation，说明构建完成
+                    elapsed = time.perf_counter() - index_wait_begin
+                    step(f"vector index build completed in {elapsed:.1f}s")
                     break
+                else:
+                    mutation_id = rows[0][0]
+                    command = rows[0][1]
+                    is_done = rows[0][2]
+                    fail_reason = rows[0][3] if len(rows[0]) > 3 else ""
+                    elapsed = time.perf_counter() - index_wait_begin
+                    if fail_reason:
+                        warn(f"vector index build failed: {fail_reason}")
+                        break
+                    if (elapsed - last_log) >= 30.0:
+                        step(f"vector index building: mutation_id={mutation_id} "
+                             f"is_done={is_done} elapsed={elapsed:.0f}s")
+                        last_log = elapsed
             except Exception as e:
-                step(f"vector index status check failed: {e}")
+                step(f"mutation status check failed: {e}")
                 time.sleep(3)
                 continue
         vector_index_build_time = time.perf_counter() - vector_index_begin_time

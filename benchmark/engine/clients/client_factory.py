@@ -124,8 +124,10 @@ class ClientFactory(ABC):
             index_type_str = str(index_type_raw or "").strip()
             index_type = index_type_str.upper()
 
-            # ClickHouse 支持的索引类型：ANNOY, USEARCH, FLAT
-            supported_index_types = ["ANNOY", "USEARCH", "FLAT"]
+            # ClickHouse 26.6.1.1 支持的索引类型
+            # HNSWFLAT, HNSW, VECTOR_SIMILARITY 是有效的（都会映射到 vector_similarity）
+            # ANNOY, USEARCH, FLAT 也是有效的
+            supported_index_types = ["HNSWFLAT", "HNSW", "VECTOR_SIMILARITY", "ANNOY", "USEARCH", "FLAT"]
             if index_type and index_type not in supported_index_types:
                 raise RuntimeError(f"ClickHouse only supports {supported_index_types} index_type, got: {index_type}")
 
@@ -246,9 +248,18 @@ class ClientFactory(ABC):
         meta = {
             "dataset": dataset_name,
         }
-
+        # print(experiment)
+        # print(dataset_config)
         experiment_name = experiment.get("name") or f"{experiment.get('engine', 'myscale')}-{dataset_name}"
         engine_type = experiment.get("engine", "myscale")
+
+        # 将数据集的 vector_size 注入到 experiment 的 upload_params 中
+        # 这样 ClickHouse 构建向量索引时可以获取向量维度
+        vector_size = dataset_config.get("vector_size", 0)
+        if vector_size:
+            upload_params = experiment.get("upload_params", {}) or {}
+            upload_params["_vector_size"] = vector_size
+            experiment["upload_params"] = upload_params
 
         return BaseClient(
             name=experiment_name,

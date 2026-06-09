@@ -10,6 +10,7 @@ from engine.clients.client_factory import ClientFactory
 def run(
     engines: str = "*",
     datasets: str = "*",
+    engine_type: str | None = None,
     host: str | None = "127.0.0.1",
     port: int | None = 9000,
     skip_upload: bool = False,
@@ -40,6 +41,15 @@ def run(
         for name, config in all_engines.items()
         if fnmatch.fnmatch(name, engines)
     }
+
+    # # 如果指定了 engine_type，进一步过滤引擎
+    # if engine_type:
+    #     engine_type_lower = engine_type.lower()
+    #     selected_engines = {
+    #         name: config
+    #         for name, config in selected_engines.items()
+    #         if config.get("engine", "").lower() == engine_type_lower
+    #     }
     selected_datasets = {
         name: config
         for name, config in all_datasets.items()
@@ -138,6 +148,7 @@ def run(
         engine_config["upload_params"] = upload_params
         effective_host = engine_config["connection_params"]["host"]
         effective_port = engine_config["connection_params"]["port"]
+        engine_config["engine"] = engine_type
         header(f"EXPERIMENT: {engine_name}")
         client = ClientFactory(effective_host).build_client(engine_config, dataset_name, dataset_config)
         dataset = Dataset(dataset_config)
@@ -161,6 +172,7 @@ if __name__ == "__main__":
         default="*",
         help="dataset name (datasets/datasets.json 'name' field); single argument; supports glob to match multiple; selects all configs targeting the dataset"
     )
+    parser.add_argument("--engine-type", default=None, help="filter by engine type: 'clickhouse', 'myscale', 'pgvector' (default: None, no filter)")
     parser.add_argument("--host", default="127.0.0.1", help="server IP (default: 127.0.0.1)")
     parser.add_argument("--port", type=int, default=9000, help="server port (default: 9000)")
     parser.add_argument("--skip-upload", action="store_true", help="skip data upload and index build stages")
@@ -174,6 +186,7 @@ if __name__ == "__main__":
     run(
         engines=args.engines,
         datasets=args.datasets,
+        engine_type=args.engine_type,
         host=args.host,
         port=args.port,
         skip_upload=args.skip_upload,
