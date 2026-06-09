@@ -1,0 +1,17 @@
+[
+  {
+    "name": "myscale-mstg-laion-768-1m-ip",
+    "dataset": "laion-768-1m-ip",
+    "upload_params": {
+      "index_type": "MSTG"
+    },
+    "search_params": {
+      "parallel": 16,
+      "top": 10,
+      "test_duration": 20,
+      "params": {
+        "alpha": [1, 2]
+      }
+    }
+  }
+]

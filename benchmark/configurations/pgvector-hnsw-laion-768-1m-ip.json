@@ -1,0 +1,122 @@
+[
+  {
+    "name": "pgvector-deep-image-96-angular",
+    "engine": "pgvector",
+    "dataset": "deep-image-96-angular",
+    "upload_params": {
+      "index_type": "hnsw",
+      "index_params": {
+        "m": 8,
+        "ef_construction": 32
+      },
+      "parallel": 16,
+      "batch_size": 256,
+      "use_cache": [0, 1],
+      "search_number": 10
+    },
+    "search_params": {
+      "parallel": 16,
+      "top": 10,
+      "test_duration": 20,
+      "params": {
+        "ef_s": [100]
+      }
+    }
+  },
+  {
+    "name": "pgvector-sift-128-euclidean",
+    "engine": "pgvector",
+    "dataset": "sift-128-euclidean",
+    "upload_params": {
+      "index_type": "hnsw",
+      "index_params": {
+        "m": 8,
+        "ef_construction": 32
+      },
+      "parallel": 16,
+      "batch_size": 256,
+      "use_cache": [0, 1],
+      "search_number": 10
+    },
+    "search_params": {
+      "parallel": 16,
+      "top": 10,
+      "test_duration": 20,
+      "params": {
+        "ef_s": [100]
+      }
+    }
+  },
+  {
+    "name": "pgvector-hnsw-laion-768-1m-ip",
+    "engine": "pgvector",
+    "dataset": "laion-768-1m-ip",
+    "upload_params": {
+      "index_type": "hnsw",
+      "index_params": {
+        "m": 32,
+        "ef_construction": 200
+      },
+      "parallel": 16,
+      "batch_size": 256,
+      "use_cache": [0, 1],
+      "search_number": 10
+    },
+    "search_params": {
+      "parallel": 16,
+      "top": 10,
+      "test_duration": 20,
+      "params": {
+        "ef_s": [100]
+      }
+    }
+  },
+  {
+    "name": "pgvector-hnsw-gist-960-euclidean-l2",
+    "engine": "pgvector",
+    "dataset": "gist-960-euclidean-l2",
+    "upload_params": {
+      "index_type": "hnsw",
+      "index_params": {
+        "m": 8,
+        "ef_construction": 32
+      },
+      "parallel": 16,
+      "batch_size": 256,
+      "use_cache": [0, 1],
+      "search_number": 10
+    },
+    "search_params": {
+      "parallel": 16,
+      "top": 10,
+      "test_duration": 10,
+      "params": {
+        "ef_s": [100]
+      }
+    }
+  },
+  {
+    "name": "pgvector-dbpedia-openai-1000k-angular",
+    "engine": "pgvector",
+    "dataset": "dbpedia-openai-1000k-angular",
+    "upload_params": {
+      "index_type": "hnsw",
+      "index_params": {
+        "m": 8,
+        "ef_construction": 32
+      },
+      "parallel": 16,
+      "batch_size": 256,
+      "use_cache": [0, 1],
+      "search_number": 10
+    },
+    "search_params": {
+      "parallel": 16,
+      "top": 10,
+      "test_duration": 20,
+      "params": {
+        "ef_s": [100]
+      }
+    }
+  }
+]

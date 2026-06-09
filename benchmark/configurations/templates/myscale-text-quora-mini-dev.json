@@ -1,0 +1,21 @@
+[
+  {
+    "name": "myscale-text-quora-mini-dev",
+    "dataset": "quora-mini-text-dev",
+    "upload_params": {
+      "fts_idx_cols": ["body"],
+      "fts_idx_params": {
+        "body": { "tokenizer": { "type": "stem", "stop_word_filters": ["english"] } }
+      }
+    },
+    "search_params": {
+      "parallel": 16,
+      "top": 10,
+      "test_duration": 20,
+      "params": {
+        "enable_nlq": "true",
+        "operator": "OR"
+      }
+    }
+  }
+]

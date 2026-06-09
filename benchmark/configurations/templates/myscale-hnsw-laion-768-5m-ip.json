@@ -1,0 +1,21 @@
+[
+  {
+    "name": "myscale-hnsw-laion-768-5m-ip",
+    "dataset": "laion-768-5m-ip",
+    "upload_params": {
+      "index_params": {
+        "ef_c": 200,
+        "m": 32
+      },
+      "index_type": "HNSWFLAT"
+    },
+    "search_params": {
+      "parallel": 16,
+      "top": 10,
+      "test_duration": 20,
+      "params": {
+        "ef_s": [100, 200]
+      }
+    }
+  }
+]

@@ -1,0 +1,181 @@
+[
+  {
+    "name": "myscale-deep-image-96-angular",
+    "dataset": "deep-image-96-angular",
+    "upload_params": {
+      "index_params": {
+        "ef_c": 200,
+        "m": 32
+      },
+      "optimize": true,
+      "index_type": "HNSWFLAT",
+      "use_query_plan_cache": [0, 1, 2, 3],
+      "query_plan_cache_enable_CAST": [0, 1],
+      "query_plan_cache_only_vector": [0],
+      "query_plan_cache_use_number": [0, 1],
+      "query_parameterizer_max_threads": [16, 32, 48, 64, 80, 96],
+      "search_number": 10
+    }, 
+    "search_params": {
+      "parallel": 16,
+      "top": 10,
+      "test_duration": 20,
+      "params": {
+        "ef_s": [100]
+      }
+    }
+  },
+  {
+    "name": "myscale-sift-128-euclidean",
+    "dataset": "sift-128-euclidean",
+    "upload_params": {
+      "index_params": {
+        "ef_c": 200,
+        "m": 32
+      },
+      "optimize": true,
+      "index_type": "HNSWFLAT",
+      "use_query_plan_cache": [0, 1, 2, 3],
+      "query_plan_cache_enable_CAST": [0, 1],
+      "query_plan_cache_only_vector": [0],
+      "query_plan_cache_use_number": [0, 1],
+      "query_parameterizer_max_threads": [1, 2, 4, 6, 8, 10, 12, 14, 16],
+      "search_number": 10
+    }, 
+    "search_params": {
+      "parallel": 16,
+      "top": 10,
+      "test_duration": 20,
+      "params": {
+        "ef_s": [100]
+      }
+    }
+  },
+  {
+    "name": "myscale-hnsw-laion-768-1m-ip",
+    "dataset": "laion-768-1m-ip",
+    "upload_params": {
+      "index_params": {
+        "ef_c": 200,
+        "m": 32
+      },
+      "optimize": true,
+      "index_type": "HNSWFLAT",
+      "use_query_plan_cache": [0, 1, 2, 3],
+      "query_plan_cache_enable_CAST": [0, 1],
+      "query_plan_cache_only_vector": [0],
+      "query_plan_cache_use_number": [0, 1],
+      "query_parameterizer_max_threads": [1, 2, 4, 6, 8, 10, 12, 14, 16],
+      "search_number": 10
+    }, 
+    "search_params": {
+      "parallel": 16,
+      "top": 10,
+      "test_duration": 20,
+      "params": {
+        "ef_s": [100]
+      }
+    }
+  },
+  {
+    "name": "myscale-hnsw-gist-960-euclidean-l2",
+    "dataset": "gist-960-euclidean-l2",
+    "upload_params": {
+      "index_params": {
+        "ef_c": 200,
+        "m": 32
+      },
+      "optimize": true,
+      "index_type": "HNSWFLAT",
+      "use_query_plan_cache": [0, 1, 2, 3],
+      "query_plan_cache_enable_CAST": [0, 1],
+      "query_plan_cache_only_vector": [0],
+      "query_plan_cache_use_number": [0, 1],
+      "query_parameterizer_max_threads": [1, 2, 4, 6, 8, 10, 12, 14, 16],
+      "search_number": 10
+    },
+    "search_params": {
+      "parallel": 16,
+      "top": 10,
+      "test_duration": 10,
+      "params": {
+        "ef_s": [100]
+      }
+    }
+  },
+  {
+    "name": "myscale-dbpedia-openai-1000k-angular",
+    "dataset": "dbpedia-openai-1000k-angular",
+    "upload_params": {
+      "index_params": {
+        "ef_c": 200,
+        "m": 32
+      },
+      "optimize": true,
+      "index_type": "HNSWFLAT",
+      "use_query_plan_cache": [0, 1, 2, 3],
+      "query_plan_cache_enable_CAST": [0, 1],
+      "query_plan_cache_only_vector": [0],
+      "query_plan_cache_use_number": [0, 1],
+      "query_parameterizer_max_threads": [1, 2, 4, 6, 8, 10, 12, 14, 16],
+      "search_number": 10
+    },
+    "search_params": {
+      "parallel": 16,
+      "top": 10,
+      "test_duration": 20,
+      "params": {
+        "ef_s": [100]
+      }
+    }
+  },
+  {
+    "name": "myscale-text-quora-mini-dev",
+    "dataset": "quora-mini-text-dev",
+    "upload_params": {
+      "fts_idx_cols": ["body"],
+      "fts_idx_params": {
+        "body": { "tokenizer": { "type": "stem", "stop_word_filters": ["english"] } }
+      },
+      "use_query_plan_cache": [0, 1, 2, 3],
+      "query_plan_cache_enable_CAST": [0, 1],
+      "query_plan_cache_only_vector": [0, 1],
+      "query_plan_cache_use_number": [0, 1],
+      "search_number": 1
+    },
+    "search_params": {
+      "parallel": 16,
+      "top": 10,
+      "test_duration": 20,
+      "params": {
+        "enable_nlq": "true",
+        "operator": "OR"
+      }
+    }
+  },
+  {
+    "name": "myscale-mstg-hybrid-quora-mini-dev",
+    "dataset": "quora-mini-hybrid-dev",
+    "upload_params": {
+      "index_type": "HNSWFLAT",
+      "optimize": true,
+      "fts_idx_cols": ["body"],
+      "fts_idx_params": {
+        "body": { "tokenizer": { "type": "stem", "stop_word_filters": ["english"] } }
+      },
+      "use_query_plan_cache": [0, 1, 2, 3],
+      "query_plan_cache_enable_CAST": [0, 1],
+      "query_plan_cache_only_vector": [0, 1],
+      "query_plan_cache_use_number": [0, 1],
+      "search_number": 1
+    },
+    "search_params": {
+      "parallel": 16,
+      "top": 10,
+      "test_duration": 20,
+      "params": {
+        "ef_s": [100]
+      }
+    }
+  }
+]

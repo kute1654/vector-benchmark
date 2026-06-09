@@ -1,0 +1,44 @@
+[
+  {
+    "name": "myscale-hnsw-laion-768-1m-ip",
+    "dataset": "laion-768-1m-ip",
+    "upload_params": {
+      "index_params": {
+        "ef_c": 200,
+        "m": 32
+      },
+      "optimize": true,
+      "index_type": "HNSWFLAT",
+      "use_query_cache": [0, 1]
+    },
+    "search_params": {
+      "parallel": 16,
+      "top": 10,
+      "test_duration": 20,
+      "params": {
+        "ef_s": [100]
+      }
+    }
+  },
+  {
+    "name": "myscale-hnsw-gist-960-euclidean-l2",
+    "dataset": "gist-960-euclidean-l2",
+    "upload_params": {
+      "index_params": {
+        "ef_c": 200,
+        "m": 32
+      },
+      "optimize": true,
+      "index_type": "HNSWFLAT",
+      "use_query_cache": [0, 1]
+    },
+    "search_params": {
+      "parallel": 16,
+      "top": 10,
+      "test_duration": 20,
+      "params": {
+        "ef_s": [100]
+      }
+    }
+  }
+]

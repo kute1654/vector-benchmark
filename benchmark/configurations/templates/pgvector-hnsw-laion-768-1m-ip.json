@@ -1,0 +1,23 @@
+[
+  {
+    "name": "pgvector-hnsw-laion-768-1m-ip",
+    "engine": "pgvector",
+    "dataset": "laion-768-1m-ip",
+    "upload_params": {
+      "index_type": "hnsw",
+      "index_params": {
+        "m": 8,
+        "ef_construction": 32
+      },
+      "parallel": 16,
+      "batch_size": 256,
+      "use_cache": [0, 1]
+    },
+    "search_params": {
+      "parallel": 16,
+      "top": 10,
+      "test_duration": 20,
+      "params": {}
+    }
+  }
+]

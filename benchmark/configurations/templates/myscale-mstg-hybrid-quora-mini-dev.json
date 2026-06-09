@@ -1,0 +1,25 @@
+[
+  {
+    "name": "myscale-mstg-hybrid-quora-mini-dev",
+    "dataset": "quora-mini-hybrid-dev",
+    "upload_params": {
+      "index_type": "MSTG",
+      "mstg_disk_mode": 0,
+      "fts_idx_cols": ["body"],
+      "fts_idx_params": {
+        "body": { "tokenizer": { "type": "stem", "stop_word_filters": ["english"] } }
+      }
+    },
+    "search_params": {
+      "parallel": 16,
+      "top": 10,
+      "test_duration": 20,
+      "params": {
+        "dense_alpha": [1],
+        "fusion_type": ["RRF"],
+        "fusion_weight": [0.5],
+        "fusion_k": [60]
+      }
+    }
+  }
+]

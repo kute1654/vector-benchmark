@@ -1,0 +1,88 @@
+[
+  {
+    "name": "deep-image-96-angular",
+    "result_group": "vector_search",
+    "vector_size": 96,
+    "vector_count": 10000000,
+    "queries_pool_size": 1000,
+    "distance": "cosine",
+    "type": "h5",
+    "path": "downloads/deep-image-96-angular.hdf5",
+    "link": ""
+  },
+  {
+    "name": "sift-128-euclidean",
+    "result_group": "vector_search",
+    "vector_size": 128,
+    "vector_count": 10000000,
+    "queries_pool_size": 1000,
+    "distance": "l2",
+    "type": "h5",
+    "path": "downloads/sift-128-euclidean.hdf5",
+    "link": ""
+  },
+  {
+    "name": "laion-768-1m-ip",
+    "result_group": "vector_search",
+    "vector_size": 768,
+    "vector_count": 1000000,
+    "queries_pool_size": 1000,
+    "distance": "dot",
+    "type": "h5",
+    "path": "downloads/laion-1m-test-ip.hdf5",
+    "link": ""
+  },
+  {
+    "name": "gist-960-euclidean-l2",
+    "result_group": "vector_search",
+    "vector_size": 960,
+    "vector_count": 1000000,
+    "queries_pool_size": 1000,
+    "distance": "l2",
+    "type": "h5",
+    "path": "downloads/gist-960-euclidean.hdf5",
+    "link": ""
+  },
+  {
+    "name": "dbpedia-openai-1000k-angular",
+    "result_group": "vector_search",
+    "vector_size": 1536,
+    "vector_count": 1000000,
+    "queries_pool_size": 1000,
+    "distance": "cosine",
+    "type": "h5",
+    "path": "downloads/dbpedia-openai-1000k-angular.hdf5",
+    "link": ""
+  },
+  {
+    "name": "quora-mini-text-dev",
+    "result_group": "text_search",
+    "corpus_count": 1000,
+    "queries_pool_size": 100,
+    "type": "gz_tsv",
+    "path": "downloads/quora",
+    "corpus_file": "corpus.jsonl.gz",
+    "queries_file": "queries.jsonl.gz",
+    "qrels_file": "dev.tsv",
+    "query_cols": ["body"],
+    "schema": { "body": "string" }
+  },
+  {
+    "name": "quora-mini-hybrid-dev",
+    "result_group": "hybrid_search",
+    "vector_size": 384,
+    "corpus_count": 1000,
+    "queries_pool_size": 100,
+    "distance": "cosine",
+    "type": "gz_tsv",
+    "path": "downloads/quora",
+    "corpus_file": "corpus.jsonl.gz",
+    "queries_file": "queries.jsonl.gz",
+    "qrels_file": "dev.tsv",
+    "corpus_embedding_file": "corpus_vectors.jsonl.gz",
+    "queries_embedding_file": "queries_vectors.jsonl.gz",
+    "query_cols": ["body"],
+    "schema": { "body": "string" }
+  }
+
+]

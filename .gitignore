@@ -1,0 +1,17 @@
+.idea/
+.vscode/
+.DS_Store
+__pycache__/
+*.pyc
+venv/
+.venv/
+
+benchmark/results/
+dist_nuitka/
+dist/
+dist-arm/
+.cache/
+.ccache/
+scripts/
+data/
+.python-version
