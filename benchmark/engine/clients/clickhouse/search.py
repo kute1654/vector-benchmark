@@ -212,25 +212,47 @@ class ClickHouseSearcher(BaseSearcher):
         cls.host = host
         cls.distance = DISTANCE_MAPPING[distance]
         cls.search_params = search_params
-        # cls.apply_query_plan_cache_settings(search_params, protocol)
+        cls.apply_query_plan_cache_settings(search_params, protocol)
 
     @classmethod
     def apply_query_plan_cache_settings(cls, search_params: dict, protocol: str):
-        # ClickHouse 26.6.1.1 没有 MyScale 的 query plan cache 设置
-        # 这些设置是 MyScale 特有的：use_query_plan_cache, query_plan_cache_enable_CAST 等
-        # ClickHouse 使用 use_query_cache（查询缓存），但功能不同
-        # 因此跳过这些设置，只记录日志
-        cache_mode = _to_int((search_params or {}).get("use_query_plan_cache", 0), 0)
-        CAST_mode = _to_int((search_params or {}).get("query_plan_cache_enable_CAST", 0), 0)
-        only_vector = _to_int((search_params or {}).get("query_plan_cache_only_vector", 0), 0)
-        use_number = _to_int((search_params or {}).get("query_plan_cache_use_number", 0), 0)
-
-        if cache_mode != 0 or CAST_mode != 0 or only_vector != 0 or use_number != 0:
-            warn(f"ClickHouse does not support MyScale query plan cache settings, "
-                 f"skipping: use_query_plan_cache={cache_mode}, query_plan_cache_enable_CAST={CAST_mode}, "
-                 f"query_plan_cache_only_vector={only_vector}, query_plan_cache_use_number={use_number}")
-        else:
-            step(f"query plan cache settings: all disabled (ClickHouse does not support these MyScale settings)")
+        ef_s = search_params.get("ef_s", None)
+        if ef_s is not None:
+            set_ef_s_sql = f"SET hnsw_candidate_list_size_for_search = {ef_s}"
+        cache_mode = _to_int((search_params or {}).get("vector_query_plan_cache", 0), 0)
+        CAST_mode = _to_int((search_params or {}).get("vector_use_cast", 0), 0)
+        only_vector = _to_int((search_params or {}).get("vector_query_plan_cache_only_vector", 0), 0)
+        clear_cache_sql = f"SYSTEM DROP VECTOR QUERY PLAN CACHE"
+        query_cache = 0
+        if cache_mode > 1:
+            query_cache = 1
+            cache_mode = cache_mode - 2
+        if cache_mode == 0:
+            only_vector = 0
+        set_cache_sql = f"SET vector_query_plan_cache = {cache_mode}"
+        set_cast_sql = f"SET vector_use_cast = {CAST_mode}"
+        set_only_vector_sql = f"SET vector_query_plan_cache_only_vector = {only_vector}"
+        set_query_cache_sql = f"SET use_query_cache = {query_cache}"
+        try:
+            client = cls.get_client()
+            if protocol == "tcp":
+                if ef_s is not None:
+                    client.execute(set_ef_s_sql)
+                client.execute(clear_cache_sql)
+                client.execute(set_query_cache_sql)
+                client.execute(set_cache_sql)
+                client.execute(set_cast_sql)
+                client.execute(set_only_vector_sql)
+            else:
+                if ef_s is not None:
+                    client.command(set_ef_s_sql)
+                client.command(clear_cache_sql)
+                client.command(set_query_cache_sql)
+                client.command(set_cache_sql)
+                client.command(set_cast_sql)
+                client.command(set_only_vector_sql)
+        except Exception as e:
+            warn(f"failed to set query plan cache settings: {e}")
 
     @classmethod
     def get_client(cls):
@@ -259,16 +281,6 @@ class ClickHouseSearcher(BaseSearcher):
             search_str += f" order by dis DESC limit {top}"
         else:
             search_str += f" order by dis ASC limit {top}"
-
-        # 添加 ClickHouse 特定的搜索参数
-        # ClickHouse 26.6.1.1 使用 hnsw_candidate_list_size_for_search 设置（相当于 HNSW 的 ef_search）
-        settings_parts = []
-        ef_s = search_params_dict.get("ef_s", None)
-        if ef_s is not None:
-            settings_parts.append(f"hnsw_candidate_list_size_for_search = {ef_s}")
-
-        if settings_parts:
-            search_str += " SETTINGS " + ", ".join(settings_parts)
 
         res_list = []
         try:

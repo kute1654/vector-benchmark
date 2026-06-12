@@ -27,7 +27,7 @@
     "vector_size": 768,
     "vector_count": 1000000,
     "queries_pool_size": 1000,
-    "distance": "dot",
+    "distance": "cosine",
     "type": "h5",
     "path": "downloads/laion-1m-test-ip.hdf5",
     "link": ""

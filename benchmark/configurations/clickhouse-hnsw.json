@@ -9,7 +9,10 @@
       },
       "optimize": true,
       "index_type": "HNSWFLAT",
-      "search_number": 1
+      "vector_query_plan_cache": [0, 1,2,3],
+      "vector_use_cast": [0,1],
+      "vector_query_plan_cache_only_vector": [0,1],
+      "search_number": 10
     }, 
     "search_params": {
       "parallel": 16,
@@ -30,6 +33,9 @@
       },
       "optimize": true,
       "index_type": "HNSWFLAT",
+      "vector_query_plan_cache": [0, 1,2,3],
+      "vector_use_cast": [0,1],
+      "vector_query_plan_cache_only_vector": [0,1],
       "search_number": 10
     }, 
     "search_params": {
@@ -51,6 +57,9 @@
       },
       "optimize": true,
       "index_type": "HNSWFLAT",
+      "vector_query_plan_cache": [0, 1,2,3],
+      "vector_use_cast": [0,1],
+      "vector_query_plan_cache_only_vector": [0,1],
       "search_number": 10
     }, 
     "search_params": {
@@ -72,6 +81,9 @@
       },
       "optimize": true,
       "index_type": "HNSWFLAT",
+      "vector_query_plan_cache": [0, 1,2,3],
+      "vector_use_cast": [0,1],
+      "vector_query_plan_cache_only_vector": [0,1],
       "search_number": 10
     },
     "search_params": {
@@ -93,6 +105,9 @@
       },
       "optimize": true,
       "index_type": "HNSWFLAT",
+      "vector_query_plan_cache": [0, 1,2,3],
+      "vector_use_cast": [0,1],
+      "vector_query_plan_cache_only_vector": [0,1],
       "search_number": 10
     },
     "search_params": {
@@ -112,7 +127,10 @@
       "fts_idx_params": {
         "body": { "tokenizer": { "type": "stem", "stop_word_filters": ["english"] } }
       },
-      "search_number": 1
+      "vector_query_plan_cache": [0, 1,2,3],
+      "vector_use_cast": [0,1],
+      "vector_query_plan_cache_only_vector": [0,1],
+      "search_number": 10
     },
     "search_params": {
       "parallel": 16,
@@ -134,7 +152,10 @@
       "fts_idx_params": {
         "body": { "tokenizer": { "type": "stem", "stop_word_filters": ["english"] } }
       },
-      "search_number": 1
+      "vector_query_plan_cache": [0, 1,2,3],
+      "vector_use_cast": [0,1],
+      "vector_query_plan_cache_only_vector": [0,1],
+      "search_number": 10
     },
     "search_params": {
       "parallel": 16,

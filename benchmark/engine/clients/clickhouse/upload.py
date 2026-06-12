@@ -137,11 +137,11 @@ class ClickHouseUploader(BaseUploader):
         vector_size = cls.upload_params.get("_vector_size", 0)
 
         # 获取 HNSW 参数
-        m = index_params.get("m", 16)  # hnsw_max_connections_per_layer，默认 16
+        m = index_params.get("m", 32)  # hnsw_max_connections_per_layer，默认 32
         ef_c = index_params.get("ef_c", 200)  # hnsw_candidate_list_size_for_construction，默认 200
 
-        # 量化类型（默认 bf16）
-        quantization = index_params.get("quantization", "bf16")
+        # 量化类型（默认 f32）
+        quantization = index_params.get("quantization", "f32")
 
         if vector_size > 0:
             # 有向量维度信息，使用完整参数
