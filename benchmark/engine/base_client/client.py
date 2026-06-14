@@ -280,7 +280,7 @@ class BaseClient:
                 'parallel': int(parallel),
                 'test_duration': int(test_duration),
                 'ef_s': int(ef_s),
-                'qps': float(qps),
+                'rps': float(qps),
                 'recall': search_results.get("recall", 0),
                 'mean_precisions': search_results.get("mean_precisions", 0),
                 'mrr': search_results.get("mrr", 0),
@@ -295,7 +295,7 @@ class BaseClient:
                     'use_query_plan_cache', 'query_plan_cache_enable_CAST', 
                     'query_plan_cache_only_vector', 'query_plan_cache_use_number', 
                     'query_parameterizer_max_threads', 'parallel', 'test_duration', 'ef_s',
-                    'qps', 'recall', 'mean_precisions', 'mrr'
+                    'rps', 'recall', 'mean_precisions', 'mrr'
                 ]
                 
                 writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
@@ -443,8 +443,8 @@ class BaseClient:
                                 # Calculate trimmed mean (remove max and min, then average)
                                 if search_number > 2 and not recall_only:
                                     # For QPS values, we want to remove outliers
-                                    if "qps" in all_search_stats[0]:
-                                        qps_values = [stats["qps"] for stats in all_search_stats]
+                                    if "rps" in all_search_stats[0]:
+                                        qps_values = [stats["rps"] for stats in all_search_stats]
                                         qps_values_sorted = sorted(qps_values)
                                         # Remove min and max
                                         trimmed_qps = qps_values_sorted[1:-1]
@@ -452,7 +452,7 @@ class BaseClient:
                                         
                                         # Use the first search stats as base and update QPS with trimmed mean
                                         averaged_stats = dict(all_search_stats[0])
-                                        averaged_stats["qps"] = avg_qps
+                                        averaged_stats["rps"] = avg_qps
                                         # Store original values for reference
                                         averaged_stats["original_qps_values"] = qps_values
                                         averaged_stats["trimmed_mean_qps"] = avg_qps
@@ -460,13 +460,13 @@ class BaseClient:
                                         averaged_stats = all_search_stats[0]  # Fallback if no QPS
                                 elif not recall_only:
                                     # If search_number <= 2, just use the average of all results
-                                    if "qps" in all_search_stats[0]:
-                                        qps_values = [stats["qps"] for stats in all_search_stats]
+                                    if "rps" in all_search_stats[0]:
+                                        qps_values = [stats["rps"] for stats in all_search_stats]
                                         avg_qps = sum(qps_values) / len(qps_values)
                                         averaged_stats = dict(all_search_stats[0])
-                                        averaged_stats["qps"] = avg_qps
-                                        averaged_stats["original_qps_values"] = qps_values
-                                        averaged_stats["average_qps"] = avg_qps
+                                        averaged_stats["rps"] = avg_qps
+                                        averaged_stats["original_rps_values"] = qps_values
+                                        averaged_stats["average_rps"] = avg_qps
                                     else:
                                         averaged_stats = all_search_stats[0]
                                 else:
@@ -630,8 +630,8 @@ class BaseClient:
                         # Calculate trimmed mean (remove max and min, then average)
                         if search_number > 2 and not recall_only:
                             # For QPS values, we want to remove outliers
-                            if "qps" in all_search_stats[0]:
-                                qps_values = [stats["qps"] for stats in all_search_stats]
+                            if "rps" in all_search_stats[0]:
+                                qps_values = [stats["rps"] for stats in all_search_stats]
                                 qps_values_sorted = sorted(qps_values)
                                 # Remove min and max
                                 trimmed_qps = qps_values_sorted[1:-1]
@@ -639,21 +639,21 @@ class BaseClient:
 
                                 # Use the first search stats as base and update QPS with trimmed mean
                                 averaged_stats = dict(all_search_stats[0])
-                                averaged_stats["qps"] = avg_qps
+                                averaged_stats["rps"] = avg_qps
                                 # Store original values for reference
-                                averaged_stats["original_qps_values"] = qps_values
-                                averaged_stats["trimmed_mean_qps"] = avg_qps
+                                averaged_stats["original_rps_values"] = qps_values
+                                averaged_stats["trimmed_mean_rps"] = avg_qps
                             else:
                                 averaged_stats = all_search_stats[0]  # Fallback if no QPS
                         elif not recall_only:
                             # If search_number <= 2, just use the average of all results
-                            if "qps" in all_search_stats[0]:
-                                qps_values = [stats["qps"] for stats in all_search_stats]
+                            if "rps" in all_search_stats[0]:
+                                qps_values = [stats["rps"] for stats in all_search_stats]
                                 avg_qps = sum(qps_values) / len(qps_values)
                                 averaged_stats = dict(all_search_stats[0])
-                                averaged_stats["qps"] = avg_qps
-                                averaged_stats["original_qps_values"] = qps_values
-                                averaged_stats["average_qps"] = avg_qps
+                                averaged_stats["rps"] = avg_qps
+                                averaged_stats["original_rps_values"] = qps_values
+                                averaged_stats["average_rps"] = avg_qps
                             else:
                                 averaged_stats = all_search_stats[0]
                         else:
@@ -729,7 +729,7 @@ class BaseClient:
                 'parallel': int(parallel),
                 'test_duration': int(test_duration),
                 'ef_s': int(ef_s),
-                'qps': float(qps),
+                'rps': float(qps),
                 'recall': search_results.get("recall", 0),
                 'mean_precisions': search_results.get("mean_precisions", 0),
                 'mrr': search_results.get("mrr", 0),
@@ -746,7 +746,7 @@ class BaseClient:
                     'timestamp', 'experiment_name', 'dataset', 'vector_size', 'distance',
                     'vector_query_plan_cache', 'vector_use_cast', 'vector_query_plan_cache_only_vector',
                     'parallel', 'test_duration', 'ef_s',
-                    'qps', 'recall', 'mean_precisions', 'mrr', 'mean_time', 'p95_time', 'p99_time'
+                    'rps', 'recall', 'mean_precisions', 'mrr', 'mean_time', 'p95_time', 'p99_time'
                 ]
 
                 writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
