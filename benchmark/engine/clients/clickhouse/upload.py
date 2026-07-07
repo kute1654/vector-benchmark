@@ -140,8 +140,8 @@ class ClickHouseUploader(BaseUploader):
         m = index_params.get("m", 32)  # hnsw_max_connections_per_layer，默认 32
         ef_c = index_params.get("ef_c", 200)  # hnsw_candidate_list_size_for_construction，默认 200
 
-        # 量化类型（默认 f32）
-        quantization = index_params.get("quantization", "f32")
+        # 量化类型（默认 bf16)
+        quantization = index_params.get("quantization", "bf16")
 
         if vector_size > 0:
             # 有向量维度信息，使用完整参数
@@ -151,12 +151,32 @@ class ClickHouseUploader(BaseUploader):
             warn(f"vector_size not available, using simplified index args (3 parameters)")
             index_args = f"'hnsw', '{distance_func}'"
 
+        # 先合并所有小 parts 为 1 个 part，避免碎片化的向量索引影响查询性能
+        # 参考: vector_search_stress_tests_copy.py 的 optimize_table()
+        optimize_start = time.perf_counter()
+        step("Optimizing table to merge parts before building vector index...")
+        try:
+            cls.command(f"OPTIMIZE TABLE {cls.table_name} FINAL")
+            # 等待 OPTIMIZE 完成
+            while True:
+                rows = cls.query(
+                    f"SELECT COUNT(*) FROM system.merges WHERE table = '{cls.table_name}'"
+                )
+                if rows and rows[0][0] == 0:
+                    break
+                step("Waiting for OPTIMIZE TABLE to complete...")
+                time.sleep(5)
+            optimize_elapsed = time.perf_counter() - optimize_start
+            step(f"OPTIMIZE TABLE completed in {optimize_elapsed:.1f}s")
+        except Exception as e:
+            warn(f"OPTIMIZE TABLE failed (non-fatal): {e}")
+            
         # 创建向量索引定义
         # ClickHouse 26.6.1.1 使用 vector_similarity 索引类型
         # ADD INDEX 只是创建索引定义，不会立即构建索引数据
         index_create_str = (
             f"ALTER TABLE {cls.table_name} ADD INDEX vector_index "
-            f"vector TYPE vector_similarity({index_args}) GRANULARITY 1000"
+            f"vector TYPE vector_similarity({index_args})"
         )
         vector_index_begin_time = time.perf_counter()
         sql(index_create_str)

@@ -63,7 +63,7 @@
       "search_number": 10
     }, 
     "search_params": {
-      "parallel": 16,
+      "parallel": [1,2,4,8,16,32],
       "top": 10,
       "test_duration": 20,
       "params": {
