@@ -15,3 +15,4 @@ dist-arm/
 scripts/
 data/
 .python-version
+*.sql

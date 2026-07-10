@@ -57,15 +57,15 @@
       },
       "optimize": true,
       "index_type": "HNSWFLAT",
-      "vector_query_plan_cache": [0,1,2,3],
+      "vector_query_plan_cache": [0,1],
       "vector_use_cast": [0,1],
       "vector_query_plan_cache_only_vector": [0,1],
-      "search_number": 10
+      "search_number": 1
     }, 
     "search_params": {
-      "parallel": [1,2,4,8,16,32],
+      "parallel": [1],
       "top": 10,
-      "test_duration": 20,
+      "test_duration": 1,
       "params": {
         "ef_s": [100]
       }
