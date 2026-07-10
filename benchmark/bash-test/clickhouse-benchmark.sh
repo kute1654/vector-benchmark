@@ -16,16 +16,16 @@ PORT="9000"
 TIMELIMIT=30          # 每次测试持续秒数
 WARMUP_TIMELIMIT=10   # 预热持续秒数
 REPEAT=5              # 每种并发测试次数
-OUTPUT_CSV="clickhouse-benchmark-results.csv"
+OUTPUT_CSV="../results/clickhouse-benchmark-results.csv"
 SQL_DIR="sql-bench"
 GENERATE_SCRIPT="generate-sql-files.sh"
 
 # SQL 类型和行数
 SQL_TYPES=(normal cast)
-ROW_COUNTS=(1 10 100 1000)
+ROW_COUNTS=(1)
 
 # 并发数列表
-CONCURRENCIES=(1 2 4 8 16 32)
+CONCURRENCIES=(1)
 
 # ============ 配置参数（运行时由用户输入） ============
 # profile_name: 配置名称，用于 CSV 输出

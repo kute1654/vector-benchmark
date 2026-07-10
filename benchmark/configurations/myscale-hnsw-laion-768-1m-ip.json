@@ -9,17 +9,15 @@
       },
       "optimize": true,
       "index_type": "HNSWFLAT",
-      "use_query_plan_cache": [0, 1, 2, 3],
-      "query_plan_cache_enable_CAST": [0, 1],
-      "query_plan_cache_only_vector": [0],
-      "query_plan_cache_use_number": [0, 1],
-      "query_parameterizer_max_threads": [16, 32, 48, 64, 80, 96],
-      "search_number": 10
+      "enable_query_plan_cache": [0,1],
+      "enable_cast_vector": [0,1],
+      "query_plan_cache_only_vector": [0,1], 
+      "search_number": 5
     }, 
     "search_params": {
       "parallel": 16,
       "top": 10,
-      "test_duration": 20,
+      "test_duration": 10,
       "params": {
         "ef_s": [100]
       }
@@ -35,17 +33,15 @@
       },
       "optimize": true,
       "index_type": "HNSWFLAT",
-      "use_query_plan_cache": [0, 1, 2, 3],
-      "query_plan_cache_enable_CAST": [0, 1],
-      "query_plan_cache_only_vector": [0],
-      "query_plan_cache_use_number": [0, 1],
-      "query_parameterizer_max_threads": [1, 2, 4, 6, 8, 10, 12, 14, 16],
-      "search_number": 10
+      "enable_query_plan_cache": [0,1],
+      "enable_cast_vector": [0,1],
+      "query_plan_cache_only_vector": [0,1], 
+      "search_number": 5
     }, 
     "search_params": {
       "parallel": 16,
       "top": 10,
-      "test_duration": 20,
+      "test_duration": 10,
       "params": {
         "ef_s": [100]
       }
@@ -61,17 +57,15 @@
       },
       "optimize": true,
       "index_type": "HNSWFLAT",
-      "use_query_plan_cache": [0, 1, 2, 3],
-      "query_plan_cache_enable_CAST": [0, 1],
-      "query_plan_cache_only_vector": [0],
-      "query_plan_cache_use_number": [0, 1],
-      "query_parameterizer_max_threads": [1, 2, 4, 6, 8, 10, 12, 14, 16],
-      "search_number": 10
+      "enable_query_plan_cache": [0,1,2,3],
+      "enable_cast_vector": [0,1],
+      "query_plan_cache_only_vector": [0,1], 
+      "search_number": 1
     }, 
     "search_params": {
-      "parallel": 16,
+      "parallel": 1,
       "top": 10,
-      "test_duration": 20,
+      "test_duration": 1,
       "params": {
         "ef_s": [100]
       }
@@ -87,12 +81,10 @@
       },
       "optimize": true,
       "index_type": "HNSWFLAT",
-      "use_query_plan_cache": [0, 1, 2, 3],
-      "query_plan_cache_enable_CAST": [0, 1],
-      "query_plan_cache_only_vector": [0],
-      "query_plan_cache_use_number": [0, 1],
-      "query_parameterizer_max_threads": [1, 2, 4, 6, 8, 10, 12, 14, 16],
-      "search_number": 10
+      "enable_query_plan_cache": [0,1],
+      "enable_cast_vector": [0,1],
+      "query_plan_cache_only_vector": [0,1],
+      "search_number": 5
     },
     "search_params": {
       "parallel": 16,
@@ -113,17 +105,15 @@
       },
       "optimize": true,
       "index_type": "HNSWFLAT",
-      "use_query_plan_cache": [0, 1, 2, 3],
-      "query_plan_cache_enable_CAST": [0, 1],
-      "query_plan_cache_only_vector": [0],
-      "query_plan_cache_use_number": [0, 1],
-      "query_parameterizer_max_threads": [1, 2, 4, 6, 8, 10, 12, 14, 16],
-      "search_number": 10
+      "enable_query_plan_cache": [0,1],
+      "enable_cast_vector": [0,1],
+      "query_plan_cache_only_vector": [0,1], 
+      "search_number": 5
     },
     "search_params": {
       "parallel": 16,
       "top": 10,
-      "test_duration": 20,
+      "test_duration": 10,
       "params": {
         "ef_s": [100]
       }
@@ -137,10 +127,9 @@
       "fts_idx_params": {
         "body": { "tokenizer": { "type": "stem", "stop_word_filters": ["english"] } }
       },
-      "use_query_plan_cache": [0, 1, 2, 3],
-      "query_plan_cache_enable_CAST": [0, 1],
+      "enable_query_plan_cache": [0, 1, 2, 3],
+      "enable_cast_vector": [0, 1],
       "query_plan_cache_only_vector": [0, 1],
-      "query_plan_cache_use_number": [0, 1],
       "search_number": 1
     },
     "search_params": {
@@ -163,10 +152,9 @@
       "fts_idx_params": {
         "body": { "tokenizer": { "type": "stem", "stop_word_filters": ["english"] } }
       },
-      "use_query_plan_cache": [0, 1, 2, 3],
-      "query_plan_cache_enable_CAST": [0, 1],
+      "enable_query_plan_cache": [0, 1, 2, 3],
+      "enable_cast_vector": [0, 1],
       "query_plan_cache_only_vector": [0, 1],
-      "query_plan_cache_use_number": [0, 1],
       "search_number": 1
     },
     "search_params": {

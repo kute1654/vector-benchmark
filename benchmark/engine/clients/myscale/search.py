@@ -196,29 +196,47 @@ class MyScaleSearcher(BaseSearcher):
 
     @classmethod
     def apply_query_plan_cache_settings(cls, search_params: dict, protocol: str):
-        cache_mode = _to_int((search_params or {}).get("use_query_plan_cache", 0), 0)
-        CAST_mode = _to_int((search_params or {}).get("query_plan_cache_enable_CAST", 0), 0)
-        only_vector = _to_int((search_params or {}).get("query_plan_cache_only_vector", 0), 0)
-        use_number = _to_int((search_params or {}).get("query_plan_cache_use_number", 0), 0)
+        cache_mode = _to_int((search_params or {}).get("enable_query_plan_cache", 0), 0)
+        CAST_mode = _to_int((search_params or {}).get("enable_cast_vector", 0), 0)
+        query_cache = 0
+        if cache_mode > 1:
+            query_cache = 1
+            cache_mode = cache_mode - 2
         if cache_mode == 0:
             only_vector = 0
-            use_number = 0
-        set_cache_sql = f"SET use_query_plan_cache = {cache_mode}"
-        set_replace_sql = f"SET query_plan_cache_enable_CAST = {CAST_mode}"
+        else:
+            only_vector = _to_int((search_params or {}).get("query_plan_cache_only_vector", 0), 0)
+        set_cache_sql = f"SET enable_query_plan_cache = {cache_mode}"
+        set_replace_sql = f"SET enable_cast_vector = {CAST_mode}"
         set_only_vector_sql = f"SET query_plan_cache_only_vector = {only_vector}"
-        set_use_number_sql = f"SET query_plan_cache_use_number = {use_number}"
+        drop_query_cache_sql = "SYSTEM DROP QUERY CACHE"
+        drop_query_plan_cache_sql = "SYSTEM DROP QUERY PLAN CACHE"
+        set_query_cache_sql = f"SET use_query_cache = {query_cache}"
+        set_read_cache_sql = f"SET enable_reads_from_query_cache = {query_cache}"
+        set_write_cache_sql = f"SET enable_writes_to_query_cache = {query_cache}"
+        set_cache_min_query_sql = f"SET query_cache_min_query_runs = {query_cache}"
         try:
             client = cls.get_client()
             if protocol == "tcp":
+                client.execute(drop_query_cache_sql)
+                client.execute(drop_query_plan_cache_sql)
+                client.execute(set_query_cache_sql)
+                client.execute(set_read_cache_sql)
+                client.execute(set_write_cache_sql)
+                client.execute(set_cache_min_query_sql)
                 client.execute(set_cache_sql)
                 client.execute(set_replace_sql)
                 client.execute(set_only_vector_sql)
-                client.execute(set_use_number_sql)
             else:
+                client.command(drop_query_cache_sql)
+                client.command(drop_query_plan_cache_sql)
+                client.command(set_query_cache_sql)
+                client.command(set_read_cache_sql)
+                client.command(set_write_cache_sql)
+                client.command(set_cache_min_query_sql)
                 client.command(set_cache_sql)
                 client.command(set_replace_sql)
                 client.command(set_only_vector_sql)
-                client.command(set_use_number_sql)
         except Exception as e:
             warn(f"failed to set query plan cache settings: {e}")
 
