@@ -22,10 +22,10 @@ GENERATE_SCRIPT="generate-sql-files.sh"
 
 # SQL 类型和行数
 SQL_TYPES=(normal cast)
-ROW_COUNTS=(1)
+ROW_COUNTS=(1 10 100 1000)
 
 # 并发数列表
-CONCURRENCIES=(1)
+CONCURRENCIES=(1 2 4 8 16 32)
 
 # ============ 配置参数（运行时由用户输入） ============
 # profile_name: 配置名称，用于 CSV 输出
