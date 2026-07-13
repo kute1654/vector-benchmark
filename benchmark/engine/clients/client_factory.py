@@ -12,6 +12,37 @@ from engine.clients.myscale.configure import MyScaleConfigurator
 from engine.clients.myscale.search import MyScaleSearcher
 from engine.clients.myscale.upload import MyScaleUploader
 
+
+def _format_count(count: int) -> str:
+    if count <= 0:
+        return "0"
+    if count >= 1_000_000 and count % 1_000_000 == 0:
+        return f"{count // 1_000_000}m"
+    if count >= 1_000 and count % 1_000 == 0:
+        return f"{count // 1_000}k"
+    return str(count)
+
+
+def generate_table_name(dataset_config: dict) -> str:
+    vector_size = dataset_config.get("vector_size", 0) or 0
+    vector_count = dataset_config.get("vector_count", 0) or 0
+    corpus_count = dataset_config.get("corpus_count", 0) or 0
+    result_group = str(dataset_config.get("result_group", "") or "")
+
+    if result_group == "text_search" and vector_size == 0:
+        count_str = _format_count(corpus_count) if corpus_count > 0 else "unknown"
+        return f"Benchmark_text_{count_str}"
+
+    if vector_size > 0 and (vector_count > 0 or corpus_count > 0):
+        effective_count = vector_count if vector_count > 0 else corpus_count
+        count_str = _format_count(effective_count)
+        return f"Benchmark_{vector_size}_{count_str}"
+
+    if vector_size > 0:
+        return f"Benchmark_{vector_size}"
+
+    return "Benchmark"
+
 # Import ClickHouse clients
 try:
     from engine.clients.clickhouse.configure import ClickHouseConfigurator
@@ -248,25 +279,25 @@ class ClientFactory(ABC):
         meta = {
             "dataset": dataset_name,
         }
-        # print(experiment)
-        # print(dataset_config)
         experiment_name = experiment.get("name") or f"{experiment.get('engine', 'myscale')}-{dataset_name}"
         engine_type = experiment.get("engine", "myscale")
 
-        # 将数据集的 vector_size 注入到 experiment 的 upload_params 中
-        # 这样 ClickHouse 构建向量索引时可以获取向量维度
         vector_size = dataset_config.get("vector_size", 0)
         if vector_size:
             upload_params = experiment.get("upload_params", {}) or {}
             upload_params["_vector_size"] = vector_size
             experiment["upload_params"] = upload_params
 
+        connection_params = experiment.get("connection_params", {}) or {}
+        if "table" not in connection_params:
+            connection_params["table"] = generate_table_name(dataset_config)
+            experiment["connection_params"] = connection_params
+
         return BaseClient(
             name=experiment_name,
             meta=meta,
             configurator=self._create_configurator(experiment),
             uploader=self._create_uploader(experiment),
-            # init n search obj from search.py
             searchers=self._create_searchers(experiment),
             engine=engine_type,
         )

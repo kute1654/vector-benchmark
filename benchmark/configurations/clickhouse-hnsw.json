@@ -4,20 +4,20 @@
     "dataset": "deep-image-96-angular",
     "upload_params": {
       "index_params": {
-        "ef_c": 200,
+        "ef_c": 256,
         "m": 32
       },
       "optimize": true,
       "index_type": "HNSWFLAT",
-      "vector_query_plan_cache": [0, 1,2,3],
-      "vector_use_cast": [0,1],
-      "vector_query_plan_cache_only_vector": [0,1],
-      "search_number": 10
+      "vector_query_plan_cache": [0],
+      "vector_use_cast": [0],
+      "vector_query_plan_cache_only_vector": [0],
+      "search_number": 1
     }, 
     "search_params": {
-      "parallel": 16,
+      "parallel": 1,
       "top": 10,
-      "test_duration": 20,
+      "test_duration": 1,
       "params": {
         "ef_s": [100]
       }
@@ -28,20 +28,20 @@
     "dataset": "sift-128-euclidean",
     "upload_params": {
       "index_params": {
-        "ef_c": 200,
+        "ef_c": 256,
         "m": 32
       },
       "optimize": true,
       "index_type": "HNSWFLAT",
-      "vector_query_plan_cache": [0, 1,2,3],
-      "vector_use_cast": [0,1],
-      "vector_query_plan_cache_only_vector": [0,1],
-      "search_number": 10
+      "vector_query_plan_cache": [0],
+      "vector_use_cast": [0],
+      "vector_query_plan_cache_only_vector": [0],
+      "search_number": 1
     }, 
     "search_params": {
-      "parallel": 16,
+      "parallel": 1,
       "top": 10,
-      "test_duration": 20,
+      "test_duration": 1,
       "params": {
         "ef_s": [100]
       }
@@ -52,14 +52,14 @@
     "dataset": "laion-768-1m-ip",
     "upload_params": {
       "index_params": {
-        "ef_c": 200,
+        "ef_c": 256,
         "m": 32
       },
       "optimize": true,
       "index_type": "HNSWFLAT",
-      "vector_query_plan_cache": [0,1],
-      "vector_use_cast": [0,1],
-      "vector_query_plan_cache_only_vector": [0,1],
+      "vector_query_plan_cache": [0],
+      "vector_use_cast": [0],
+      "vector_query_plan_cache_only_vector": [0],
       "search_number": 1
     }, 
     "search_params": {
@@ -76,20 +76,20 @@
     "dataset": "gist-960-euclidean-l2",
     "upload_params": {
       "index_params": {
-        "ef_c": 200,
+        "ef_c": 256,
         "m": 32
       },
       "optimize": true,
       "index_type": "HNSWFLAT",
-      "vector_query_plan_cache": [0, 1,2,3],
-      "vector_use_cast": [0,1],
-      "vector_query_plan_cache_only_vector": [0,1],
-      "search_number": 10
+      "vector_query_plan_cache": [0],
+      "vector_use_cast": [0],
+      "vector_query_plan_cache_only_vector": [0],
+      "search_number": 1
     },
     "search_params": {
-      "parallel": 16,
+      "parallel": 1,
       "top": 10,
-      "test_duration": 10,
+      "test_duration": 1,
       "params": {
         "ef_s": [100]
       }
@@ -100,20 +100,20 @@
     "dataset": "dbpedia-openai-1000k-angular",
     "upload_params": {
       "index_params": {
-        "ef_c": 200,
+        "ef_c": 256,
         "m": 32
       },
       "optimize": true,
       "index_type": "HNSWFLAT",
-      "vector_query_plan_cache": [0, 1,2,3],
-      "vector_use_cast": [0,1],
-      "vector_query_plan_cache_only_vector": [0,1],
-      "search_number": 10
+      "vector_query_plan_cache": [0],
+      "vector_use_cast": [0],
+      "vector_query_plan_cache_only_vector": [0],
+      "search_number": 1
     },
     "search_params": {
-      "parallel": 16,
+      "parallel": 1,
       "top": 10,
-      "test_duration": 20,
+      "test_duration": 1,
       "params": {
         "ef_s": [100]
       }
