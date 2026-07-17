@@ -145,6 +145,8 @@ class AnnH5Reader(BaseReader):
                                                       []) if self.dataset_config.result_group == "hybrid_search" else []
             # get origin train datasets length
             data_size = train_data["train"].shape[0]
+            if self.dataset_config.vector_count < data_size:
+                data_size = self.dataset_config.vector_count
             # default use one batch_part
             batch_parts = 1
 
