@@ -57,9 +57,9 @@
       },
       "optimize": true,
       "index_type": "HNSWFLAT",
-      "vector_query_plan_cache": [0],
-      "vector_use_cast": [0],
-      "vector_query_plan_cache_only_vector": [0],
+      "vector_query_plan_cache": [0,1,2,3,4,5],
+      "vector_use_cast": [0,1],
+      "vector_query_plan_cache_only_vector": [0,1],
       "search_number": 1
     }, 
     "search_params": {

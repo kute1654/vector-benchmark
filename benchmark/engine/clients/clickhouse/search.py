@@ -223,16 +223,20 @@ class ClickHouseSearcher(BaseSearcher):
         CAST_mode = _to_int((search_params or {}).get("vector_use_cast", 0), 0)
         only_vector = _to_int((search_params or {}).get("vector_query_plan_cache_only_vector", 0), 0)
         clear_cache_sql = f"SYSTEM DROP VECTOR QUERY PLAN CACHE"
+        only_cache_query_plan = 0
         query_cache = 0
-        if cache_mode > 1:
+        if cache_mode % 3 == 2:
+            only_cache_query_plan = 1
+        if cache_mode > 2:
             query_cache = 1
-            cache_mode = cache_mode - 2
+        cache_mode = cache_mode // 3
         if cache_mode == 0:
             only_vector = 0
         set_cache_sql = f"SET vector_query_plan_cache = {cache_mode}"
         set_cast_sql = f"SET vector_use_cast = {CAST_mode}"
         set_only_vector_sql = f"SET vector_query_plan_cache_only_vector = {only_vector}"
         set_query_cache_sql = f"SET use_query_cache = {query_cache}"
+        set_only_cache_query_plan_sql = f"SET vector_only_cache_query_plan = {only_cache_query_plan}"
         try:
             client = cls.get_client()
             if protocol == "tcp":
@@ -243,6 +247,7 @@ class ClickHouseSearcher(BaseSearcher):
                 client.execute(set_cache_sql)
                 client.execute(set_cast_sql)
                 client.execute(set_only_vector_sql)
+                client.execute(set_only_cache_query_plan_sql)
             else:
                 if ef_s is not None:
                     client.command(set_ef_s_sql)
@@ -251,6 +256,7 @@ class ClickHouseSearcher(BaseSearcher):
                 client.command(set_cache_sql)
                 client.command(set_cast_sql)
                 client.command(set_only_vector_sql)
+                client.execute(set_only_cache_query_plan_sql)
         except Exception as e:
             warn(f"failed to set query plan cache settings: {e}")
 

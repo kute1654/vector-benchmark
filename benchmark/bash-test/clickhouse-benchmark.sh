@@ -27,6 +27,30 @@ SQL_TYPES=(normal cast)
 ROW_COUNTS=(1 10 100 1000)
 CONCURRENCIES=(1 2 4 8 16 32)
 
+# settings_profile|use_query_cache|vector_query_plan_cache|vector_only_cache_query_plan|vector_query_plan_cache_only_vector|vector_use_cast
+# use_query_cache and vector_query_plan_cache can be enabled together.
+# vector_only_cache_query_plan=1 is only valid when vector_query_plan_cache=1.
+SETTINGS_GROUPS=(
+    "baseline|0|0|0|0|0"
+    "cast_baseline|0|0|0|0|1"
+    "vector_plan_cache|0|1|0|0|0"
+    "vector_plan_cache_only_vector|0|1|0|1|0"
+    "vector_only_cache_query_plan|0|1|1|0|0"
+    "vector_only_cache_query_plan_only_vector|0|1|1|1|0"
+    "vector_only_cache_query_plan_cast|0|1|1|0|1"
+    "vector_only_cache_query_plan_cast_only_vector|0|1|1|1|1"
+    "query_cache_baseline|1|0|0|0|0"
+    "query_cache_cast_baseline|1|0|0|0|1"
+    "query_cache_and_vector_plan_cache|1|1|0|0|0"
+    "query_cache_and_vector_plan_cache_only_vector|1|1|0|1|0"
+    "query_cache_and_vector_plan_cache_cast|1|1|0|0|1"
+    "query_cache_and_vector_plan_cache_only_vector_cast|1|1|0|1|1"
+    "query_cache_and_vector_only_cache_query_plan|1|1|1|0|0"
+    "query_cache_and_vector_only_cache_query_plan_only_vector|1|1|1|1|0"
+    "query_cache_and_vector_only_cache_query_plan_cast|1|1|1|0|1"
+    "query_cache_and_vector_only_cache_query_plan_only_vector_cast|1|1|1|1|1"
+)
+
 # ============ 工具函数 ============
 
 detect_vector_column() {
@@ -55,18 +79,28 @@ generate_sql_for_table() {
     local vec_col="$2"
     local dist_func="$3"
     local sort_dir="$4"
+    local settings_profile="$5"
+    local settings_clause="$6"
 
-    echo "  生成SQL文件 (表=$table, 列=$vec_col, 距离=$dist_func, 排序=$sort_dir)..."
+    echo "  生成SQL文件 (表=$table, profile=$settings_profile, 列=$vec_col, 距离=$dist_func, 排序=$sort_dir)..."
 
     for count in "${ROW_COUNTS[@]}"; do
         local tmp_vectors
+        local tmp_error
         tmp_vectors=$(mktemp)
+        tmp_error=$(mktemp)
 
-        "$CLICKHOUSE" client \
+        if ! "$CLICKHOUSE" client \
             --host "$HOST" \
             --port "$PORT" \
             --query "SELECT arrayStringConcat($vec_col, ',') FROM $table ORDER BY rand() LIMIT $count SETTINGS use_query_cache=0" \
-            > "$tmp_vectors" 2>/dev/null
+            > "$tmp_vectors" 2>"$tmp_error"; then
+            echo "  错误: 表 $table 抽取 ${count} 条样本向量失败，无法生成 SQL"
+            echo "  ClickHouse 错误输出:"
+            tail -20 "$tmp_error" 2>/dev/null | sed 's/^/    /'
+            rm -f "$tmp_vectors" "$tmp_error"
+            return 1
+        fi
 
         local actual_count
         actual_count=$(wc -l < "$tmp_vectors")
@@ -74,23 +108,44 @@ generate_sql_for_table() {
             echo "  警告: 表 $table 预期 ${count} 条，实际获取 ${actual_count} 条"
         fi
 
-        local normal_file="$SQL_DIR/${table}_normal_${count}.sql"
+        local normal_file="$SQL_DIR/${table}_${settings_profile}_normal_${count}.sql"
         > "$normal_file"
         while IFS= read -r vec_str; do
             [ -z "$vec_str" ] && continue
-            echo "SELECT id, ${dist_func}(${vec_col}, [${vec_str}]) as dis FROM ${table} ORDER BY dis ${sort_dir} LIMIT ${TOP_K};" >> "$normal_file"
+            echo "SELECT id, ${dist_func}(${vec_col}, [${vec_str}]) as dis FROM ${table} ORDER BY dis ${sort_dir} LIMIT ${TOP_K}${settings_clause};" >> "$normal_file"
         done < "$tmp_vectors"
         echo "    已生成: $normal_file ($(wc -l < "$normal_file") 条查询)"
 
-        local cast_file="$SQL_DIR/${table}_cast_${count}.sql"
+        local cast_file="$SQL_DIR/${table}_${settings_profile}_cast_${count}.sql"
         > "$cast_file"
         while IFS= read -r vec_str; do
             [ -z "$vec_str" ] && continue
-            echo "SELECT id, ${dist_func}(${vec_col}, cast('[${vec_str}]','Array(Float32)')) as dis FROM ${table} ORDER BY dis ${sort_dir} LIMIT ${TOP_K};" >> "$cast_file"
+            echo "SELECT id, ${dist_func}(${vec_col}, cast('[${vec_str}]','Array(Float32)')) as dis FROM ${table} ORDER BY dis ${sort_dir} LIMIT ${TOP_K}${settings_clause};" >> "$cast_file"
         done < "$tmp_vectors"
         echo "    已生成: $cast_file ($(wc -l < "$cast_file") 条查询)"
 
-        rm -f "$tmp_vectors"
+        rm -f "$tmp_vectors" "$tmp_error"
+    done
+}
+
+build_settings_clause() {
+    local use_query_cache="$1"
+    local vector_query_plan_cache="$2"
+    local vector_only_cache_query_plan="$3"
+    local vector_query_plan_cache_only_vector="$4"
+    local vector_use_cast="$5"
+
+    echo " SETTINGS use_query_cache=${use_query_cache}, vector_query_plan_cache=${vector_query_plan_cache}, vector_only_cache_query_plan=${vector_only_cache_query_plan}, vector_query_plan_cache_only_vector=${vector_query_plan_cache_only_vector}, vector_use_cast=${vector_use_cast}"
+}
+
+validate_settings_groups() {
+    local group profile_name use_query_cache vector_query_plan_cache vector_only_cache_query_plan vector_query_plan_cache_only_vector vector_use_cast
+    for group in "${SETTINGS_GROUPS[@]}"; do
+        IFS='|' read -r profile_name use_query_cache vector_query_plan_cache vector_only_cache_query_plan vector_query_plan_cache_only_vector vector_use_cast <<< "$group"
+        if [ "$vector_only_cache_query_plan" = "1" ] && [ "$vector_query_plan_cache" != "1" ]; then
+            echo "错误: settings profile '$profile_name' 非法: vector_only_cache_query_plan=1 需要 vector_query_plan_cache=1" >&2
+            exit 1
+        fi
     done
 }
 
@@ -150,28 +205,27 @@ check_vector_index() {
         explain_output=$("$CLICKHOUSE" client \
             --host "$HOST" \
             --port "$PORT" \
-            --query "EXPLAIN SELECT id, ${dist_func}(${vec_col}, [${sample_vec}]) as dis FROM ${table} ORDER BY dis ASC LIMIT 10 SETTINGS use_query_cache=0" 2>/dev/null) || true
+            --query "EXPLAIN indexes=1 SELECT id, ${dist_func}(${vec_col}, cast('[${sample_vec}]','Array(Float32)')) as dis FROM ${table} ORDER BY dis ASC LIMIT 10 SETTINGS use_query_cache=0" 2>/dev/null) || true
 
-        local read_type
-        read_type=$(echo "$explain_output" | grep -oP 'Read type:\s*\K\S+' || true)
-
-        if [ -n "$read_type" ]; then
-            if echo "$read_type" | grep -qi "default"; then
-                echo "  ⚠ 表 $table: 向量索引存在但未生效! EXPLAIN 显示 Read type: $read_type (全表扫描)"
-                echo "    索引信息: name=$index_name type=$index_type size=${compressed_bytes}B"
-                echo "    可能原因: 距离函数与索引类型不匹配，或索引未覆盖所有数据分区"
-                return 1
-            else
-                echo "  ✓ 表 $table: 向量索引生效! Read type: $read_type"
-                echo "    索引信息: name=$index_name type=$index_type size=${compressed_bytes}B"
-                return 0
-            fi
-        else
-            echo "  ? 表 $table: 无法从 EXPLAIN 解析 Read type"
+        if echo "$explain_output" | grep -q "Name: ${index_name}" && echo "$explain_output" | grep -q "Description: ${index_type}"; then
+            local skip_granules
+            skip_granules=$(echo "$explain_output" | awk '
+                found && /Granules:/ {gsub(/^[[:space:]]+|[[:space:]]+$/, ""); print; exit}
+                $0 ~ "Name: " idx {found=1}
+            ' idx="$index_name")
+            echo "  ✓ 表 $table: 向量索引生效 (EXPLAIN indexes=1 命中 Skip index)"
             echo "    索引信息: name=$index_name type=$index_type size=${compressed_bytes}B"
+            if [ -n "$skip_granules" ]; then
+                echo "    $skip_granules"
+            fi
+            return 0
+        else
+            echo "  ⚠ 表 $table: 向量索引存在但当前查询未命中 Skip index"
+            echo "    索引信息: name=$index_name type=$index_type size=${compressed_bytes}B"
+             echo "    可能原因: 距离函数与索引定义不一致，查询向量类型未识别，或索引未覆盖数据"
             echo "    EXPLAIN 输出:"
-            echo "$explain_output" | head -15 | sed 's/^/      /'
-            return 2
+            echo "$explain_output" | head -25 | sed 's/^/      /'
+            return 1
         fi
     fi
 
@@ -291,39 +345,16 @@ fi
 
 echo ""
 
-# ---- Step 3: 输入配置参数 ----
-echo ">>> Step 3: 请输入测试配置参数"
+# ---- Step 3: 准备配置分组 ----
+echo ">>> Step 3: 准备测试配置分组"
 echo ""
 
-read -p "配置名称 (profile_name, 用于 CSV 输出): " profile_name
-if [ -z "$profile_name" ]; then
-    profile_name="default"
-    echo "  使用默认名称: $profile_name"
-fi
-
-read -p "use_query_cache (0/1, 默认 0): " val_use_query_cache
-val_use_query_cache=${val_use_query_cache:-0}
-
-read -p "vector_query_plan_cache (0/1, 默认 0): " val_vector_query_plan_cache
-val_vector_query_plan_cache=${val_vector_query_plan_cache:-0}
-
-read -p "vector_only_cache_query_plan (0/1, 默认 0): " val_vector_only_cache_query_plan
-val_vector_only_cache_query_plan=${val_vector_only_cache_query_plan:-0}
-
-read -p "vector_query_plan_cache_only_vector (0/1, 默认 0): " val_vector_query_plan_cache_only_vector
-val_vector_query_plan_cache_only_vector=${val_vector_query_plan_cache_only_vector:-0}
-
-read -p "vector_use_cast (0/1, 默认 0): " val_vector_use_cast
-val_vector_use_cast=${val_vector_use_cast:-0}
-
-echo ""
-echo "配置参数:"
-echo "  profile_name=$profile_name"
-echo "  use_query_cache=$val_use_query_cache"
-echo "  vector_query_plan_cache=$val_vector_query_plan_cache"
-echo "  vector_only_cache_query_plan=$val_vector_only_cache_query_plan"
-echo "  vector_query_plan_cache_only_vector=$val_vector_query_plan_cache_only_vector"
-echo "  vector_use_cast=$val_vector_use_cast"
+validate_settings_groups
+echo "配置分组:"
+for settings_group in "${SETTINGS_GROUPS[@]}"; do
+    IFS='|' read -r profile_name val_use_query_cache val_vector_query_plan_cache val_vector_only_cache_query_plan val_vector_query_plan_cache_only_vector val_vector_use_cast <<< "$settings_group"
+    echo "  $profile_name: use_query_cache=$val_use_query_cache, vector_query_plan_cache=$val_vector_query_plan_cache, vector_only_cache_query_plan=$val_vector_only_cache_query_plan, vector_query_plan_cache_only_vector=$val_vector_query_plan_cache_only_vector, vector_use_cast=$val_vector_use_cast"
+done
 echo ""
 
 # ---- Step 4: 生成SQL文件 ----
@@ -332,25 +363,30 @@ echo ""
 
 mkdir -p "$SQL_DIR"
 
-for table in "${TABLES[@]}"; do
-    vec_col="${TABLE_VEC_COL[$table]}"
+for settings_group in "${SETTINGS_GROUPS[@]}"; do
+    IFS='|' read -r profile_name val_use_query_cache val_vector_query_plan_cache val_vector_only_cache_query_plan val_vector_query_plan_cache_only_vector val_vector_use_cast <<< "$settings_group"
+    settings_clause=$(build_settings_clause "$val_use_query_cache" "$val_vector_query_plan_cache" "$val_vector_only_cache_query_plan" "$val_vector_query_plan_cache_only_vector" "$val_vector_use_cast")
 
-    sql_files_exist=true
-    for sql_type in "${SQL_TYPES[@]}"; do
-        for row_count in "${ROW_COUNTS[@]}"; do
-            sql_file="$SQL_DIR/${table}_${sql_type}_${row_count}.sql"
-            if [ ! -f "$sql_file" ]; then
-                sql_files_exist=false
-                break 2
-            fi
+    for table in "${TABLES[@]}"; do
+        vec_col="${TABLE_VEC_COL[$table]}"
+
+        sql_files_exist=true
+        for sql_type in "${SQL_TYPES[@]}"; do
+            for row_count in "${ROW_COUNTS[@]}"; do
+                sql_file="$SQL_DIR/${table}_${profile_name}_${sql_type}_${row_count}.sql"
+                if [ ! -f "$sql_file" ]; then
+                    sql_files_exist=false
+                    break 2
+                fi
+            done
         done
-    done
 
-    if [ "$sql_files_exist" = true ]; then
-        echo "  表 $table: SQL文件已存在，跳过生成"
-    else
-        generate_sql_for_table "$table" "$vec_col" "$DISTANCE_FUNC" "$SORT_DIR"
-    fi
+        if [ "$sql_files_exist" = true ]; then
+            echo "  表 $table profile=$profile_name: SQL文件已存在，跳过生成"
+        else
+            generate_sql_for_table "$table" "$vec_col" "$DISTANCE_FUNC" "$SORT_DIR" "$profile_name" "$settings_clause"
+        fi
+    done
 done
 
 echo ""
@@ -361,13 +397,16 @@ echo ""
 
 warmup_sql_file=""
 for table in "${TABLES[@]}"; do
-    for sql_type in "${SQL_TYPES[@]}"; do
-        for row_count in "${ROW_COUNTS[@]}"; do
-            candidate="$SQL_DIR/${table}_${sql_type}_${row_count}.sql"
-            if [ -f "$candidate" ]; then
-                warmup_sql_file="$candidate"
-                break 3
-            fi
+    for settings_group in "${SETTINGS_GROUPS[@]}"; do
+        IFS='|' read -r profile_name _ <<< "$settings_group"
+        for sql_type in "${SQL_TYPES[@]}"; do
+            for row_count in "${ROW_COUNTS[@]}"; do
+                candidate="$SQL_DIR/${table}_${profile_name}_${sql_type}_${row_count}.sql"
+                if [ -f "$candidate" ]; then
+                    warmup_sql_file="$candidate"
+                    break 4
+                fi
+            done
         done
     done
 done
@@ -445,111 +484,115 @@ trap "rm -rf $TMPDIR" EXIT
 echo "开始测试 ($(date '+%Y-%m-%d %H:%M:%S'))"
 echo ""
 
-for table in "${TABLES[@]}"; do
-    echo "╔══════════════════════════════════════════════════════════════╗"
-    echo "║ 表: $table"
-    echo "║   向量列: ${TABLE_VEC_COL[$table]}"
-    echo "║   维度: ${TABLE_DIM[$table]}"
-    echo "║   距离函数: $DISTANCE_FUNC"
-    echo "║   配置 Profile: $profile_name"
-    echo "║   use_query_cache=$val_use_query_cache"
-    echo "║   vector_query_plan_cache=$val_vector_query_plan_cache"
-    echo "║   vector_only_cache_query_plan=$val_vector_only_cache_query_plan"
-    echo "║   vector_query_plan_cache_only_vector=$val_vector_query_plan_cache_only_vector"
-    echo "║   vector_use_cast=$val_vector_use_cast"
-    echo "╚══════════════════════════════════════════════════════════════╝"
-    echo ""
+for settings_group in "${SETTINGS_GROUPS[@]}"; do
+    IFS='|' read -r profile_name val_use_query_cache val_vector_query_plan_cache val_vector_only_cache_query_plan val_vector_query_plan_cache_only_vector val_vector_use_cast <<< "$settings_group"
 
-    for sql_type in "${SQL_TYPES[@]}"; do
-        for row_count in "${ROW_COUNTS[@]}"; do
-            sql_file="$SQL_DIR/${table}_${sql_type}_${row_count}.sql"
+    for table in "${TABLES[@]}"; do
+        echo "╔══════════════════════════════════════════════════════════════╗"
+        echo "║ 表: $table"
+        echo "║   向量列: ${TABLE_VEC_COL[$table]}"
+        echo "║   维度: ${TABLE_DIM[$table]}"
+        echo "║   距离函数: $DISTANCE_FUNC"
+        echo "║   配置 Profile: $profile_name"
+        echo "║   use_query_cache=$val_use_query_cache"
+        echo "║   vector_query_plan_cache=$val_vector_query_plan_cache"
+        echo "║   vector_only_cache_query_plan=$val_vector_only_cache_query_plan"
+        echo "║   vector_query_plan_cache_only_vector=$val_vector_query_plan_cache_only_vector"
+        echo "║   vector_use_cast=$val_vector_use_cast"
+        echo "╚══════════════════════════════════════════════════════════════╝"
+        echo ""
 
-            if [ ! -f "$sql_file" ]; then
-                echo "警告: SQL 文件不存在，跳过: $sql_file"
-                continue
-            fi
+        for sql_type in "${SQL_TYPES[@]}"; do
+            for row_count in "${ROW_COUNTS[@]}"; do
+                sql_file="$SQL_DIR/${table}_${profile_name}_${sql_type}_${row_count}.sql"
 
-            actual_queries=$(wc -l < "$sql_file")
-            echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-            echo " 表: $table  SQL: ${sql_type}_${row_count}.sql ($actual_queries 条查询)"
-            echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-
-            for concurrency in "${CONCURRENCIES[@]}"; do
-                echo ""
-                echo "  并发数: $concurrency (重复 $REPEAT 次)"
-
-                qps_values=()
-
-                for run in $(seq 1 $REPEAT); do
-                    stderr_file="$TMPDIR/stderr_${table}_${profile_name}_${sql_type}_${row_count}_${concurrency}_${run}.log"
-
-                    echo -n "    第 ${run}/${REPEAT} 次... "
-
-                    set +e
-                    "$CLICKHOUSE" benchmark \
-                        --host "$HOST" \
-                        --port "$PORT" \
-                        --concurrency "$concurrency" \
-                        --timelimit "$TIMELIMIT" \
-                        --delay 0 \
-                        --randomize \
-                        --iterations 0 \
-                        -- \
-                        < "$sql_file" \
-                        2>"$stderr_file" \
-                        > /dev/null
-                    exit_code=$?
-                    set -e
-
-                    if [ $exit_code -ne 0 ]; then
-                        echo "错误 (exit=$exit_code)，记录 QPS=0"
-                        echo "  stderr 尾部:"
-                        tail -5 "$stderr_file" 2>/dev/null | sed 's/^/    /'
-                        qps_values+=(0)
-                        continue
-                    fi
-
-                    qps=$(parse_total_qps "$(cat "$stderr_file")")
-
-                    if [ -z "$qps" ] || [ "$qps" = "0.000" ]; then
-                        echo "警告: 无法解析 QPS，记录为 0"
-                        head -20 "$stderr_file" | sed 's/^/    /'
-                        qps_values+=(0)
-                    else
-                        echo "QPS = $qps"
-                        qps_values+=("$qps")
-                    fi
-                done
-
-                sorted_qps=$(printf '%s\n' "${qps_values[@]}" | sort -n)
-                count=${#qps_values[@]}
-
-                if [ "$count" -le 2 ]; then
-                    qps_avg=$(printf '%s\n' "${qps_values[@]}" | awk '{sum+=$1; n++} END {printf "%.3f", sum/n}')
-                    qps_min=$(printf '%s\n' "${qps_values[@]}" | sort -n | head -1)
-                    qps_max=$(printf '%s\n' "${qps_values[@]}" | sort -n | tail -1)
-                else
-                    qps_min=$(echo "$sorted_qps" | head -1)
-                    qps_max=$(echo "$sorted_qps" | tail -1)
-                    qps_avg=$(echo "$sorted_qps" | sed '1d;$d' | awk '{sum+=$1; n++} END {printf "%.3f", sum/n}')
+                if [ ! -f "$sql_file" ]; then
+                    echo "警告: SQL 文件不存在，跳过: $sql_file"
+                    continue
                 fi
 
-                echo "  ─────────────────────────────────────"
-                echo "  结果: 均值=$qps_avg  最小=$qps_min  最大=$qps_max"
+                actual_queries=$(wc -l < "$sql_file")
+                echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+                echo " 表: $table  Profile: $profile_name  SQL: ${sql_type}_${row_count}.sql ($actual_queries 条查询)"
+                echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+
+                for concurrency in "${CONCURRENCIES[@]}"; do
+                    echo ""
+                    echo "  并发数: $concurrency (重复 $REPEAT 次)"
+
+                    qps_values=()
+
+                    for run in $(seq 1 $REPEAT); do
+                        stderr_file="$TMPDIR/stderr_${table}_${profile_name}_${sql_type}_${row_count}_${concurrency}_${run}.log"
+
+                        echo -n "    第 ${run}/${REPEAT} 次... "
+
+                        set +e
+                        "$CLICKHOUSE" benchmark \
+                            --host "$HOST" \
+                            --port "$PORT" \
+                            --concurrency "$concurrency" \
+                            --timelimit "$TIMELIMIT" \
+                            --delay 0 \
+                            --randomize \
+                            --iterations 0 \
+                            -- \
+                            < "$sql_file" \
+                            2>"$stderr_file" \
+                            > /dev/null
+                        exit_code=$?
+                        set -e
+
+                        if [ $exit_code -ne 0 ]; then
+                            echo "错误 (exit=$exit_code)，记录 QPS=0"
+                            echo "  stderr 尾部:"
+                            tail -5 "$stderr_file" 2>/dev/null | sed 's/^/    /'
+                            qps_values+=(0)
+                            continue
+                        fi
+
+                        qps=$(parse_total_qps "$(cat "$stderr_file")")
+
+                        if [ -z "$qps" ] || [ "$qps" = "0.000" ]; then
+                            echo "警告: 无法解析 QPS，记录为 0"
+                            head -20 "$stderr_file" | sed 's/^/    /'
+                            qps_values+=(0)
+                        else
+                            echo "QPS = $qps"
+                            qps_values+=("$qps")
+                        fi
+                    done
+
+                    sorted_qps=$(printf '%s\n' "${qps_values[@]}" | sort -n)
+                    count=${#qps_values[@]}
+
+                    if [ "$count" -le 2 ]; then
+                        qps_avg=$(printf '%s\n' "${qps_values[@]}" | awk '{sum+=$1; n++} END {printf "%.3f", sum/n}')
+                        qps_min=$(printf '%s\n' "${qps_values[@]}" | sort -n | head -1)
+                        qps_max=$(printf '%s\n' "${qps_values[@]}" | sort -n | tail -1)
+                    else
+                        qps_min=$(echo "$sorted_qps" | head -1)
+                        qps_max=$(echo "$sorted_qps" | tail -1)
+                        qps_avg=$(echo "$sorted_qps" | sed '1d;$d' | awk '{sum+=$1; n++} END {printf "%.3f", sum/n}')
+                    fi
+
+                    echo "  ─────────────────────────────────────"
+                    echo "  结果: 均值=$qps_avg  最小=$qps_min  最大=$qps_max"
+                    echo ""
+
+                    csv_line="${table},${DISTANCE_FUNC},${TABLE_INDEX_STATUS[$table]},${profile_name},${val_use_query_cache},${val_vector_query_plan_cache},${val_vector_only_cache_query_plan},${val_vector_query_plan_cache_only_vector},${val_vector_use_cast},${sql_type},${row_count},${concurrency}"
+                    for v in "${qps_values[@]}"; do
+                        csv_line="${csv_line},${v}"
+                    done
+                    for _ in $(seq $((count + 1)) $REPEAT); do
+                        csv_line="${csv_line},"
+                    done
+                    csv_line="${csv_line},${qps_avg},${qps_min},${qps_max}"
+                    echo "$csv_line" >> "$OUTPUT_CSV"
+                done
+
                 echo ""
-
-                csv_line="${table},${DISTANCE_FUNC},${TABLE_INDEX_STATUS[$table]},${profile_name},${val_use_query_cache},${val_vector_query_plan_cache},${val_vector_only_cache_query_plan},${val_vector_query_plan_cache_only_vector},${val_vector_use_cast},${sql_type},${row_count},${concurrency}"
-                for v in "${qps_values[@]}"; do
-                    csv_line="${csv_line},${v}"
-                done
-                for _ in $(seq $((count + 1)) $REPEAT); do
-                    csv_line="${csv_line},"
-                done
-                csv_line="${csv_line},${qps_avg},${qps_min},${qps_max}"
-                echo "$csv_line" >> "$OUTPUT_CSV"
             done
-
-            echo ""
         done
     done
 done
@@ -558,6 +601,6 @@ echo "=============================================="
 echo " 测试完成! ($(date '+%Y-%m-%d %H:%M:%S'))"
 echo " 结果文件: $OUTPUT_CSV"
 echo "=============================================="
-echo ""
+echo " "
 echo "--- CSV 内容预览 (最后20行) ---"
 tail -20 "$OUTPUT_CSV" | column -t -s',' 2>/dev/null || tail -20 "$OUTPUT_CSV"
