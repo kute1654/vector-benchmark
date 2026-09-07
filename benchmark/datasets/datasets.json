@@ -1,5 +1,38 @@
 [
   {
+    "name": "glove-25-angular",
+    "result_group": "vector_search",
+    "vector_size": 25,
+    "vector_count": 1183514,
+    "queries_pool_size": 1000,
+    "distance": "cosine",
+    "type": "h5",
+    "path": "downloads/glove-25-angular.hdf5",
+    "link": "https://ann-benchmarks.com/glove-25-angular.hdf5"
+  },
+  {
+    "name": "glove-50-angular",
+    "result_group": "vector_search",
+    "vector_size": 50,
+    "vector_count": 1183514,
+    "queries_pool_size": 1000,
+    "distance": "cosine",
+    "type": "h5",
+    "path": "downloads/glove-50-angular.hdf5",
+    "link": "https://ann-benchmarks.com/glove-50-angular.hdf5"
+  },
+  {
+    "name": "lastfm-65-angular",
+    "result_group": "vector_search",
+    "vector_size": 65,
+    "vector_count": 292385,
+    "queries_pool_size": 1000,
+    "distance": "cosine",
+    "type": "h5",
+    "path": "downloads/lastfm-65-angular.hdf5",
+    "link": "https://ann-benchmarks.com/lastfm-65-angular.hdf5"
+  },
+  {
     "name": "deep-image-96-angular",
     "result_group": "vector_search",
     "vector_size": 96,
@@ -8,7 +41,18 @@
     "distance": "cosine",
     "type": "h5",
     "path": "downloads/deep-image-96-angular.hdf5",
-    "link": ""
+    "link": "https://ann-benchmarks.com/deep-image-96-angular.hdf5"
+  },
+  {
+    "name": "glove-100-angular",
+    "result_group": "vector_search",
+    "vector_size": 100,
+    "vector_count": 1183514,
+    "queries_pool_size": 1000,
+    "distance": "cosine",
+    "type": "h5",
+    "path": "downloads/glove-100-angular.hdf5",
+    "link": "https://ann-benchmarks.com/glove-100-angular.hdf5"
   },
   {
     "name": "sift-128-euclidean",
@@ -19,7 +63,51 @@
     "distance": "l2",
     "type": "h5",
     "path": "downloads/sift-128-euclidean.hdf5",
-    "link": ""
+    "link": "https://ann-benchmarks.com/sift-128-euclidean.hdf5"
+  },
+  {
+    "name": "random-128-euclidean",
+    "result_group": "vector_search",
+    "vector_size": 128,
+    "vector_count": 1000000,
+    "queries_pool_size": 1000,
+    "distance": "l2",
+    "type": "h5",
+    "path": "downloads/random-128-euclidean.hdf5",
+    "link": "https://ann-benchmarks.com/random-128-euclidean.hdf5"
+  },
+  {
+    "name": "glove-200-angular",
+    "result_group": "vector_search",
+    "vector_size": 200,
+    "vector_count": 1183514,
+    "queries_pool_size": 1000,
+    "distance": "cosine",
+    "type": "h5",
+    "path": "downloads/glove-200-angular.hdf5",
+    "link": "https://ann-benchmarks.com/glove-200-angular.hdf5"
+  },
+  {
+    "name": "sift-256-euclidean",
+    "result_group": "vector_search",
+    "vector_size": 256,
+    "vector_count": 10000000,
+    "queries_pool_size": 1000,
+    "distance": "l2",
+    "type": "h5",
+    "path": "downloads/sift-256-euclidean.hdf5",
+    "link": "https://ann-benchmarks.com/sift-256-euclidean.hdf5"
+  },
+  {
+    "name": "nytimes-256-angular",
+    "result_group": "vector_search",
+    "vector_size": 256,
+    "vector_count": 290000,
+    "queries_pool_size": 1000,
+    "distance": "cosine",
+    "type": "h5",
+    "path": "downloads/nytimes-256-angular.hdf5",
+    "link": "https://ann-benchmarks.com/nytimes-256-angular.hdf5"
   },
   {
     "name": "laion-768-1m-ip",
@@ -33,6 +121,28 @@
     "link": ""
   },
   {
+    "name": "fashion-mnist-784-euclidean",
+    "result_group": "vector_search",
+    "vector_size": 784,
+    "vector_count": 60000,
+    "queries_pool_size": 1000,
+    "distance": "l2",
+    "type": "h5",
+    "path": "downloads/fashion-mnist-784-euclidean.hdf5",
+    "link": "https://ann-benchmarks.com/fashion-mnist-784-euclidean.hdf5"
+  },
+  {
+    "name": "mnist-784-euclidean",
+    "result_group": "vector_search",
+    "vector_size": 784,
+    "vector_count": 60000,
+    "queries_pool_size": 1000,
+    "distance": "l2",
+    "type": "h5",
+    "path": "downloads/mnist-784-euclidean.hdf5",
+    "link": "https://ann-benchmarks.com/mnist-784-euclidean.hdf5"
+  },
+  {
     "name": "gist-960-euclidean-l2",
     "result_group": "vector_search",
     "vector_size": 960,
@@ -41,7 +151,7 @@
     "distance": "l2",
     "type": "h5",
     "path": "downloads/gist-960-euclidean.hdf5",
-    "link": ""
+    "link": "https://ann-benchmarks.com/gist-960-euclidean.hdf5"
   },
   {
     "name": "dbpedia-openai-1000k-angular",
@@ -84,5 +194,4 @@
     "query_cols": ["body"],
     "schema": { "body": "string" }
   }
-
 ]

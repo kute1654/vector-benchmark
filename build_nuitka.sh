@@ -6,7 +6,7 @@ PYTHON_BIN="/opt/python/cp312-cp312/bin/python"
 PIP_INDEX_URL="https://pypi.tuna.tsinghua.edu.cn/simple"
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-SRC_DIR="$ROOT_DIR/myscale-bench"
+SRC_DIR="$ROOT_DIR/benchmark"
 BUILD_DIR="$ROOT_DIR/dist_nuitka"
 DIST_DIR="$ROOT_DIR/dist/myscale-bench"
 TAR_NAME="myscale-bench-linux-x86_64.tar.gz"
@@ -51,8 +51,8 @@ fi
 $PYTHON_BIN -m pip install "${PIP_ROOT_ARGS[@]}" -i "$PIP_INDEX_URL" -U pip setuptools wheel
 $PYTHON_BIN -m pip install "${PIP_ROOT_ARGS[@]}" -i "$PIP_INDEX_URL" --only-binary=:all: h5py
 $PYTHON_BIN -m pip install "${PIP_ROOT_ARGS[@]}" -i "$PIP_INDEX_URL" --no-build-isolation -U nuitka
-if [ -f "$SRC_DIR/requirements.txt" ]; then
-  $PYTHON_BIN -m pip install "${PIP_ROOT_ARGS[@]}" -i "$PIP_INDEX_URL" -r "$SRC_DIR/requirements.txt"
+if [ -f "$ROOT_DIR/requirements.txt" ]; then
+  $PYTHON_BIN -m pip install "${PIP_ROOT_ARGS[@]}" -i "$PIP_INDEX_URL" -r "$ROOT_DIR/requirements.txt"
 fi
 
 rm -rf "$BUILD_DIR"
@@ -144,8 +144,8 @@ if [ -f "$SRC_DIR/datasets/.gitignore" ]; then
 fi
 
 mkdir -p "$DIST_DIR/configurations"
-if [ -d "$SRC_DIR/configurations" ]; then
-  cp -a "$SRC_DIR/configurations/." "$DIST_DIR/configurations/"
+if [ -d "$ROOT_DIR/configurations" ]; then
+  cp -a "$ROOT_DIR/configurations/." "$DIST_DIR/configurations/"
 fi
 
 mkdir -p "$DIST_DIR/results"
@@ -153,9 +153,9 @@ if [ -d "$SRC_DIR/results" ]; then
   cp -a "$SRC_DIR/results/." "$DIST_DIR/results/"
 fi
 
-if [ -d "$SRC_DIR/docs" ]; then
+if [ -d "$ROOT_DIR/docs" ]; then
   mkdir -p "$DIST_DIR/docs"
-  cp -a "$SRC_DIR/docs/." "$DIST_DIR/docs/"
+  cp -a "$ROOT_DIR/docs/." "$DIST_DIR/docs/"
 fi
 
 echo "$DIST_DIR"

@@ -7,7 +7,7 @@ import clickhouse_connect
 from clickhouse_connect.driver.client import Client
 from clickhouse_driver import Client as DriverClient
 
-from dataset_reader.base_reader import Query
+from benchmark.dataset_reader.base_reader import Query
 from engine.base_client import BaseSearcher
 from benchmark.cli_output import warn, step
 from engine.clients.clickhouse.config import *
@@ -51,6 +51,21 @@ class ClickHouseSearcher(BaseSearcher):
     host: str = None
     parser = ClickHouseConditionParser()
     connection_params: dict = {}
+
+    @classmethod
+    def _apply_session_settings(cls, connection, session_settings: dict):
+        if not session_settings:
+            return
+        protocol = str((cls.connection_params or {}).get("protocol", "tcp")).lower()
+        for key, value in session_settings.items():
+            try:
+                sql = f"SET {key} = {value}"
+                if protocol == "tcp":
+                    connection.execute(sql)
+                else:
+                    connection.command(sql)
+            except Exception as e:
+                warn(f"failed to apply session setting {key}={value}: {e}")
 
     def setup_search(self, host, distance, connection_params: dict, search_params: dict, dataset_config):
         if dataset_config is not None and getattr(dataset_config, "result_group", None) == "text_search":
@@ -212,6 +227,10 @@ class ClickHouseSearcher(BaseSearcher):
         cls.host = host
         cls.distance = DISTANCE_MAPPING[distance]
         cls.search_params = search_params
+        # Apply session-level SET commands from search_params
+        session_settings = search_params.get("session_settings", {})
+        if session_settings:
+            cls._apply_session_settings(thread_local.client, session_settings)
         cls.apply_query_plan_cache_settings(search_params, protocol)
 
     @classmethod
@@ -224,7 +243,7 @@ class ClickHouseSearcher(BaseSearcher):
         only_vector = _to_int((search_params or {}).get("vector_query_plan_cache_only_vector", 0), 0)
         clear_cache_sql = f"SYSTEM DROP VECTOR QUERY PLAN CACHE"
         only_cache_query_plan = 0
-        query_cache = 0
+        query_cache = _to_int((search_params or {}).get("use_query_cache", 0), 0)
         if cache_mode % 3 == 2:
             only_cache_query_plan = 1
         if cache_mode > 2:
@@ -308,4 +327,3 @@ class ClickHouseSearcher(BaseSearcher):
         # ClickHouse 26.6.1.1 不支持 MyScale 的 HybridSearch 和 TextSearch
         # 只支持标准的向量搜索
         return cls.vector_search(vector, meta_conditions, top)
-

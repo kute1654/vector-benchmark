@@ -1,18 +1,43 @@
-.idea/
-.vscode/
-.DS_Store
+# Python
 __pycache__/
 *.pyc
+*.pyo
+*.egg-info/
+dist/
+build/
+.eggs/
+
+# HDF5 datasets
+datasets/downloads/*.hdf5
+datasets/downloads/*.h5
+
+# Results
+results/
+
+# SQL files (generated)
+bash-test/sql-bench/*/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Virtualenv
 venv/
 .venv/
+env/
 
-benchmark/results/
-dist_nuitka/
-dist/
-dist-arm/
-.cache/
-.ccache/
-scripts/
-data/
-.python-version
+# Logs
+*.log
+/tmp/
+
+# Sql
 *.sql
+
+# hdf5
+*.hdf5

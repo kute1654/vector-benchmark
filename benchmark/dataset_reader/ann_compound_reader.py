@@ -7,8 +7,8 @@ import numpy as np
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.append(BASE_DIR)
 
-from dataset_reader.base_reader import Query
-from dataset_reader.json_reader import JSONReader
+from .base_reader import Query
+from .json_reader import JSONReader
 
 
 class AnnCompoundReader(JSONReader):

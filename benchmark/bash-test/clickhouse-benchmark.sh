@@ -7,7 +7,7 @@
 #   ./clickhouse-benchmark.sh [表名1] [表名2] ...
 #   不带参数时交互式输入表名
 #
-# 测试维度: table × settings_profile × sql_type(normal/cast) × row_count(1/10/100/1000) × concurrency
+# 测试维度: table × settings_profile × precise_float_parsing × sql_type(normal/cast/cast_array/type_hint/raw_bytes/raw_bytes_x/with/with_cast/with_cast_array/with_type_hint/with_raw_bytes/with_raw_bytes_x/subquery_id/with_subquery_id) × row_count × concurrency
 #
 
 set -euo pipefail
@@ -16,42 +16,49 @@ set -euo pipefail
 CLICKHOUSE="/home/ClickHouse/build/programs/clickhouse"
 HOST="127.0.0.1"
 PORT="9000"
-TIMELIMIT=30
-WARMUP_TIMELIMIT=10
-REPEAT=5
-OUTPUT_CSV="../results/clickhouse-benchmark-results.csv"
-SQL_DIR="sql-bench"
-TOP_K=10
+TIMELIMIT="${TIMELIMIT:-1}"
+WARMUP_TIMELIMIT="${WARMUP_TIMELIMIT:-1}"
+REPEAT="${REPEAT:-1}"
+OUTPUT_CSV="${OUTPUT_CSV:-../results/clickhouse-benchmark-results.csv}"
+SQL_DIR="${SQL_DIR:-sql-bench}"
+TOP_K="${TOP_K:-10}"
 
-SQL_TYPES=(normal cast)
-ROW_COUNTS=(1 10 100 1000)
-CONCURRENCIES=(1 2 4 8 16 32)
+SQL_TYPES=(
+    normal
+    cast 
+    cast_array 
+    raw_bytes 
+    raw_bytes_x
+)
+ROW_COUNTS=(1000)
+CONCURRENCIES=(1)
+PRECISE_FLOAT_PARSING_VALUES=(0)
 
 # settings_profile|use_query_cache|vector_query_plan_cache|vector_only_cache_query_plan|vector_query_plan_cache_only_vector|vector_use_cast
 # use_query_cache and vector_query_plan_cache can be enabled together.
 # vector_only_cache_query_plan=1 is only valid when vector_query_plan_cache=1.
 SETTINGS_GROUPS=(
-    "baseline|0|0|0|0|0"
-    "cast_baseline|0|0|0|0|1"
     "vector_plan_cache|0|1|0|0|0"
-    "vector_plan_cache_only_vector|0|1|0|1|0"
-    "vector_only_cache_query_plan|0|1|1|0|0"
-    "vector_only_cache_query_plan_only_vector|0|1|1|1|0"
-    "vector_only_cache_query_plan_cast|0|1|1|0|1"
-    "vector_only_cache_query_plan_cast_only_vector|0|1|1|1|1"
-    "query_cache_baseline|1|0|0|0|0"
-    "query_cache_cast_baseline|1|0|0|0|1"
-    "query_cache_and_vector_plan_cache|1|1|0|0|0"
-    "query_cache_and_vector_plan_cache_only_vector|1|1|0|1|0"
-    "query_cache_and_vector_plan_cache_cast|1|1|0|0|1"
-    "query_cache_and_vector_plan_cache_only_vector_cast|1|1|0|1|1"
-    "query_cache_and_vector_only_cache_query_plan|1|1|1|0|0"
-    "query_cache_and_vector_only_cache_query_plan_only_vector|1|1|1|1|0"
-    "query_cache_and_vector_only_cache_query_plan_cast|1|1|1|0|1"
-    "query_cache_and_vector_only_cache_query_plan_only_vector_cast|1|1|1|1|1"
 )
 
 # ============ 工具函数 ============
+
+apply_list_override() {
+    local var_name="$1"
+    local override_name="$2"
+    local override_value="${!override_name:-}"
+
+    if [ -n "$override_value" ]; then
+        local -n target_array="$var_name"
+        read -r -a target_array <<< "$override_value"
+    fi
+}
+
+apply_list_override SQL_TYPES SQL_TYPES_OVERRIDE
+apply_list_override ROW_COUNTS ROW_COUNTS_OVERRIDE
+apply_list_override CONCURRENCIES CONCURRENCIES_OVERRIDE
+apply_list_override PRECISE_FLOAT_PARSING_VALUES PRECISE_FLOAT_PARSING_OVERRIDE
+apply_list_override SETTINGS_GROUPS SETTINGS_GROUPS_OVERRIDE
 
 detect_vector_column() {
     local table="$1"
@@ -93,7 +100,7 @@ generate_sql_for_table() {
         if ! "$CLICKHOUSE" client \
             --host "$HOST" \
             --port "$PORT" \
-            --query "SELECT arrayStringConcat($vec_col, ',') FROM $table ORDER BY rand() LIMIT $count SETTINGS use_query_cache=0" \
+            --query "SELECT id, arrayStringConcat($vec_col, ','), hex(reinterpretAsString($vec_col)) FROM $table ORDER BY rand() LIMIT $count SETTINGS use_query_cache=0" \
             > "$tmp_vectors" 2>"$tmp_error"; then
             echo "  错误: 表 $table 抽取 ${count} 条样本向量失败，无法生成 SQL"
             echo "  ClickHouse 错误输出:"
@@ -110,7 +117,7 @@ generate_sql_for_table() {
 
         local normal_file="$SQL_DIR/${table}_${settings_profile}_normal_${count}.sql"
         > "$normal_file"
-        while IFS= read -r vec_str; do
+        while IFS=$'\t' read -r _id vec_str _vec_hex; do
             [ -z "$vec_str" ] && continue
             echo "SELECT id, ${dist_func}(${vec_col}, [${vec_str}]) as dis FROM ${table} ORDER BY dis ${sort_dir} LIMIT ${TOP_K}${settings_clause};" >> "$normal_file"
         done < "$tmp_vectors"
@@ -118,11 +125,107 @@ generate_sql_for_table() {
 
         local cast_file="$SQL_DIR/${table}_${settings_profile}_cast_${count}.sql"
         > "$cast_file"
-        while IFS= read -r vec_str; do
+        while IFS=$'\t' read -r _id vec_str _vec_hex; do
             [ -z "$vec_str" ] && continue
             echo "SELECT id, ${dist_func}(${vec_col}, cast('[${vec_str}]','Array(Float32)')) as dis FROM ${table} ORDER BY dis ${sort_dir} LIMIT ${TOP_K}${settings_clause};" >> "$cast_file"
         done < "$tmp_vectors"
         echo "    已生成: $cast_file ($(wc -l < "$cast_file") 条查询)"
+
+        local cast_array_file="$SQL_DIR/${table}_${settings_profile}_cast_array_${count}.sql"
+        > "$cast_array_file"
+        while IFS=$'\t' read -r _id vec_str _vec_hex; do
+            [ -z "$vec_str" ] && continue
+            echo "SELECT id, ${dist_func}(${vec_col}, CAST([${vec_str}] AS Array(Float32))) as dis FROM ${table} ORDER BY dis ${sort_dir} LIMIT ${TOP_K}${settings_clause};" >> "$cast_array_file"
+        done < "$tmp_vectors"
+        echo "    已生成: $cast_array_file ($(wc -l < "$cast_array_file") 条查询)"
+
+        local type_hint_file="$SQL_DIR/${table}_${settings_profile}_type_hint_${count}.sql"
+        > "$type_hint_file"
+        while IFS=$'\t' read -r _id vec_str _vec_hex; do
+            [ -z "$vec_str" ] && continue
+            echo "SELECT id, ${dist_func}(${vec_col}, [${vec_str}]::Array(Float32)) as dis FROM ${table} ORDER BY dis ${sort_dir} LIMIT ${TOP_K}${settings_clause};" >> "$type_hint_file"
+        done < "$tmp_vectors"
+        echo "    已生成: $type_hint_file ($(wc -l < "$type_hint_file") 条查询)"
+
+        local raw_bytes_file="$SQL_DIR/${table}_${settings_profile}_raw_bytes_${count}.sql"
+        > "$raw_bytes_file"
+        while IFS=$'\t' read -r _id _vec_str vec_hex; do
+            [ -z "$vec_hex" ] && continue
+            echo "SELECT id, ${dist_func}(${vec_col}, reinterpret(unhex('${vec_hex}'), 'Array(Float32)')) as dis FROM ${table} ORDER BY dis ${sort_dir} LIMIT ${TOP_K}${settings_clause};" >> "$raw_bytes_file"
+        done < "$tmp_vectors"
+        echo "    已生成: $raw_bytes_file ($(wc -l < "$raw_bytes_file") 条查询)"
+
+        local raw_bytes_x_file="$SQL_DIR/${table}_${settings_profile}_raw_bytes_x_${count}.sql"
+        > "$raw_bytes_x_file"
+        while IFS=$'\t' read -r _id _vec_str vec_hex; do
+            [ -z "$vec_hex" ] && continue
+            echo "SELECT id, ${dist_func}(${vec_col}, reinterpret(x'${vec_hex}', 'Array(Float32)')) as dis FROM ${table} ORDER BY dis ${sort_dir} LIMIT ${TOP_K}${settings_clause};" >> "$raw_bytes_x_file"
+        done < "$tmp_vectors"
+        echo "    已生成: $raw_bytes_x_file ($(wc -l < "$raw_bytes_x_file") 条查询)"
+
+        local with_file="$SQL_DIR/${table}_${settings_profile}_with_${count}.sql"
+        > "$with_file"
+        while IFS=$'\t' read -r _id vec_str _vec_hex; do
+            [ -z "$vec_str" ] && continue
+            echo "WITH [${vec_str}] AS query_vector SELECT id, ${dist_func}(${vec_col}, query_vector) as dis FROM ${table} ORDER BY dis ${sort_dir} LIMIT ${TOP_K}${settings_clause};" >> "$with_file"
+        done < "$tmp_vectors"
+        echo "    已生成: $with_file ($(wc -l < "$with_file") 条查询)"
+
+        local with_cast_file="$SQL_DIR/${table}_${settings_profile}_with_cast_${count}.sql"
+        > "$with_cast_file"
+        while IFS=$'\t' read -r _id vec_str _vec_hex; do
+            [ -z "$vec_str" ] && continue
+            echo "WITH cast('[${vec_str}]','Array(Float32)') AS query_vector SELECT id, ${dist_func}(${vec_col}, query_vector) as dis FROM ${table} ORDER BY dis ${sort_dir} LIMIT ${TOP_K}${settings_clause};" >> "$with_cast_file"
+        done < "$tmp_vectors"
+        echo "    已生成: $with_cast_file ($(wc -l < "$with_cast_file") 条查询)"
+
+        local with_cast_array_file="$SQL_DIR/${table}_${settings_profile}_with_cast_array_${count}.sql"
+        > "$with_cast_array_file"
+        while IFS=$'\t' read -r _id vec_str _vec_hex; do
+            [ -z "$vec_str" ] && continue
+            echo "WITH CAST([${vec_str}] AS Array(Float32)) AS query_vector SELECT id, ${dist_func}(${vec_col}, query_vector) as dis FROM ${table} ORDER BY dis ${sort_dir} LIMIT ${TOP_K}${settings_clause};" >> "$with_cast_array_file"
+        done < "$tmp_vectors"
+        echo "    已生成: $with_cast_array_file ($(wc -l < "$with_cast_array_file") 条查询)"
+
+        local with_type_hint_file="$SQL_DIR/${table}_${settings_profile}_with_type_hint_${count}.sql"
+        > "$with_type_hint_file"
+        while IFS=$'\t' read -r _id vec_str _vec_hex; do
+            [ -z "$vec_str" ] && continue
+            echo "WITH [${vec_str}]::Array(Float32) AS query_vector SELECT id, ${dist_func}(${vec_col}, query_vector) as dis FROM ${table} ORDER BY dis ${sort_dir} LIMIT ${TOP_K}${settings_clause};" >> "$with_type_hint_file"
+        done < "$tmp_vectors"
+        echo "    已生成: $with_type_hint_file ($(wc -l < "$with_type_hint_file") 条查询)"
+
+        local with_raw_bytes_file="$SQL_DIR/${table}_${settings_profile}_with_raw_bytes_${count}.sql"
+        > "$with_raw_bytes_file"
+        while IFS=$'\t' read -r _id _vec_str vec_hex; do
+            [ -z "$vec_hex" ] && continue
+            echo "WITH reinterpret(unhex('${vec_hex}'), 'Array(Float32)') AS query_vector SELECT id, ${dist_func}(${vec_col}, query_vector) as dis FROM ${table} ORDER BY dis ${sort_dir} LIMIT ${TOP_K}${settings_clause};" >> "$with_raw_bytes_file"
+        done < "$tmp_vectors"
+        echo "    已生成: $with_raw_bytes_file ($(wc -l < "$with_raw_bytes_file") 条查询)"
+
+        local with_raw_bytes_x_file="$SQL_DIR/${table}_${settings_profile}_with_raw_bytes_x_${count}.sql"
+        > "$with_raw_bytes_x_file"
+        while IFS=$'\t' read -r _id _vec_str vec_hex; do
+            [ -z "$vec_hex" ] && continue
+            echo "WITH reinterpret(x'${vec_hex}', 'Array(Float32)') AS query_vector SELECT id, ${dist_func}(${vec_col}, query_vector) as dis FROM ${table} ORDER BY dis ${sort_dir} LIMIT ${TOP_K}${settings_clause};" >> "$with_raw_bytes_x_file"
+        done < "$tmp_vectors"
+        echo "    已生成: $with_raw_bytes_x_file ($(wc -l < "$with_raw_bytes_x_file") 条查询)"
+
+        local subquery_id_file="$SQL_DIR/${table}_${settings_profile}_subquery_id_${count}.sql"
+        > "$subquery_id_file"
+        while IFS=$'\t' read -r id _vec_str _vec_hex; do
+            [ -z "$id" ] && continue
+            echo "SELECT id, ${dist_func}(${vec_col}, (SELECT ${vec_col} FROM ${table} WHERE id = ${id})) as dis FROM ${table} ORDER BY dis ${sort_dir} LIMIT ${TOP_K}${settings_clause};" >> "$subquery_id_file"
+        done < "$tmp_vectors"
+        echo "    已生成: $subquery_id_file ($(wc -l < "$subquery_id_file") 条查询)"
+
+        local with_subquery_id_file="$SQL_DIR/${table}_${settings_profile}_with_subquery_id_${count}.sql"
+        > "$with_subquery_id_file"
+        while IFS=$'\t' read -r id _vec_str _vec_hex; do
+            [ -z "$id" ] && continue
+            echo "WITH (SELECT ${vec_col} FROM ${table} WHERE id = ${id}) AS query_vector SELECT id, ${dist_func}(${vec_col}, query_vector) as dis FROM ${table} ORDER BY dis ${sort_dir} LIMIT ${TOP_K}${settings_clause};" >> "$with_subquery_id_file"
+        done < "$tmp_vectors"
+        echo "    已生成: $with_subquery_id_file ($(wc -l < "$with_subquery_id_file") 条查询)"
 
         rm -f "$tmp_vectors" "$tmp_error"
     done
@@ -246,6 +349,7 @@ echo "重复:   $REPEAT 次 (去掉最大最小值取均值)"
 echo "并发:   ${CONCURRENCIES[*]}"
 echo "类型:   ${SQL_TYPES[*]}"
 echo "行数:   ${ROW_COUNTS[*]}"
+echo "浮点解析 precise_float_parsing: ${PRECISE_FLOAT_PARSING_VALUES[*]}"
 echo "输出:   $OUTPUT_CSV"
 echo "=============================================="
 echo ""
@@ -424,6 +528,7 @@ else
         --delay 0 \
         --randomize \
         --iterations 0 \
+        --precise_float_parsing "${PRECISE_FLOAT_PARSING_VALUES[0]}" \
         -- \
         < "$warmup_sql_file" \
         > /dev/null 2>&1
@@ -436,7 +541,7 @@ echo ""
 echo ">>> Step 6: 运行基准测试"
 echo ""
 
-NEW_HEADER="table_name,distance_func,index_status,settings_profile,use_query_cache,vector_query_plan_cache,vector_only_cache_query_plan,vector_query_plan_cache_only_vector,vector_use_cast,sql_type,row_count,concurrency"
+NEW_HEADER="table_name,distance_func,index_status,settings_profile,use_query_cache,vector_query_plan_cache,vector_only_cache_query_plan,vector_query_plan_cache_only_vector,vector_use_cast,precise_float_parsing,sql_type,row_count,concurrency"
 for i in $(seq 1 $REPEAT); do
     NEW_HEADER="${NEW_HEADER},run_${i}"
 done
@@ -456,7 +561,8 @@ else
             tmp_csv=$(mktemp)
             echo "$NEW_HEADER" > "$tmp_csv"
             tail -n +2 "$OUTPUT_CSV" | while IFS= read -r line; do
-                echo "local_768d_test,cosineDistance,full_scan,${line}" >> "$tmp_csv"
+                migrated="local_768d_test,cosineDistance,full_scan,${line}"
+                echo "$migrated" | awk -F',' 'BEGIN {OFS=","} {for (i=1; i<=9; ++i) printf "%s%s", $i, OFS; printf "not_recorded"; for (i=10; i<=NF; ++i) printf "%s%s", OFS, $i; printf "\n"}' >> "$tmp_csv"
             done
             mv "$tmp_csv" "$OUTPUT_CSV"
             echo "迁移完成"
@@ -465,8 +571,16 @@ else
             tmp_csv=$(mktemp)
             echo "$NEW_HEADER" > "$tmp_csv"
             tail -n +2 "$OUTPUT_CSV" | while IFS= read -r line; do
-                echo "${line/,/,cosineDistance,full_scan,}" >> "$tmp_csv"
+                migrated="${line/,/,cosineDistance,full_scan,}"
+                echo "$migrated" | awk -F',' 'BEGIN {OFS=","} {for (i=1; i<=9; ++i) printf "%s%s", $i, OFS; printf "not_recorded"; for (i=10; i<=NF; ++i) printf "%s%s", OFS, $i; printf "\n"}' >> "$tmp_csv"
             done
+            mv "$tmp_csv" "$OUTPUT_CSV"
+            echo "迁移完成"
+        elif echo "$existing_header" | grep -q '^table_name,distance_func,index_status,settings_profile'; then
+            echo "迁移旧数据: 添加 precise_float_parsing=not_recorded 列..."
+            tmp_csv=$(mktemp)
+            echo "$NEW_HEADER" > "$tmp_csv"
+            tail -n +2 "$OUTPUT_CSV" | awk -F',' 'BEGIN {OFS=","} {for (i=1; i<=9; ++i) printf "%s%s", $i, OFS; printf "not_recorded"; for (i=10; i<=NF; ++i) printf "%s%s", OFS, $i; printf "\n"}' >> "$tmp_csv"
             mv "$tmp_csv" "$OUTPUT_CSV"
             echo "迁移完成"
         else
@@ -502,96 +616,100 @@ for settings_group in "${SETTINGS_GROUPS[@]}"; do
         echo "╚══════════════════════════════════════════════════════════════╝"
         echo ""
 
-        for sql_type in "${SQL_TYPES[@]}"; do
-            for row_count in "${ROW_COUNTS[@]}"; do
-                sql_file="$SQL_DIR/${table}_${profile_name}_${sql_type}_${row_count}.sql"
+        for precise_float_parsing in "${PRECISE_FLOAT_PARSING_VALUES[@]}"; do
+            echo "  precise_float_parsing=$precise_float_parsing"
+            for sql_type in "${SQL_TYPES[@]}"; do
+                for row_count in "${ROW_COUNTS[@]}"; do
+                    sql_file="$SQL_DIR/${table}_${profile_name}_${sql_type}_${row_count}.sql"
 
-                if [ ! -f "$sql_file" ]; then
-                    echo "警告: SQL 文件不存在，跳过: $sql_file"
-                    continue
-                fi
-
-                actual_queries=$(wc -l < "$sql_file")
-                echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-                echo " 表: $table  Profile: $profile_name  SQL: ${sql_type}_${row_count}.sql ($actual_queries 条查询)"
-                echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-
-                for concurrency in "${CONCURRENCIES[@]}"; do
-                    echo ""
-                    echo "  并发数: $concurrency (重复 $REPEAT 次)"
-
-                    qps_values=()
-
-                    for run in $(seq 1 $REPEAT); do
-                        stderr_file="$TMPDIR/stderr_${table}_${profile_name}_${sql_type}_${row_count}_${concurrency}_${run}.log"
-
-                        echo -n "    第 ${run}/${REPEAT} 次... "
-
-                        set +e
-                        "$CLICKHOUSE" benchmark \
-                            --host "$HOST" \
-                            --port "$PORT" \
-                            --concurrency "$concurrency" \
-                            --timelimit "$TIMELIMIT" \
-                            --delay 0 \
-                            --randomize \
-                            --iterations 0 \
-                            -- \
-                            < "$sql_file" \
-                            2>"$stderr_file" \
-                            > /dev/null
-                        exit_code=$?
-                        set -e
-
-                        if [ $exit_code -ne 0 ]; then
-                            echo "错误 (exit=$exit_code)，记录 QPS=0"
-                            echo "  stderr 尾部:"
-                            tail -5 "$stderr_file" 2>/dev/null | sed 's/^/    /'
-                            qps_values+=(0)
-                            continue
-                        fi
-
-                        qps=$(parse_total_qps "$(cat "$stderr_file")")
-
-                        if [ -z "$qps" ] || [ "$qps" = "0.000" ]; then
-                            echo "警告: 无法解析 QPS，记录为 0"
-                            head -20 "$stderr_file" | sed 's/^/    /'
-                            qps_values+=(0)
-                        else
-                            echo "QPS = $qps"
-                            qps_values+=("$qps")
-                        fi
-                    done
-
-                    sorted_qps=$(printf '%s\n' "${qps_values[@]}" | sort -n)
-                    count=${#qps_values[@]}
-
-                    if [ "$count" -le 2 ]; then
-                        qps_avg=$(printf '%s\n' "${qps_values[@]}" | awk '{sum+=$1; n++} END {printf "%.3f", sum/n}')
-                        qps_min=$(printf '%s\n' "${qps_values[@]}" | sort -n | head -1)
-                        qps_max=$(printf '%s\n' "${qps_values[@]}" | sort -n | tail -1)
-                    else
-                        qps_min=$(echo "$sorted_qps" | head -1)
-                        qps_max=$(echo "$sorted_qps" | tail -1)
-                        qps_avg=$(echo "$sorted_qps" | sed '1d;$d' | awk '{sum+=$1; n++} END {printf "%.3f", sum/n}')
+                    if [ ! -f "$sql_file" ]; then
+                        echo "警告: SQL 文件不存在，跳过: $sql_file"
+                        continue
                     fi
 
-                    echo "  ─────────────────────────────────────"
-                    echo "  结果: 均值=$qps_avg  最小=$qps_min  最大=$qps_max"
+                    actual_queries=$(wc -l < "$sql_file")
+                    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+                    echo " 表: $table  Profile: $profile_name  precise_float_parsing=$precise_float_parsing  SQL: ${sql_type}_${row_count}.sql ($actual_queries 条查询)"
+                    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+
+                    for concurrency in "${CONCURRENCIES[@]}"; do
+                        echo ""
+                        echo "  并发数: $concurrency (重复 $REPEAT 次)"
+
+                        qps_values=()
+
+                        for run in $(seq 1 $REPEAT); do
+                            stderr_file="$TMPDIR/stderr_${table}_${profile_name}_precise${precise_float_parsing}_${sql_type}_${row_count}_${concurrency}_${run}.log"
+
+                            echo -n "    第 ${run}/${REPEAT} 次... "
+
+                            set +e
+                            "$CLICKHOUSE" benchmark \
+                                --host "$HOST" \
+                                --port "$PORT" \
+                                --concurrency "$concurrency" \
+                                --timelimit "$TIMELIMIT" \
+                                --delay 0 \
+                                --randomize \
+                                --iterations 0 \
+                                --precise_float_parsing "$precise_float_parsing" \
+                                -- \
+                                < "$sql_file" \
+                                2>"$stderr_file" \
+                                > /dev/null
+                            exit_code=$?
+                            set -e
+
+                            if [ $exit_code -ne 0 ]; then
+                                echo "错误 (exit=$exit_code)，记录 QPS=0"
+                                echo "  stderr 尾部:"
+                                tail -5 "$stderr_file" 2>/dev/null | sed 's/^/    /'
+                                qps_values+=(0)
+                                continue
+                            fi
+
+                            qps=$(parse_total_qps "$(cat "$stderr_file")")
+
+                            if [ -z "$qps" ] || [ "$qps" = "0.000" ]; then
+                                echo "警告: 无法解析 QPS，记录为 0"
+                                head -20 "$stderr_file" | sed 's/^/    /'
+                                qps_values+=(0)
+                            else
+                                echo "QPS = $qps"
+                                qps_values+=("$qps")
+                            fi
+                        done
+
+                        sorted_qps=$(printf '%s\n' "${qps_values[@]}" | sort -n)
+                        count=${#qps_values[@]}
+
+                        if [ "$count" -le 2 ]; then
+                            qps_avg=$(printf '%s\n' "${qps_values[@]}" | awk '{sum+=$1; n++} END {printf "%.3f", sum/n}')
+                            qps_min=$(printf '%s\n' "${qps_values[@]}" | sort -n | head -1)
+                            qps_max=$(printf '%s\n' "${qps_values[@]}" | sort -n | tail -1)
+                        else
+                            qps_min=$(echo "$sorted_qps" | head -1)
+                            qps_max=$(echo "$sorted_qps" | tail -1)
+                            qps_avg=$(echo "$sorted_qps" | sed '1d;$d' | awk '{sum+=$1; n++} END {printf "%.3f", sum/n}')
+                        fi
+
+                        echo "  ─────────────────────────────────────"
+                        echo "  结果: 均值=$qps_avg  最小=$qps_min  最大=$qps_max"
+                        echo ""
+
+                        csv_line="${table},${DISTANCE_FUNC},${TABLE_INDEX_STATUS[$table]},${profile_name},${val_use_query_cache},${val_vector_query_plan_cache},${val_vector_only_cache_query_plan},${val_vector_query_plan_cache_only_vector},${val_vector_use_cast},${precise_float_parsing},${sql_type},${row_count},${concurrency}"
+                        for v in "${qps_values[@]}"; do
+                            csv_line="${csv_line},${v}"
+                        done
+                        for _ in $(seq $((count + 1)) $REPEAT); do
+                            csv_line="${csv_line},"
+                        done
+                        csv_line="${csv_line},${qps_avg},${qps_min},${qps_max}"
+                        echo "$csv_line" >> "$OUTPUT_CSV"
+                    done
+
                     echo ""
-
-                    csv_line="${table},${DISTANCE_FUNC},${TABLE_INDEX_STATUS[$table]},${profile_name},${val_use_query_cache},${val_vector_query_plan_cache},${val_vector_only_cache_query_plan},${val_vector_query_plan_cache_only_vector},${val_vector_use_cast},${sql_type},${row_count},${concurrency}"
-                    for v in "${qps_values[@]}"; do
-                        csv_line="${csv_line},${v}"
-                    done
-                    for _ in $(seq $((count + 1)) $REPEAT); do
-                        csv_line="${csv_line},"
-                    done
-                    csv_line="${csv_line},${qps_avg},${qps_min},${qps_max}"
-                    echo "$csv_line" >> "$OUTPUT_CSV"
                 done
-
-                echo ""
             done
         done
     done

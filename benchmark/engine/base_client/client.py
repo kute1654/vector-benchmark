@@ -77,7 +77,7 @@ class BaseClient:
 
     def save_search_and_upload_results(
             self, search_results: dict, search_id: int, search_params: dict,
-            upload_params: dict, upload_results: dict, result_group: str, cache_mode: int, CAST_mode: int, only_vector: int, use_number: int
+            upload_params: dict, upload_results: dict, result_group: str, cache_mode: int, CAST_mode: int, only_vector: int, use_number: int, result_cache: int = 0
     ):
         now = datetime.now()
         timestamp = now.strftime("%Y-%m-%d-%H-%M-%S")
@@ -114,6 +114,7 @@ class BaseClient:
             search_results["CAST_mode"] = CAST_mode
             search_results["only_vector"] = only_vector
             search_results["use_number"] = use_number
+            search_results["use_result_cache"] = int(result_cache)
             payload = {
                 "result_group": result_group,  # single search or hybrid search
                 "meta": meta,
@@ -312,10 +313,23 @@ class BaseClient:
         """Complete MyScale-specific experiment implementation with full query plan cache parameters"""
         
         search_number = self.uploader.upload_params.get("search_number", 1)
-        use_query_plan_cache = self.uploader.upload_params.get("use_query_plan_cache", [0])
+        search_number = int(search_number or 1)
+        use_query_plan_cache = self.uploader.upload_params.get("use_query_plan_cache", self.uploader.upload_params.get("enable_query_plan_cache", [0]))
+        # MyScale encodes result-cache mode as +2 in the existing cache mode
+        # field.  This preserves the old result format while allowing plan-only,
+        # result-only and combined tests in one run.
+        result_cache_modes = self.uploader.upload_params.get("use_query_cache", [0])
+        if not isinstance(use_query_plan_cache, list):
+            use_query_plan_cache = [use_query_plan_cache]
+        if not isinstance(result_cache_modes, list):
+            result_cache_modes = [result_cache_modes]
+        encoded_cache_modes = []
+        for plan_mode in use_query_plan_cache:
+            for result_mode in result_cache_modes:
+                encoded_cache_modes.append(int(plan_mode) + (2 if int(result_mode) else 0))
         query_plan_cache_enable_CAST = self.uploader.upload_params.get("query_plan_cache_enable_CAST", [0])
        
-        for cache_mode in use_query_plan_cache:
+        for cache_mode in encoded_cache_modes:
             if cache_mode == 0:
                 query_plan_cache_only_vector = [0]
                 query_plan_cache_use_number = [0]
@@ -522,13 +536,31 @@ class BaseClient:
         import functools
 
         search_number = self.uploader.upload_params.get("search_number", 1)
+        search_number = int(search_number or 1)
 
-        # ClickHouse 支持的查询计划缓存参数
+        # ClickHouse supports vector-plan and result-cache settings together.
+        # Preserve the legacy encoded modes when use_query_cache is absent;
+        # otherwise expand an explicit plan-cache × result-cache matrix.
         vector_query_plan_cache = self.uploader.upload_params.get("vector_query_plan_cache", [0])
         vector_use_cast = self.uploader.upload_params.get("vector_use_cast", [0])
+        result_cache_values = self.uploader.upload_params.get("use_query_cache")
+        if not isinstance(vector_query_plan_cache, list):
+            vector_query_plan_cache = [vector_query_plan_cache]
+        if not isinstance(vector_use_cast, list):
+            vector_use_cast = [vector_use_cast]
+        if result_cache_values is not None and not isinstance(result_cache_values, list):
+            result_cache_values = [result_cache_values]
+        if result_cache_values is None:
+            encoded_cache_modes = vector_query_plan_cache
+        else:
+            encoded_cache_modes = [
+                int(plan_mode) + (3 if int(result_mode) else 0)
+                for plan_mode in vector_query_plan_cache
+                for result_mode in result_cache_values
+            ]
         
 
-        for cache_mode in vector_query_plan_cache:
+        for cache_mode in encoded_cache_modes:
             if cache_mode == 0:
                 vector_query_plan_cache_only_vector = [0]
             else:
@@ -689,7 +721,8 @@ class BaseClient:
                                 cache_mode=cache_mode,
                                 CAST_mode=CAST_mode,
                                 only_vector=only_vector,
-                                use_number = 0
+                                use_number = 0,
+                                result_cache=1 if int(cache_mode) > 2 else 0
                             )
                             # Save results to CSV for easy comparison
                             self.save_clickhouse_to_csv(
@@ -726,6 +759,7 @@ class BaseClient:
                 'vector_query_plan_cache': int(cache_mode),
                 'vector_use_cast': int(CAST_mode),
                 'vector_query_plan_cache_only_vector': int(only_vector),
+                'use_query_cache': 1 if int(cache_mode) > 2 else 0,
                 'parallel': int(parallel),
                 'test_duration': int(test_duration),
                 'ef_s': int(ef_s),
@@ -744,7 +778,7 @@ class BaseClient:
             with open(CSV_RESULTS_FILE, 'a', newline='') as csvfile:
                 fieldnames = [
                     'timestamp', 'experiment_name', 'dataset', 'vector_size', 'distance',
-                    'vector_query_plan_cache', 'vector_use_cast', 'vector_query_plan_cache_only_vector',
+                    'vector_query_plan_cache', 'vector_use_cast', 'vector_query_plan_cache_only_vector', 'use_query_cache',
                     'parallel', 'test_duration', 'ef_s',
                     'rps', 'recall', 'mean_precisions', 'mrr', 'mean_time', 'p95_time', 'p99_time'
                 ]
@@ -764,14 +798,22 @@ class BaseClient:
         import functools
         
         search_number = self.uploader.upload_params.get("search_number", 1)
+        search_number = int(search_number or 1)
         
         use_cache_values = self.uploader.upload_params.get("use_cache", [0])
+        result_cache_values = self.uploader.upload_params.get("use_query_cache", [0])
+        if not isinstance(use_cache_values, list):
+            use_cache_values = [use_cache_values]
+        if not isinstance(result_cache_values, list):
+            result_cache_values = [result_cache_values]
         
         for use_cache_val in use_cache_values:
+          for result_cache_val in result_cache_values:
             # PGvector-specific parameter injection - only use_cache
             def with_pgvector_cache_modes(search_params):
                 params = dict(search_params or {})
                 params["use_query_plan_cache"] = int(use_cache_val)
+                params["use_result_cache"] = int(result_cache_val)
                 return params
 
             def log_pgvector_params(params_dict, prefix):
@@ -780,6 +822,7 @@ class BaseClient:
                     "top": params_dict.get("top"),
                     "test_duration": params_dict.get("test_duration"),
                     "use_query_plan_cache": params_dict.get("use_query_plan_cache"),
+                    "use_result_cache": params_dict.get("use_result_cache"),
                 }
                 params_only = (params_dict.get("params") or {})
                 if not isinstance(params_only, dict):
@@ -920,19 +963,21 @@ class BaseClient:
                         cache_mode=use_cache_val,
                         CAST_mode=0,
                         only_vector=0,
-                        use_number=0
+                        use_number=0,
+                        result_cache=result_cache_val
                     )
                     # Save results to CSV for easy comparison
                     self.save_pgvector_to_csv(
                         search_results=averaged_stats,
                         search_params=effective_search_params,
                         dataset_config=dataset.config,
-                        use_cache=use_cache_val
+                        use_cache=use_cache_val,
+                        result_cache=result_cache_val
                     )
-            if recall_only and recall_only_results:
-                self.save_recall_only_results(recall_only_results)
+                if recall_only and recall_only_results:
+                    self.save_recall_only_results(recall_only_results)
 
-    def save_pgvector_to_csv(self, search_results, search_params, dataset_config, use_cache):
+    def save_pgvector_to_csv(self, search_results, search_params, dataset_config, use_cache, result_cache=0):
         """
         Save PGvector benchmark results to CSV file with all required parameters for comparison.
         """
@@ -953,6 +998,7 @@ class BaseClient:
                 'vector_size': getattr(dataset_config, 'vector_size', 0),
                 'distance': getattr(dataset_config, 'distance', ''),
                 'use_cache': int(use_cache),
+                'use_query_cache': int(result_cache),
                 'parallel': int(parallel),
                 'test_duration': int(test_duration),
                 'ef_s': int(ef_s),
@@ -971,7 +1017,7 @@ class BaseClient:
             with open(CSV_RESULTS_FILE, 'a', newline='') as csvfile:
                 fieldnames = [
                     'timestamp', 'experiment_name', 'dataset', 'vector_size', 'distance',
-                    'use_cache', 'parallel', 'test_duration', 'ef_s',
+                    'use_cache', 'use_query_cache', 'parallel', 'test_duration', 'ef_s',
                     'rps', 'recall', 'mean_precisions', 'mrr', 'mean_time', 'p95_time', 'p99_time'
                 ]
                 
@@ -996,6 +1042,7 @@ class BaseClient:
         engine_lower = self.engine.lower()
         is_myscale = engine_lower == 'myscale'
         is_pgvector = engine_lower == 'pgvector'
+        is_polardb = engine_lower == 'polardb'
         is_clickhouse = engine_lower == 'clickhouse'
         search_number = self.uploader.upload_params.get("search_number", 1)
         upload_stats = {}
@@ -1035,6 +1082,8 @@ class BaseClient:
         if is_myscale:
             self._run_myscale_experiment(dataset, skip_upload, recall_only, upload_stats, reader)
         elif is_pgvector:
+            self._run_pgvector_experiment(dataset, skip_upload, recall_only, upload_stats, reader)
+        elif is_polardb:
             self._run_pgvector_experiment(dataset, skip_upload, recall_only, upload_stats, reader)
         elif is_clickhouse:
             self._run_clickhouse_experiment(dataset, skip_upload, recall_only, upload_stats, reader)

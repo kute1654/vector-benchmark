@@ -61,6 +61,17 @@ try:
 except ImportError:
     PGVECTOR_AVAILABLE = False
 
+# PolarDB uses PostgreSQL wire protocol, but its PASE data type, operator and
+# index DDL are different from pgvector.  Keep it as a first-class engine so a
+# PolarDB config can never silently fall through to MyScale.
+try:
+    from engine.clients.polardb.configure import PolarDBConfigurator
+    from engine.clients.polardb.search import PolarDBSearcher
+    from engine.clients.polardb.upload import PolarDBUploader
+    POLARDB_AVAILABLE = True
+except ImportError:
+    POLARDB_AVAILABLE = False
+
 
 class ClientFactory(ABC):
     def __init__(self, host):
@@ -107,10 +118,21 @@ class ClientFactory(ABC):
                 yield {**expanded_base, "params": expanded_params}
 
     def _create_configurator(self, experiment) -> BaseConfigurator:
-        engine_type = experiment.get("engine", "myscale").lower()
+        if not experiment:
+            raise ValueError(
+                "experiment config is None or empty. "
+                "Please check your configuration file format in configurations/*.json"
+            )
+        engine_type = (experiment.get("engine") or "myscale").lower()
 
         if engine_type == "pgvector" and PGVECTOR_AVAILABLE:
             engine_configurator = PGVectorConfigurator(
+                self.host,
+                collection_params={**experiment.get("upload_params", {})},
+                connection_params={**experiment.get("connection_params", {})},
+            )
+        elif engine_type == "polardb" and POLARDB_AVAILABLE:
+            engine_configurator = PolarDBConfigurator(
                 self.host,
                 collection_params={**experiment.get("upload_params", {})},
                 connection_params={**experiment.get("connection_params", {})},
@@ -121,12 +143,14 @@ class ClientFactory(ABC):
                 collection_params={**experiment.get("upload_params", {})},
                 connection_params={**experiment.get("connection_params", {})},
             )
-        else:
+        elif engine_type == "myscale":
             engine_configurator = MyScaleConfigurator(
                 self.host,
                 collection_params={**experiment.get("upload_params", {})},
                 connection_params={**experiment.get("connection_params", {})},
             )
+        else:
+            raise RuntimeError(f"unsupported engine or unavailable client: {engine_type}")
         return engine_configurator
 
     def _create_uploader(self, experiment) -> BaseUploader:
@@ -139,12 +163,22 @@ class ClientFactory(ABC):
             index_type_str = str(index_type_raw or "").strip()
             index_type = index_type_str.lower()
 
-            if index_type not in ["hnsw"]:
-                raise RuntimeError(f"PGVector only supports 'hnsw' index_type, got: {index_type}")
+            if index_type not in ["hnsw", "ivfflat", "none"]:
+                raise RuntimeError(f"PGVector only supports 'hnsw', 'ivfflat' or 'none', got: {index_type}")
 
             upload_params["_index_type"] = index_type
 
             engine_uploader = PGVectorUploader(
+                self.host,
+                connection_params={**experiment.get("connection_params", {})},
+                upload_params=upload_params,
+            )
+        elif engine_type == "polardb" and POLARDB_AVAILABLE:
+            index_type = str(upload_params.get("index_type", "hnsw") or "").strip().lower()
+            if index_type not in {"hnsw", "ivfflat", "none"}:
+                raise RuntimeError(f"PolarDB only supports 'hnsw', 'ivfflat' or 'none', got: {index_type}")
+            upload_params["_index_type"] = index_type
+            engine_uploader = PolarDBUploader(
                 self.host,
                 connection_params={**experiment.get("connection_params", {})},
                 upload_params=upload_params,
@@ -169,7 +203,7 @@ class ClientFactory(ABC):
                 connection_params={**experiment.get("connection_params", {})},
                 upload_params=upload_params,
             )
-        else:
+        elif engine_type == "myscale":
             # MyScale logic (existing code)
             index_type_raw = upload_params.get("index_type", "")
             index_type_str = str(index_type_raw or "").strip()
@@ -208,6 +242,8 @@ class ClientFactory(ABC):
                 connection_params={**experiment.get("connection_params", {})},
                 upload_params=upload_params,
             )
+        else:
+            raise RuntimeError(f"unsupported engine or unavailable client: {engine_type}")
         return engine_uploader
 
     def _create_searchers(self, experiment) -> List[BaseSearcher]:
@@ -220,8 +256,10 @@ class ClientFactory(ABC):
             search_params_list = raw_search_params
         elif isinstance(raw_search_params, dict):
             search_params_list = [raw_search_params]
-        else:
+        elif engine_type == "myscale":
             search_params_list = [{}]
+        else:
+            raise RuntimeError("search_params must be an object or array")
 
         # illegal checks
         upload_params = experiment.get("upload_params", {}) or {}
@@ -255,6 +293,15 @@ class ClientFactory(ABC):
                 )
                 for search_params in expanded_search_params
             ]
+        elif engine_type == "polardb" and POLARDB_AVAILABLE:
+            engine_searchers = [
+                PolarDBSearcher(
+                    self.host,
+                    connection_params={**base_connection_params},
+                    search_params=search_params,
+                )
+                for search_params in expanded_search_params
+            ]
         elif engine_type == "clickhouse" and CLICKHOUSE_AVAILABLE:
             engine_searchers = [
                 ClickHouseSearcher(
@@ -264,7 +311,7 @@ class ClientFactory(ABC):
                 )
                 for search_params in expanded_search_params
             ]
-        else:
+        elif engine_type == "myscale":
             engine_searchers = [
                 MyScaleSearcher(
                     self.host,
@@ -273,14 +320,22 @@ class ClientFactory(ABC):
                 )
                 for search_params in expanded_search_params
             ]
+        else:
+            raise RuntimeError(f"unsupported engine or unavailable client: {engine_type}")
         return engine_searchers
 
     def build_client(self, experiment, dataset_name, dataset_config):
+        if not experiment:
+            raise ValueError(
+                f"experiment config is None for dataset '{dataset_name}'. "
+                "Please check your configuration file format in configurations/*.json"
+            )
         meta = {
             "dataset": dataset_name,
         }
+        experiment = dict(experiment)
         experiment_name = experiment.get("name") or f"{experiment.get('engine', 'myscale')}-{dataset_name}"
-        engine_type = experiment.get("engine", "myscale")
+        engine_type = (experiment.get("engine") or "myscale").lower()
 
         vector_size = dataset_config.get("vector_size", 0)
         if vector_size:
@@ -292,6 +347,9 @@ class ClientFactory(ABC):
         if "table" not in connection_params:
             connection_params["table"] = generate_table_name(dataset_config)
             experiment["connection_params"] = connection_params
+
+        if engine_type not in {"pgvector", "polardb", "clickhouse", "myscale"}:
+            raise RuntimeError(f"unsupported engine: {engine_type}")
 
         return BaseClient(
             name=experiment_name,

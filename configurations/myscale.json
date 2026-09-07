@@ -1,0 +1,39 @@
+[
+  {
+    "name": "myscale-sift-128-euclidean",
+    "engine": "myscale",
+    "dataset": "sift-128-euclidean",
+    "connection_params": {
+      "host": "127.0.0.1",
+      "port": 9000,
+      "user": "default",
+      "password": "",
+      "protocol": "tcp",
+      "table": "benchmark_sift_128"
+    },
+    "upload_params": {
+      "index_type": "HNSWFLAT",
+      "index_params": {
+        "ef_c": 200,
+        "m": 32
+      },
+      "optimize": true,
+      "enable_query_plan_cache": [0, 1],
+      "use_query_cache": [0, 1],
+      "enable_cast_vector": [0, 1],
+      "query_plan_cache_only_vector": [0, 1],
+      "search_number": 5
+    },
+    "search_params": {
+      "parallel": [1, 4, 8],
+      "top": 10,
+      "test_duration": 20,
+      "params": {
+        "ef_s": [40, 100, 200]
+      },
+      "session_settings": {
+        "enable_optimize_predicate_expression": 0
+      }
+    }
+  }
+]

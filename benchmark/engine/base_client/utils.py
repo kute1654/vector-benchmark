@@ -1,7 +1,7 @@
 import math
 from typing import Any, Iterable, List, Optional
 import os
-from dataset_reader.base_reader import Record
+from benchmark.dataset_reader.base_reader import Record
 
 
 def iter_batches(records: Iterable[Record], n: int) -> Iterable[Any]:

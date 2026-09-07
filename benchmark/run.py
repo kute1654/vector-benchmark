@@ -1,5 +1,18 @@
 import fnmatch
 import argparse
+import sys
+from pathlib import Path
+
+# Support both documented invocations:
+#   cd benchmark && python run.py
+#   python benchmark/run.py
+# The project has a top-level ``benchmark`` package and a sibling-style
+# ``engine`` import tree, so both roots must be importable.
+_BENCHMARK_DIR = Path(__file__).resolve().parent
+_PROJECT_DIR = _BENCHMARK_DIR.parent
+for _path in (str(_PROJECT_DIR), str(_BENCHMARK_DIR)):
+    if _path not in sys.path:
+        sys.path.insert(0, _path)
 from benchmark.config_read import read_dataset_config, read_engine_configs
 from benchmark.cli_output import header, step
 from benchmark.dataset import Dataset
@@ -11,8 +24,8 @@ def run(
     engines: str = "*",
     datasets: str = "*",
     engine_type: str | None = None,
-    host: str | None = "127.0.0.1",
-    port: int | None = 9000,
+    host: str | None = None,
+    port: int | None = None,
     skip_upload: bool = False,
     recall_only: bool = False,
 ):
@@ -42,14 +55,18 @@ def run(
         if fnmatch.fnmatch(name, engines)
     }
 
-    # # 如果指定了 engine_type，进一步过滤引擎
-    # if engine_type:
-    #     engine_type_lower = engine_type.lower()
-    #     selected_engines = {
-    #         name: config
-    #         for name, config in selected_engines.items()
-    #         if config.get("engine", "").lower() == engine_type_lower
-    #     }
+    # 如果指定了 engine_type，进一步过滤引擎
+    if engine_type:
+        engine_type_lower = engine_type.lower()
+        before_count = len(selected_engines)
+        selected_engines = {
+            name: config
+            for name, config in selected_engines.items()
+            if (config.get("engine") or "").lower() == engine_type_lower
+        }
+        if len(selected_engines) < before_count:
+            step(f"已按 engine_type='{engine_type}' 过滤: {before_count} -> {len(selected_engines)} 个配置")
+
     selected_datasets = {
         name: config
         for name, config in all_datasets.items()
@@ -133,11 +150,19 @@ def run(
     for engine_name, engine_config, dataset_name, dataset_config in targets:
         engine_config = dict(engine_config)
         engine_config.pop("_source_file", None)
+        configured_engine = str(engine_config.get("engine", "") or "").lower()
         conn = dict(engine_config.get("connection_params", {}))
-        conn.pop("host", None)
-        conn.pop("port", None)
-        conn["host"] = host or "127.0.0.1"
-        conn["port"] = port or 9000
+        # Command-line values are overrides.  When omitted, preserve the
+        # per-engine values from the JSON (5432/5433 for PostgreSQL, 9000 for
+        # ClickHouse-compatible servers).
+        if host is not None:
+            conn["host"] = host
+        elif not conn.get("host"):
+            conn["host"] = "127.0.0.1"
+        if port is not None:
+            conn["port"] = port
+        elif not conn.get("port"):
+            conn["port"] = 5433 if configured_engine == "polardb" else (5432 if configured_engine in {"pgvector", "polardb"} else 9000)
         engine_config["connection_params"] = {
             **conn,
         }
@@ -148,8 +173,15 @@ def run(
         engine_config["upload_params"] = upload_params
         effective_host = engine_config["connection_params"]["host"]
         effective_port = engine_config["connection_params"]["port"]
-        engine_config["engine"] = engine_type
+        if engine_type:
+            engine_config["engine"] = engine_type
         header(f"EXPERIMENT: {engine_name}")
+
+        if not engine_config:
+            step(f"ERROR: engine_config is None for {engine_name} / {dataset_name}")
+            step(f"  This usually means the configuration file has a format error.")
+            continue
+
         client = ClientFactory(effective_host).build_client(engine_config, dataset_name, dataset_config)
         dataset = Dataset(dataset_config)
         dataset.download()
@@ -172,9 +204,9 @@ if __name__ == "__main__":
         default="*",
         help="dataset name (datasets/datasets.json 'name' field); single argument; supports glob to match multiple; selects all configs targeting the dataset"
     )
-    parser.add_argument("--engine-type", default=None, help="filter by engine type: 'clickhouse', 'myscale', 'pgvector' (default: None, no filter)")
-    parser.add_argument("--host", default="127.0.0.1", help="server IP (default: 127.0.0.1)")
-    parser.add_argument("--port", type=int, default=9000, help="server port (default: 9000)")
+    parser.add_argument("--engine-type", default=None, help="filter by engine type: 'clickhouse', 'myscale', 'pgvector', 'polardb' (default: None, no filter)")
+    parser.add_argument("--host", default=None, help="override server IP; otherwise use each config")
+    parser.add_argument("--port", type=int, default=None, help="override server port; otherwise use each config")
     parser.add_argument("--skip-upload", action="store_true", help="skip data upload and index build stages")
     parser.add_argument(
         "--recall-only",

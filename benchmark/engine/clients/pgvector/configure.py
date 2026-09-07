@@ -100,11 +100,23 @@ class PGVectorConfigurator(BaseConfigurator):
         # Drop table if exists
         drop_table = f"DROP TABLE IF EXISTS {cls.table_name}"
         sql_log(drop_table)
+        step("Dropping existing table (if exists)...")
+        step("⚠️  If this takes too long, press Ctrl+C to cancel")
+        
         try:
-            cls.command(drop_table)
+            # Set a shorter timeout for DDL operations (default 60s)
+            with cls.connection.cursor() as cursor:
+                cursor.execute("SET LOCAL statement_timeout = '60s'")
+            
+            cls.command(drop_table, timeout_seconds=60)
+            step(f"✓ Table dropped successfully")
+        except KeyboardInterrupt:
+            step("\n✗ DROP TABLE cancelled by user")
+            cls.connection.rollback()
+            raise
         except RuntimeError as e:
-            # If DROP TABLE fails due to timeout or other issues, log and continue
             step(f"Warning: Failed to drop table {cls.table_name}: {e}")
+            step("   Continuing anyway (table may not exist or is locked)")
             # The command method already handled the transaction rollback, so we can proceed
 
         # Create table

@@ -5,10 +5,10 @@ from typing import Iterator, Optional, Tuple, List
 import h5py
 import numpy as np
 
-from benchmark.dataset_config import DatasetConfig
-from benchmark.cli_output import compact_kv, step
-from dataset_reader.base_reader import BaseReader, Query, Record
-from dataset_reader.utils import convert_H52py
+from ..dataset_config import DatasetConfig
+from ..cli_output import compact_kv, step
+from .base_reader import BaseReader, Query, Record
+from .utils import convert_H52py
 
 HDF5_BATCH_PART_SIZE = 200000
 

@@ -7,7 +7,7 @@ import clickhouse_connect
 from clickhouse_connect.driver.client import Client
 from clickhouse_driver import Client as DriverClient
 
-from dataset_reader.base_reader import Query
+from benchmark.dataset_reader.base_reader import Query
 from engine.base_client import BaseSearcher
 from benchmark.cli_output import warn
 from engine.clients.myscale.config import *
@@ -51,6 +51,21 @@ class MyScaleSearcher(BaseSearcher):
     host: str = None
     parser = MyScaleConditionParser()
     connection_params: dict = {}
+
+    @classmethod
+    def _apply_session_settings(cls, connection, session_settings: dict):
+        if not session_settings:
+            return
+        protocol = str((cls.connection_params or {}).get("protocol", "tcp")).lower()
+        for key, value in session_settings.items():
+            try:
+                sql = f"SET {key} = {value}"
+                if protocol == "tcp":
+                    connection.execute(sql)
+                else:
+                    connection.command(sql)
+            except Exception as e:
+                warn(f"failed to apply session setting {key}={value}: {e}")
 
     def setup_search(self, host, distance, connection_params: dict, search_params: dict, dataset_config):
         if dataset_config is not None and getattr(dataset_config, "result_group", None) == "text_search":
@@ -192,13 +207,17 @@ class MyScaleSearcher(BaseSearcher):
         cls.host = host
         cls.distance = DISTANCE_MAPPING[distance]
         cls.search_params = search_params
+        # Apply session-level SET commands from search_params
+        session_settings = search_params.get("session_settings", {})
+        if session_settings:
+            cls._apply_session_settings(thread_local.client, session_settings)
         cls.apply_query_plan_cache_settings(search_params, protocol)
 
     @classmethod
     def apply_query_plan_cache_settings(cls, search_params: dict, protocol: str):
-        cache_mode = _to_int((search_params or {}).get("enable_query_plan_cache", 0), 0)
+        cache_mode = _to_int((search_params or {}).get("enable_query_plan_cache", search_params.get("use_query_plan_cache", 0)), 0)
         CAST_mode = _to_int((search_params or {}).get("enable_cast_vector", 0), 0)
-        query_cache = 0
+        query_cache = _to_int((search_params or {}).get("use_query_cache", 0), 0)
         if cache_mode > 1:
             query_cache = 1
             cache_mode = cache_mode - 2

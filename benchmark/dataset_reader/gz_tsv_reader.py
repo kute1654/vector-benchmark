@@ -4,9 +4,9 @@ import math
 from pathlib import Path
 from typing import Dict, Iterator, List, Optional, Tuple, Set
 
-from benchmark.dataset_config import DatasetConfig
-from dataset_reader.base_reader import BaseReader, Query, Record
-from dataset_reader.utils import _to_uint32_id
+from ..dataset_config import DatasetConfig
+from .base_reader import BaseReader, Query, Record
+from .utils import _to_uint32_id
 
 
 class GzTsvReader(BaseReader):

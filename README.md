@@ -1,207 +1,487 @@
-# MyScale Benchmark
+# vector-benchmark
 
-A customer tool for fast performance proof-of-concept (POC)
+A unified benchmark framework for vector database performance testing. Supports **pgvector**, **ClickHouse**, **MyScale**, and **PolarDB-pg (PASE)**.
 
 Language: English | [中文](README.zh-CN.md)
 
-## Quick Start (Vector Search)
+## Directory Structure
 
-### 1) Extract
-
-```bash
-tar -xzf myscale-bench-linux-x86_64.tar.gz
-cd myscale-bench
+```
+vector-benchmark/
+├── benchmark/                          # Python benchmark framework
+│   ├── run.py                          #   Main entry point (Nuitka compilation target)
+│   ├── config_read.py                  #   Configuration file reader
+│   ├── dataset.py                      #   Dataset management
+│   ├── dataset_config.py               #   Dataset configuration
+│   ├── cli_output.py                   #   CLI output formatting
+│   ├── datasets/                       #   Datasets
+│   │   ├── datasets.json               #     Dataset registry
+│   │   ├── downloads/                  #     Downloaded HDF5 files
+│   │   └── .gitignore
+│   ├── engine/                         #   Engine abstraction layer
+│   │   ├── base_client/                #     Base client classes
+│   │   │   ├── base.py                 #       BaseClient (upload/build/search)
+│   │   │   ├── configure.py            #       BaseConfigure (table/index creation)
+│   │   │   ├── search.py               #       BaseSearcher (query + session_settings)
+│   │   │   └── upload.py               #       BaseUploader (data import)
+│   │   ├── clients/                    #     Database client implementations
+│   │   │   ├── pgvector/               #       pgvector
+│   │   │   │   ├── config.py           #         Default config constants
+│   │   │   │   ├── configure.py        #         Table/index creation
+│   │   │   │   ├── search.py           #         Vector search (with SET support)
+│   │   │   │   └── upload.py           #         Data import
+│   │   │   ├── clickhouse/             #       ClickHouse
+│   │   │   │   ├── config.py
+│   │   │   │   ├── configure.py
+│   │   │   │   ├── search.py           #         Vector search (with SET support)
+│   │   │   │   └── upload.py
+│   │   │   ├── myscale/                #       MyScale
+│   │   │   │   ├── config.py
+│   │   │   │   ├── configure.py
+│   │   │   │   ├── search.py           #         Vector search (with SET support)
+│   │   │   │   └── upload.py
+│   │   │   └── polardb/                #       PolarDB-pg (PASE)
+│   │   │       ├── config.py
+│   │   │       ├── configure.py
+│   │   │       ├── search.py
+│   │   │       └── upload.py
+│   │   ├── client_factory.py           #     Client factory
+│   │   └── __init__.py
+│   ├── dataset_reader/                 #   Dataset readers
+│   │   ├── base_reader.py              #     Base reader
+│   │   ├── h5_reader.py                #     HDF5 format reader
+│   │   └── utils.py
+│   ├── results/                        #   Test results (CSV/JSON)
+│   └── __init__.py                     #   Package exports
+│
+├── bash-test/                          # Shell-level precise QPS tests
+│   ├── clickhouse-benchmark.sh         #   ClickHouse benchmark (clickhouse-benchmark)
+│   ├── pgvector-query-forms-benchmark.sh # pgvector benchmark (pgbench)
+│   ├── polardb-pase-query-forms-benchmark.sh # PolarDB benchmark (pgbench)
+│   ├── setup-pgvector-from-h5.sh       #   pgvector HDF5 -> table setup
+│   ├── setup-polardb-pase-from-h5.sh   #   PolarDB HDF5 -> table setup
+│   ├── generate-sql-files.sh           #   SQL generation for benchmarking
+│   └── sql-bench/                      #   Generated SQL files
+│
+├── configurations/                     # Experiment configuration files (JSON)
+│   ├── pgvector.json                   #   pgvector test config
+│   ├── clickhouse.json                 #   ClickHouse test config
+│   ├── myscale.json                    #   MyScale test config
+│   └── polardb.json                    #   PolarDB test config
+│
+├── docs/                               # Detailed documentation
+│   ├── README.md                       #   English version
+│   └── README.zh-CN.md                 #   Chinese version
+│
+├── README.md                           # This file (English)
+├── README.zh-CN.md                     # Chinese version
+├── requirements.txt                    # Python dependencies
+├── build_nuitka.sh                     # Nuitka build script (x86_64)
+└── build_nuitka_arm.sh                 # Nuitka build script (ARM64)
 ```
 
-### 2) Prepare datasets
+## Quick Start
 
-Place your dataset files under `datasets/` and make sure each dataset entry in `datasets/datasets.json` points to the correct file location via the `path` field.
+### 1. Install Dependencies
 
-Notes:
-- If `link` is empty or not accessible, download the dataset manually and set `path` to its location.
+```bash
+cd vector-benchmark
+pip install -r requirements.txt
+```
 
-### 3) Configure experiments
+### 2. Prepare Datasets
 
-Experiment configuration files are JSON files stored in these directories:
-- `configurations/templates/`: prebuilt configuration templates for MSTG, HNSW. Use them as references or copy-and-modify.
-- `configurations/`: your runnable configs (copy templates here after editing).
+Place HDF5 dataset files under `benchmark/datasets/downloads/` and configure entries in `benchmark/datasets/datasets.json`.
 
-The tool only loads configs from `configurations/`. Files under `configurations/templates/` are not searched/loaded automatically.
+```bash
+# Example: download ann-benchmarks datasets
+cd benchmark/datasets/downloads
+wget https://ann-benchmarks.com/sift-128-euclidean.hdf5
+wget https://ann-benchmarks.com/gist-960-euclidean.hdf5
+```
 
-Dataset naming:
-- The dataset name used in experiment configs comes from the `name` field in `datasets/datasets.json`.
+### 3. Configure Experiments
 
-#### Experiment JSON parameters
+Experiment configuration files are JSON arrays stored in `configurations/`. Each element defines one experiment:
 
-Example template:
-- `myscale-bench/configurations/templates/myscale-hnsw-laion-768-5m-ip.json`
+```json
+[
+  {
+    "name": "pgvector-sift-128-euclidean",
+    "engine": "pgvector",
+    "dataset": "sift-128-euclidean",
+    "connection_params": {
+      "host": "127.0.0.1",
+      "port": 5432,
+      "user": "postgres",
+      "password": "123456",
+      "database": "postgres",
+      "table": "benchmark_sift_128"
+    },
+    "upload_params": {
+      "index_type": "hnsw",
+      "index_params": { "m": 16, "ef_construction": 200 },
+      "parallel": 16,
+      "batch_size": 256,
+      "search_number": 10
+    },
+    "search_params": {
+      "parallel": [1, 4, 8],
+      "top": 10,
+      "test_duration": 20,
+      "params": { "ef_s": [40, 100, 200] },
+      "session_settings": {
+        "enable_seqscan": "off",
+        "ivfflat.probes": 10
+      }
+    }
+  }
+]
+```
 
-The file is a JSON array; each element describes one experiment run.
+### 4. Run Benchmark
 
-Parameters:
+```bash
+cd benchmark
 
-Command line:
-- `--engines`: Experiment `name` field(s) from config JSON files under `configurations/`.
-- `--datasets`: Dataset name(s) to run. All configs under `configurations/` with `dataset` matching the given name will be executed.
-- *`--host`*: Server IP. Default: `127.0.0.1`.
-- *`--port`*: Server port. Default: `9000`.
-- *`--skip-upload`*: Skip dataset upload and index build. Default: `False`.
- - *`--recall-only`*: Only run metric evaluation (e.g. recall/MRR) on the selected datasets. Runs single-process search over all test queries for each config, ignoring the `queries_pool_size` limit from `datasets/datasets.json`. Upload behavior is still controlled by `--skip-upload`.
+# Run all configs matching a pattern
+python run.py --engines "pgvector-*" --host 127.0.0.1 --port 5432
 
-Config file (experiment JSON):
-- `name`: Unique identifier for the experiment configuration.
-- `dataset`: Source dataset name used by this experiment.
-- `upload_params`:
-  - *`index_type`*: Vector index algorithm type (e.g. `HNSWFLAT`, `MSTG`).
-  - `index_params`: Index build parameters (HNSWFLAT example; other index types have their own params):
-    - *`m`*: Max number of edges per node in HNSW graph; affects recall and memory usage.
-    - *`ef_c`*: Candidate list size during index build; affects index quality and build time.
-  - *`parallel`*: Concurrency (threads/workers) for data import. Default: `16`.
-  - *`batch_size`*: Number of rows per insert request. Default: `256`. For large datasets, consider increasing `batch_size` (and adjusting `parallel` as needed) to reduce the number of insert operations, speed up upload, and lower background merge pressure.
-  - *`mstg_disk_mode`*: MSTG disk mode flag. Use `1` to enable disk mode. Default: `0`.
-- `search_params`:
-  - `parallel`: Concurrent query clients during benchmarking.
-  - `top`: Number of nearest neighbors to return per search (K).
-  - `test_duration`: Total test duration in seconds.
-  - `params`: Search parameters (e.g. `alpha`, `ef_s`). When multiple parameters are provided, they are expanded as a Cartesian product.
-- *`connection_params`*:
-  - *`protocol`*: Database protocol. Default: `TCP`.
-  - *`user`*: Database username. Default: `default`.
-  - *`password`*: Database password. Default: `""`.
-  - *`table`*: Table name. Default: `Benchmark`.
+# Run a specific config
+python run.py --engines pgvector-sift-128-euclidean
 
-#### Warmup phase
+# Skip data upload (only run search)
+python run.py --engines pgvector-sift-128-euclidean --skip-upload
 
-Before the main search phase, the benchmark runs a short warmup:
-- It selects the last combination from all expanded `search_params` (including `params`).
-- It runs a warmup search with the same query logic as the real test, but with a fixed duration of about 2 seconds.
+# Recall-only mode (no QPS test)
+python run.py --engines pgvector-sift-128-euclidean --recall-only
+```
 
-On very large datasets, the first query may need to load vector indexes or data into memory, which can take much longer than 2 seconds. In that case:
-- The warmup may appear to “hang” while the database finishes loading data.
-- The benchmark waits for the server’s response instead of failing fast.
-- The maximum wait time for warmup queries is 1800 seconds by default.
+### 5. Compare all SQL forms and cache profiles
 
-You can change the warmup wait limit via the experiment config:
+After the four target tables have been created and indexed, run one matrix
+covering every registered query form:
+
+```bash
+cd ..
+python -m benchmark query_forms \
+  --config query-forms/targets.json \
+  --query-count 100 \
+  --concurrency 4 \
+  --duration 20 \
+  --output results/query-forms-qps.csv
+```
+
+The output contains one row per `engine × cache profile × sql_type`.
+ClickHouse/MyScale use their server query-result and vector-plan cache
+settings. PostgreSQL-compatible targets use prepared statements for the
+plan-cache profile and a bounded per-connection result cache for the
+result-cache profile.
+
+## Configuration File Format
+
+### Top-Level Fields
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `name` | string | Yes | Unique experiment identifier (used with `--engines`) |
+| `engine` | string | Yes | Engine type: `pgvector`, `clickhouse`, `myscale`, `polardb` |
+| `dataset` | string | Yes | Dataset name (matches `datasets.json` `name` field) |
+| `connection_params` | object | Yes | Database connection parameters |
+| `upload_params` | object | Yes | Table creation, index building, and data import parameters |
+| `search_params` | object | Yes | Query parameters |
+
+### connection_params
+
+Database connection settings. Supports all engines with different defaults:
+
+| Engine | Default Port | Default User | Protocol |
+|--------|-------------|-------------|----------|
+| pgvector | 5432 | postgres | N/A |
+| ClickHouse | 9000 | default | tcp |
+| MyScale | 9000 | default | tcp |
+| PolarDB-pg | 5433 | postgres | N/A |
 
 ```json
 "connection_params": {
-  "warmup_timeout_s": 1800
+  "host": "127.0.0.1",
+  "port": 5432,
+  "user": "postgres",
+  "password": "123456",
+  "database": "postgres",
+  "table": "benchmark_sift_128",
+  "protocol": "tcp"
 }
 ```
 
-This only affects the warmup phase; the main search phase still uses the regular timeout settings.
+### upload_params
 
-### 4) Run
+Parameters for creating tables, building indexes, and importing data:
 
-```bash
-./myscale-bench --engines myscale-mstg-laion-768-1m-ip --host 127.0.0.1 --port 9000
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `index_type` | string | Index algorithm (e.g., `hnsw`, `ivfflat`, `HNSWFLAT`, `MSTG`) |
+| `index_params` | object | Index-specific parameters (e.g., `m`, `ef_construction`, `ef_c`) |
+| `parallel` | int | Number of concurrent threads for data import |
+| `batch_size` | int | Rows per insert batch |
+| `search_number` | int | Number of search rounds after upload |
+| `use_cache` | int[] | Enable prepared statement mode (pgvector/PolarDB) |
+| `use_query_cache` | int[] | Enable query-result cache; combined with the plan-cache setting |
+| `optimize` | bool | Optimize table after import (ClickHouse) |
+| `enable_query_plan_cache` | int[] | Enable query plan cache (MyScale) |
+
+### search_params
+
+Parameters for the query benchmark phase:
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `parallel` | int[] | Concurrent query clients |
+| `top` | int | Number of nearest neighbors (K) |
+| `test_duration` | int | Test duration in seconds |
+| `params` | object | Engine-specific search parameters (e.g., `ef_s`) |
+| `session_settings` | object | Session-level SET commands applied before each query |
+
+### Array Parameter Expansion
+
+Array values in configuration files are automatically expanded into multiple test combinations via Cartesian product:
+
+```json
+"parallel": [1, 4, 8],
+"params": { "ef_s": [40, 100, 200] }
 ```
 
-Optional overrides:
-- Use `--host` (and `--port`) to override the server address.
-- Use `--datasets` to run all test configs that target a given dataset.
-- `--engines` and `--datasets` accept only one argument, but glob patterns can match multiple test configs (e.g. `--engines "myscale-*"`).
-- When using glob patterns in `--engines` or `--datasets`, wrap the value in double quotes (e.g. `--datasets "laion-768-*-ip"`) so that shells like `zsh` do not expand the pattern before it is passed to the benchmark tool.
-- `--engines` expects the `name` field from the experiment JSON files under `configurations/`.
-- To skip both data upload and index build stages, add `--skip-upload` to the command line.
+produces 3 × 3 = 9 test combinations.
 
-### 5) Results
+### session_settings
 
-Results are written to `results/` as JSON files.
+Configure `session_settings` under `search_params` to execute SET commands before each query batch. This allows adjusting database parameters without reconnecting.
 
-## Text Search
-
-Example template:
-- `myscale-bench/configurations/templates/myscale-text-quora-mini-dev.json`
-
-Evaluation metric:
-- MRR
-
-Parameters:
-
-Config file (experiment JSON):
-- `name`: Unique identifier for the experiment configuration.
-- `dataset`: Source dataset name used by this experiment.
-- `upload_params`:
-  - `fts_idx_cols`: Column names to build full-text index on (example: `["body"]`).
-  - `fts_idx_params`: Full-text index parameters (e.g. tokenizer, stop words).
-  - *`parallel`*: Concurrency (threads/workers) for data import. Default: `16`.
-  - *`batch_size`*: Number of rows per insert request. Default: `256`.
-- `search_params`:
-  - `parallel`: Concurrent query clients during benchmarking.
-  - `top`: Number of results to return per search (K).
-  - `test_duration`: Total test duration in seconds.
-- *`connection_params`*:
-  - *`protocol`*: Database protocol. Default: `TCP`.
-  - *`user`*: Database username. Default: `default`.
-  - *`password`*: Database password. Default: `""`.
-  - *`table`*: Table name. Default: `Benchmark`.
-
-Run (using the template: `myscale-bench/configurations/templates/myscale-text-quora-mini-dev.json`):
-```bash
-cp myscale-bench/configurations/templates/myscale-text-quora-mini-dev.json myscale-bench/configurations/
-./myscale-bench --engines myscale-text-quora-mini-dev --host 127.0.0.1 --port 9000
+**pgvector example:**
+```json
+"session_settings": {
+  "enable_seqscan": "off",
+  "ivfflat.probes": 10
+}
 ```
 
-## Hybrid Search
-
-Example template:
-- `myscale-bench/configurations/templates/myscale-mstg-hybrid-quora-mini-dev.json`
-
-Evaluation metric:
-- MRR
-
-Parameters:
-
-Config file (experiment JSON):
-- `name`: Unique identifier for the experiment configuration.
-- `dataset`: Source dataset name used by this experiment.
-- `upload_params`:
-  - `index_type`: Vector index algorithm type (e.g. `MSTG`).
-  - `mstg_disk_mode`: Enable MSTG disk mode (`1` for disk mode, `0` for memory mode).
-  - `fts_idx_cols`: Column names to build full-text index on (example: `["body"]`).
-  - `fts_idx_params`: Full-text index parameters (e.g. tokenizer, stop words).
-  - *`parallel`*: Concurrency (threads/workers) for data import. Default: `16`.
-  - *`batch_size`*: Number of rows per insert request. Default: `256`.
-- `search_params`:
-  - `parallel`: Concurrent query clients during benchmarking.
-  - `top`: Number of results to return per search (K).
-  - `test_duration`: Total test duration in seconds.
-  - `params.dense*`: All params with `dense` prefix are passed to the vector part of `HybridSearch(...)` (e.g. `dense_alpha`, `dense_m`, `dense_ef_s`).
-  - `params.fusion_type`: Fusion algorithm (e.g. `RRF`).
-  - `params.fusion_weight`: Fusion weight.
-  - `params.fusion_k`: Fusion parameter `k` (RRF parameter).
-  - `params.only_vector_search`: Force vector-only search (bypass `HybridSearch(...)`). Put it under `search_params.params` in the experiment JSON.
-  - `params.only_text_search`: Force text-only search (bypass `HybridSearch(...)`). Put it under `search_params.params` in the experiment JSON.
-- *`connection_params`*:
-  - *`protocol`*: Database protocol. Default: `TCP`.
-  - *`user`*: Database username. Default: `default`.
-  - *`password`*: Database password. Default: `""`.
-  - *`table`*: Table name. Default: `Benchmark`.
-
-Run (using the template: `myscale-bench/configurations/templates/myscale-mstg-hybrid-quora-mini-dev.json`):
-```bash
-cp myscale-bench/configurations/templates/myscale-mstg-hybrid-quora-mini-dev.json myscale-bench/configurations/
-
-./myscale-bench --engines myscale-mstg-hybrid-quora-mini-dev --host 127.0.0.1 --port 9000
+**ClickHouse example:**
+```json
+"session_settings": {
+  "hnsw_candidate_list_size_for_search": 100
+}
 ```
 
-## Out-of-memory (OOM kill)
+**PolarDB example:**
+```json
+"session_settings": {
+  "enable_seqscan": "off",
+  "pase.enable": "on"
+}
+```
 
-During the upload or search stages, if the machine does not have enough memory, the operating system may trigger the OOM killer and terminate the process. In such cases, you typically will not see a full Python traceback, but only messages like “killed” in logs or `dmesg`.
+## Supported Engines
 
-- If OOM happens during the upload stage, decrease `upload_params.parallel` and `upload_params.batch_size` in the corresponding experiment config.
-- If OOM happens during the search stage, decrease `search_params.parallel` in the experiment config, and the dataset’s `queries_pool_size` value in `datasets/datasets.json`.
+### pgvector
 
-After an OOM kill, before running the benchmark again, check whether any `python3` processes from the previous run are still alive (for example, some child processes might not have been fully killed). You can inspect them with `ps aux | grep python3` and, once you are sure it is safe, clean them up using commands such as `pkill -9 python3`. Then lower the parameters and rerun the benchmark.
+| Attribute | Value |
+|-----------|-------|
+| Index types | `hnsw`, `ivfflat` |
+| Distance functions | `l2`, `ip`, `cosine` |
+| Default port | 5432 |
+| Connection | psycopg2 |
+| Shell benchmark | pgbench |
+
+### ClickHouse
+
+| Attribute | Value |
+|-----------|-------|
+| Index types | `HNSWFLAT`, `HNSW`, `VECTOR_SIMILARITY`, `ANNOY`, `USEARCH`, `FLAT` |
+| Distance functions | `l2`, `dot`, `cosine` |
+| Default port | 9000 (tcp) / 8123 (http) |
+| Connection | clickhouse-driver (tcp) / clickhouse-connect (http) |
+| Shell benchmark | clickhouse-benchmark |
+
+### MyScale
+
+| Attribute | Value |
+|-----------|-------|
+| Index types | `HNSWFLAT`, `MSTG`, `MSRQ` |
+| Distance functions | `l2`, `dot`, `cosine` |
+| Default port | 9000 (tcp) / 8123 (http) |
+| Connection | clickhouse-driver (tcp) / clickhouse-connect (http) |
+| Shell benchmark | clickhouse-benchmark |
+
+### PolarDB-pg (PASE)
+
+| Attribute | Value |
+|-----------|-------|
+| Index types | `hnsw` (pase_hnsw), `ivfflat` (pase_ivfflat) |
+| Distance functions | `l2`, `ip`, `cosine` |
+| Default port | 5433 |
+| Connection | psycopg2 |
+| Shell benchmark | pgbench |
+
+## Testing Modes
+
+### Python Benchmark (Coarse QPS + Recall)
+
+- **Duration mode**: Sends queries continuously for a specified duration, measures QPS
+- **Count mode**: Executes a fixed number of queries, measures latency and recall
+- **Recall-only mode**: Runs single-process search over all test queries, outputs recall metrics only
+
+### Shell Benchmark (Precise QPS)
+
+Uses native database benchmarking tools (pgbench / clickhouse-benchmark) for precise QPS measurement, eliminating Python network overhead:
+
+```bash
+# pgvector
+cd bash-test
+PSQL=/usr/local/pgsql/bin/psql PGBENCH=/usr/local/pgsql/bin/pgbench \
+    REPEAT=5 TIMELIMIT=30 \
+    ./pgvector-query-forms-benchmark.sh benchmark_sift_128_1k
+
+# ClickHouse
+cd bash-test
+./clickhouse-benchmark.sh benchmark_sift_128
+
+# PolarDB
+cd bash-test
+PSQL=/usr/local/pgsql/bin/psql PGBENCH=/usr/local/pgsql/bin/pgbench \
+    REPEAT=5 TIMELIMIT=30 \
+    ./polardb-pase-query-forms-benchmark.sh benchmark_sift_128_1k
+```
+
+## Shell Setup & Index Operations
+
+### pgvector: Create Table and Import Data
+
+```bash
+cd bash-test
+PSQL=/usr/local/pgsql/bin/psql ./setup-pgvector-from-h5.sh \
+    ../benchmark/datasets/downloads/sift-128-euclidean.hdf5 \
+    benchmark_sift_128_1k 1000 10 l2
+
+# Arguments:
+#   $1: HDF5 file path
+#   $2: table name
+#   $3: row count to import (train_count)
+#   $4: top_k
+#   $5: distance type (l2/ip/cosine)
+```
+
+### PolarDB: Create Table and Import Data
+
+```bash
+cd bash-test
+PSQL=/usr/local/pgsql/bin/psql ./setup-polardb-pase-from-h5.sh \
+    ../benchmark/datasets/downloads/sift-128-euclidean.hdf5 \
+    benchmark_sift_128_1k 1000 10 l2
+```
+
+### Manual Index Creation
+
+```sql
+-- pgvector HNSW index
+CREATE INDEX ON benchmark_sift_128_1k USING hnsw (vector vector_l2_ops)
+    WITH (m = 16, ef_construction = 200);
+
+-- pgvector IVFFlat index
+CREATE INDEX ON benchmark_sift_128_1k USING ivfflat (vector vector_l2_ops)
+    WITH (lists = 100);
+
+-- PolarDB PASE HNSW index
+CREATE INDEX ON benchmark_sift_128_1k USING pase_hnsw (vector)
+    WITH (dim = 128, base_nb_num = 16, ef_build = 40, ef_search = 100, base64_encoded = 0);
+```
+
+## Viewing Results
+
+```bash
+# View CSV summary
+cd benchmark/results
+cat benchmark_results.csv | column -t -s,
+
+# View JSON detailed results
+ls -la *search*.json
+cat pgvector-sift-128-euclidean-search-*.json | python -m json.tool
+
+# View Shell benchmark results
+cat results/vector-query-forms-pgvector-results.csv
+```
+
+## Quick Reference
+
+| Operation | Command |
+|-----------|---------|
+| List all tables | `psql -h 127.0.0.1 -p 5432 -U postgres -c "\dt"` |
+| Count rows | `psql -h 127.0.0.1 -p 5432 -U postgres -c "SELECT count(*) FROM benchmark_sift_128_1k"` |
+| List indexes | `psql -h 127.0.0.1 -p 5432 -U postgres -c "\di benchmark_sift_128_1k*"` |
+| View query plan | `psql -h 127.0.0.1 -p 5432 -U postgres -c "EXPLAIN (ANALYZE, BUFFERS) SELECT ..."` |
+| Drop table | `psql -h 127.0.0.1 -p 5432 -U postgres -c "DROP TABLE IF EXISTS benchmark_sift_128_1k"` |
+| List ClickHouse tables | `clickhouse-client -q "SHOW TABLES"` |
+| List ClickHouse indexes | `clickhouse-client -q "SELECT name, type FROM system.data_skipping_indices WHERE table='benchmark_sift_128'"` |
+
+## Troubleshooting
+
+### Index Not Used
+
+Check the query plan to confirm index scan is being used:
+
+```sql
+EXPLAIN (ANALYZE, BUFFERS)
+SELECT id, (vector <-> '[1,2,3,...]'::vector) AS dis
+FROM benchmark_sift_128_1k
+ORDER BY dis ASC LIMIT 10;
+```
+
+If you see `Seq Scan` instead of `Index Scan`:
+- Ensure the index has been created
+- Use `SET enable_seqscan = off`
+- Or configure via `session_settings`
+
+### Low QPS
+
+- Check if `ef_search` is too large
+- Verify concurrency settings are reasonable
+- Use Shell scripts to isolate Python network overhead
+
+### Connection Failure
+
+- Check `connection_params` host/port settings
+- Verify the database is running
+- For ClickHouse, verify `protocol` setting (tcp/http)
+
+## Command Line Options
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `--engines` | `*` | Experiment name (glob pattern matching `configurations/*.json` `name` field) |
+| `--datasets` | `*` | Dataset name (glob pattern matching `datasets.json` `name` field) |
+| `--host` | `127.0.0.1` | Database server host |
+| `--port` | `9000` | Database server port |
+| `--skip-upload` | `false` | Skip data upload and index build stages |
+| `--recall-only` | `false` | Only run recall/metric evaluation over all test queries |
+
+## Results
+
+Results are saved in `benchmark/results/`:
+- `benchmark_results.csv` — Aggregated benchmark results
+- `{experiment_name}-search-{id}-{timestamp}.json` — Detailed per-experiment results
 
 ## Packaging
 
-- ARM64 (Ubuntu 22.04): Run `./build_nuitka_arm.sh`. Output: `dist-arm/`.
-- x86-64 (manylinux_2_28_x86_64): Run `./build_nuitka.sh`. Output: `dist/`.
-- Minimum supported GLIBC version for `dist-arm/myscale-bench/myscale-bench`: `2.34`
-- Minimum supported GLIBC version for `dist/myscale-bench/myscale-bench`: `2.14`
+Build standalone executables using Nuitka:
 
-## Recommended Memory
+- **x86_64** (manylinux_2_28_x86_64): `./build_nuitka.sh` → `dist/myscale-bench-linux-x86_64.tar.gz`
+- **ARM64** (Ubuntu 22.04): `./build_nuitka_arm.sh` → `dist-arm/myscale-bench-linux-aarch64.tar.gz`
+
+Minimum GLIBC requirements:
+- x86_64: GLIBC 2.14
+- ARM64: GLIBC 2.34
+
+## Memory Recommendations
 
 - For the laion-768-1m-ip dataset, use at least 4GB of memory.
+- If OOM occurs during upload, reduce `upload_params.parallel` and `upload_params.batch_size`.
+- If OOM occurs during search, reduce `search_params.parallel` and the dataset's `queries_pool_size` in `datasets.json`.

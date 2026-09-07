@@ -4,7 +4,7 @@ from typing import List, Optional, Tuple
 
 import psycopg2
 
-from dataset_reader.base_reader import Query
+from benchmark.dataset_reader.base_reader import Query
 from engine.base_client import BaseSearcher
 from benchmark.cli_output import warn
 from engine.clients.pgvector.config import *
@@ -20,6 +20,8 @@ class PGVectorSearcher(BaseSearcher):
     host: str = None
     connection_params: dict = {}
     use_query_plan_cache: int = 0
+    use_result_cache: int = 0
+    result_cache = {}
     prepared_statement_name: str = "pgvector_search_stmt"
 
     def __init__(self, host, connection_params, search_params):
@@ -38,6 +40,17 @@ class PGVectorSearcher(BaseSearcher):
         
         super().__init__(host, merged_conn_params, search_params)
 
+    @classmethod
+    def _apply_session_settings(cls, connection, session_settings: dict):
+        if not session_settings:
+            return
+        with connection.cursor() as cursor:
+            for key, value in session_settings.items():
+                try:
+                    cursor.execute(f"SET {key} = %s", (str(value),))
+                except Exception:
+                    cursor.execute(f"SET {key} = '{value}'")
+
     def setup_search(self, host, distance, connection_params: dict, search_params: dict, dataset_config):
         pass
 
@@ -51,6 +64,8 @@ class PGVectorSearcher(BaseSearcher):
         cls.search_params = search_params
         # Read use_query_plan_cache from search_params (which is set by base client during cache mode iteration)
         cls.use_query_plan_cache = int(search_params.get("use_query_plan_cache", 0))
+        cls.use_result_cache = int(search_params.get("use_result_cache", 0))
+        cls.result_cache = {}
         
         # Create connection per thread
         cls.connection = psycopg2.connect(
@@ -60,6 +75,11 @@ class PGVectorSearcher(BaseSearcher):
             password=connection_params.get("password", PGVECTOR_DEFAULT_PASSWD),
             database=connection_params.get("database", PGVECTOR_DATABASE_NAME),
         )
+
+        # Apply session-level SET commands from search_params
+        session_settings = search_params.get("session_settings", {})
+        if session_settings:
+            cls._apply_session_settings(cls.connection, session_settings)
         
         # If using cache (prepared statements), prepare the statement
         if cls.use_query_plan_cache == 1:
@@ -89,6 +109,9 @@ class PGVectorSearcher(BaseSearcher):
 
     @classmethod
     def vector_search(cls, vector: List[float], meta_conditions, top: Optional[int]) -> List[Tuple[int, float]]:
+        cache_key = (tuple(float(x) for x in vector), int(top or 0))
+        if meta_conditions is None and cls.use_result_cache and cache_key in cls.result_cache:
+            return cls.result_cache[cache_key]
         table_name = validate_table_name(cls.connection_params.get("table", "vec_items"))
         
         # Convert vector to string format
@@ -96,10 +119,15 @@ class PGVectorSearcher(BaseSearcher):
         
         # If there are metadata conditions or we're not using cache, use direct execution
         if meta_conditions is not None or cls.use_query_plan_cache == 0:
-            return cls._direct_search(vector_str, meta_conditions, top, table_name)
+            result = cls._direct_search(vector_str, meta_conditions, top, table_name)
         else:
             # Use prepared statement for simple vector search without metadata
-            return cls._prepared_search(vector_str, top)
+            result = cls._prepared_search(vector_str, top)
+        if meta_conditions is None and cls.use_result_cache:
+            if len(cls.result_cache) >= 4096:
+                cls.result_cache.pop(next(iter(cls.result_cache)))
+            cls.result_cache[cache_key] = result
+        return result
 
     @classmethod
     def _direct_search(cls, vector_str: str, meta_conditions, top: Optional[int], table_name: str) -> List[Tuple[int, float]]:

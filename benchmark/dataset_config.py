@@ -1,6 +1,7 @@
 from typing import Optional, Dict, Any, List
 from dataclasses import dataclass, field
 
+
 @dataclass
 class QueryConfig:
     name: str
@@ -26,12 +27,12 @@ class DatasetConfig:
     score_type: Optional[str] = "default"  # "default", "mrr", "ndcg", etc.
 
     # vector datasets
-    vector_count: int = 0 # vector count
+    vector_count: int = 0  # vector count
     vector_size: int = 0  # vector dimension
     distance: str = "l2"  # "l2", "cosine", etc.
 
     # text/hybrid datasets
-    corpus_count: int = 0 # corpus/doc count (for text/hybrid datasets)
+    corpus_count: int = 0  # corpus/doc count (for text/hybrid datasets)
     query_files: Optional[List[QueryConfig]] = None  # hybrid_search queries dataset (they use same train dataset)
     corpus_file: Optional[str] = None
     queries_file: Optional[str] = None

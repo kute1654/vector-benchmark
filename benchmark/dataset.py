@@ -1,38 +1,61 @@
-import gzip
-import json
-from sentence_transformers import SentenceTransformer
+import os
+import shutil
+import tarfile
+import urllib.request
 
-# ------------------- 配置 -------------------
-model_name = "all-MiniLM-L6-v2"  # 输出 384 维（对应你配置里的 vector_size:384）
-corpus_input = "datasets/downloads/quora/corpus.jsonl.gz"
-queries_input = "datasets/downloads/quora/queries.jsonl.gz"
+from . import DATASETS_DIR
+from .dataset_config import DatasetConfig
+from .dataset_reader.ann_compound_reader import AnnCompoundReader
+from .dataset_reader.json_reader import JSONReader
+from .dataset_reader.ann_h5_reader import AnnH5Reader
+from .dataset_reader.gz_tsv_reader import GzTsvReader
+from .dataset_reader.base_reader import BaseReader
 
-corpus_output = "datasets/downloads/quora/corpus_vectors.jsonl.gz"
-queries_output = "datasets/downloads/quora/queries_vectors.jsonl.gz"
+READER_TYPE = {"h5": AnnH5Reader, "jsonl": JSONReader, "tar": AnnCompoundReader, "gz_tsv": GzTsvReader}
 
-# 加载模型
-model = SentenceTransformer(model_name)
 
-# ------------------- 生成 corpus 向量 -------------------
-with gzip.open(corpus_input, "rt", encoding="utf-8") as f_in, \
-     gzip.open(corpus_output, "wt", encoding="utf-8") as f_out:
+def download_core(config_path: str, link: str):
+    target_path = DATASETS_DIR / config_path
+    if target_path.exists():
+        print(f"{target_path} already exists")
+        return
 
-    for line in f_in:
-        item = json.loads(line)
-        text = item["text"]  # quora 格式固定
-        vec = model.encode(text, convert_to_numpy=False).tolist()
-        f_out.write(json.dumps({"_id": item["_id"], "vector": vec}) + "\n")
+    if link is None or str(link).strip() == "":
+        raise FileNotFoundError(
+            f"Dataset file not found: {target_path}. "
+            f"Please download it manually and place it at this path."
+        )
 
-# ------------------- 生成 queries 向量 -------------------
-with gzip.open(queries_input, "rt", encoding="utf-8") as f_in, \
-     gzip.open(queries_output, "wt", encoding="utf-8") as f_out:
+    file_name = f"{str(link).split('/')[-1]}"
+    print(f"Downloading {link} to file {file_name}")
+    file_name, _ = urllib.request.urlretrieve(link, file_name)
 
-    for line in f_in:
-        item = json.loads(line)
-        text = item["text"]
-        vec = model.encode(text, convert_to_numpy=False).tolist()
-        f_out.write(json.dumps({"_id": item["_id"], "vector": vec}) + "\n")
+    if file_name.endswith(".tgz") or file_name.endswith(".tar.gz"):
+        print(f"Mkdir if not exists: {target_path} -> Extracting: {file_name} -> {target_path}")
+        os.makedirs(target_path, exist_ok=True)
+        file = tarfile.open(file_name)
+        file.extractall(target_path)
+        file.close()
+        os.remove(file_name)
+    else:
+        print(f"Moving: {file_name} -> {target_path.parent}")
+        target_path.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(file_name, target_path)
+        os.remove(file_name)
 
-print("✅ 向量生成完成：")
-print(corpus_output)
-print(queries_output)
+
+class Dataset:
+    def __init__(self, config: dict):
+        self.config = DatasetConfig(**config)
+
+    def download(self):
+        # download train data
+        download_core(config_path=self.config.path, link=self.config.link)
+        # download multi queries data
+        if self.config.query_files is not None:
+            for query_config in self.config.query_files:
+                download_core(config_path=query_config["path"], link=query_config["link"])
+
+    def get_reader(self, normalize: bool) -> BaseReader:
+        reader_class = READER_TYPE[self.config.type]
+        return reader_class(DATASETS_DIR, self.config, normalize=normalize)

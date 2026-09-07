@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
-# docker pull --platform linux/arm64 docker.m.daocloud.io/library/ubuntu:20.04
+# docker pull --platform linux/arm64 docker.m.daocloud.io/library/ubuntu:22.04
 
 set -euo pipefail
 
 PYTHON_BIN="${PYTHON_BIN:-python3}"
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-SRC_DIR="$ROOT_DIR/myscale-bench"
+SRC_DIR="$ROOT_DIR/benchmark"
 BUILD_DIR="$ROOT_DIR/dist_nuitka"
 OUT_DIR="$ROOT_DIR/dist-arm"
 DIST_DIR="$OUT_DIR/myscale-bench"
@@ -38,7 +38,7 @@ if [ -r /etc/os-release ] && . /etc/os-release && [ "${ID:-}" = "ubuntu" ]; then
     CODENAME="$(lsb_release -cs 2>/dev/null || true)"
   fi
   if [ -z "$CODENAME" ]; then
-    CODENAME="focal"
+    CODENAME="jammy"
   fi
 
   APT_MIRROR_DEFAULT="http://mirrors.tuna.tsinghua.edu.cn/ubuntu/"
@@ -87,8 +87,8 @@ fi
 $PYTHON_BIN -m pip install "${PIP_ROOT_ARGS[@]}" -i https://pypi.tuna.tsinghua.edu.cn/simple -U pip setuptools wheel
 $PYTHON_BIN -m pip install "${PIP_ROOT_ARGS[@]}" -i https://pypi.tuna.tsinghua.edu.cn/simple --only-binary=:all: h5py
 $PYTHON_BIN -m pip install "${PIP_ROOT_ARGS[@]}" -i https://pypi.tuna.tsinghua.edu.cn/simple --no-build-isolation -U nuitka
-if [ -f "$SRC_DIR/requirements.txt" ]; then
-  $PYTHON_BIN -m pip install "${PIP_ROOT_ARGS[@]}" -i https://pypi.tuna.tsinghua.edu.cn/simple -r "$SRC_DIR/requirements.txt"
+if [ -f "$ROOT_DIR/requirements.txt" ]; then
+  $PYTHON_BIN -m pip install "${PIP_ROOT_ARGS[@]}" -i https://pypi.tuna.tsinghua.edu.cn/simple -r "$ROOT_DIR/requirements.txt"
 fi
 
 rm -rf "$BUILD_DIR"
@@ -167,30 +167,32 @@ else
   chmod +x "$DIST_DIR/myscale-bench"
 fi
 
-mkdir -p "$DIST_DIR/datasets/downloaded"
-cp -a "$SRC_DIR/datasets/datasets.json" "$DIST_DIR/datasets/"
-if [ -f "$SRC_DIR/datasets/.gitignore" ]; then
-  cp -a "$SRC_DIR/datasets/.gitignore" "$DIST_DIR/datasets/"
-fi
-mkdir -p "$DIST_DIR/configurations"
-if [ -d "$SRC_DIR/configurations" ]; then
-  cp -a "$SRC_DIR/configurations/." "$DIST_DIR/configurations/"
-fi
-mkdir -p "$DIST_DIR/results"
-if [ -d "$SRC_DIR/results" ]; then
-  cp -a "$SRC_DIR/results/." "$DIST_DIR/results/"
-fi
-
-if [ -d "$SRC_DIR/docs" ]; then
-  mkdir -p "$DIST_DIR/docs"
-  cp -a "$SRC_DIR/docs/." "$DIST_DIR/docs/"
-fi
-
 if [ -f "$ROOT_DIR/README.md" ]; then
   cp -a "$ROOT_DIR/README.md" "$DIST_DIR/"
 fi
 if [ -f "$ROOT_DIR/README.zh-CN.md" ]; then
   cp -a "$ROOT_DIR/README.zh-CN.md" "$DIST_DIR/"
+fi
+
+mkdir -p "$DIST_DIR/datasets/downloaded"
+cp -a "$SRC_DIR/datasets/datasets.json" "$DIST_DIR/datasets/"
+if [ -f "$SRC_DIR/datasets/.gitignore" ]; then
+  cp -a "$SRC_DIR/datasets/.gitignore" "$DIST_DIR/datasets/"
+fi
+
+mkdir -p "$DIST_DIR/configurations"
+if [ -d "$ROOT_DIR/configurations" ]; then
+  cp -a "$ROOT_DIR/configurations/." "$DIST_DIR/configurations/"
+fi
+
+mkdir -p "$DIST_DIR/results"
+if [ -d "$SRC_DIR/results" ]; then
+  cp -a "$SRC_DIR/results/." "$DIST_DIR/results/"
+fi
+
+if [ -d "$ROOT_DIR/docs" ]; then
+  mkdir -p "$DIST_DIR/docs"
+  cp -a "$ROOT_DIR/docs/." "$DIST_DIR/docs/"
 fi
 
 echo "$DIST_DIR"

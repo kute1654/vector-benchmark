@@ -152,15 +152,103 @@ class PGVectorUploader(BaseUploader):
                 f"WITH (m = {m}, ef_construction = {ef_construction})"
             )
             
-            vector_index_begin_time = time.perf_counter()
             sql_log(index_sql)
-            cls.command(index_sql)
-            vector_index_build_time = time.perf_counter() - vector_index_begin_time
+            step(f"Creating HNSW index on {cls.table_name} (m={m}, ef_construction={ef_construction})...")
+            step("⚠️  Press Ctrl+C to cancel (may wait for current transaction to finish)...")
             
-            step(f"vector index built in {vector_index_build_time:.3f}s")
+            import threading
+            import signal
+            
+            stop_spinner = [False]
+            cancelled = [False]
+            
+            def show_progress():
+                dots = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]
+                idx = [0]
+                start_time = time.time()
+                while not stop_spinner[0]:
+                    elapsed = int(time.time() - start_time)
+                    sys.stdout.write(f"\r  ⏳ Building HNSW index... {dots[idx[0] % len(dots)]} {elapsed}s (Ctrl+C to stop)")
+                    sys.stdout.flush()
+                    idx[0] += 1
+                    time.sleep(0.1)
+                sys.stdout.write("\r")
+                sys.stdout.flush()
+            
+            def signal_handler(signum, frame):
+                cancelled[0] = True
+                stop_spinner[0] = True
+                print("\n\n⚠️  Cancel requested! Waiting for PostgreSQL to abort...")
+                print("   (This may take a few seconds)")
+            
+            # Register signal handler for Ctrl+C
+            original_handler = signal.signal(signal.SIGINT, signal_handler)
+            
+            spinner_thread = threading.Thread(target=show_progress, daemon=True)
+            spinner_thread.start()
+            
+            try:
+                vector_index_begin_time = time.perf_counter()
+                
+                # Set a statement timeout to ensure we can eventually cancel
+                # Default: 1 hour max, can be overridden by upload_params.index_timeout
+                index_timeout = cls.upload_params.get("index_timeout", 3600)
+                cls.command(f"SET LOCAL statement_timeout = '{index_timeout}s'")
+                
+                cls.command(index_sql)
+                vector_index_build_time = time.perf_counter() - vector_index_begin_time
+                
+                if cancelled[0]:
+                    step("✗ Index creation cancelled")
+                    return {"cancelled": True}
+                    
+            except KeyboardInterrupt:
+                cancelled[0] = True
+                step("✗ Index creation interrupted by user")
+                # Try to rollback and cleanup
+                try:
+                    cls.connection.rollback()
+                    # Try to drop the partial index if it exists
+                    cls.command(f"DROP INDEX IF EXISTS {index_name}")
+                except Exception as e:
+                    warn(f"Cleanup after cancellation failed: {e}")
+                return {"cancelled": True, "error": "interrupted"}
+                
+            except Exception as e:
+                if cancelled[0]:
+                    step(f"✗ Index creation failed: {e}")
+                else:
+                    raise
+                    
+            finally:
+                stop_spinner[0] = True
+                spinner_thread.join(timeout=2)
+                # Restore original signal handler
+                signal.signal(signal.SIGINT, original_handler)
+            
+            step(f"✓ Vector index built successfully in {vector_index_build_time:.3f}s")
             
             return {
                 "vector_index_build_time": vector_index_build_time,
             }
-        
+
+        if index_type.lower() == "ivfflat":
+            operator_class = DISTANCE_TO_OPERATOR_CLASS.get(cls.distance_op, "vector_l2_ops")
+            index_name = f"{cls.table_name}_ivfflat_idx"
+            total = cls.command(f"SELECT count(*) FROM {cls.table_name}")[0][0]
+            import math
+            lists = int(index_params.get("lists", max(1, int(math.sqrt(max(1, total)) / 10))))
+            index_sql = (
+                f"CREATE INDEX {index_name} ON {cls.table_name} "
+                f"USING ivfflat (vector {operator_class}) WITH (lists = {lists})"
+            )
+            sql_log(index_sql)
+            begin = time.perf_counter()
+            cls.command(index_sql)
+            return {
+                "vector_index_build_time": time.perf_counter() - begin,
+                "index_type": "ivfflat",
+                "lists": lists,
+            }
+
         return {}

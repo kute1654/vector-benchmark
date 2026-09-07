@@ -13,8 +13,8 @@ import sys
 import numpy as np
 import tqdm
 
-from dataset_reader.base_reader import Query
-from dataset_reader.utils import _to_uint32_id
+from benchmark.dataset_reader.base_reader import Query
+from benchmark.dataset_reader.utils import _to_uint32_id
 from benchmark.cli_output import compact_kv, step, warn
 from engine.base_client.utils import mrr, intersect_precision, get_mem_available_bytes, format_bytes
 
@@ -36,6 +36,10 @@ class BaseSearcher:
         self.host = host
         self.connection_params = connection_params
         self.search_params = dict(search_params) if search_params is not None else {}
+
+    @classmethod
+    def _apply_session_settings(cls, connection, session_settings: dict):
+        pass
 
     def post_warmup(self, dataset_config):
         return

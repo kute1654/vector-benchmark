@@ -1,0 +1,39 @@
+[
+  {
+    "name": "pgvector-sift-128-euclidean",
+    "engine": "pgvector",
+    "dataset": "sift-128-euclidean",
+    "connection_params": {
+      "host": "127.0.0.1",
+      "port": 5432,
+      "user": "postgres",
+      "password": "123456",
+      "database": "postgres",
+      "table": "benchmark_sift_128"
+    },
+    "upload_params": {
+      "index_type": "hnsw",
+      "index_params": {
+        "m": 16,
+        "ef_construction": 200
+      },
+      "parallel": 16,
+      "batch_size": 256,
+      "use_cache": [0, 1],
+      "use_query_cache": [0, 1],
+      "search_number": 10
+    },
+    "search_params": {
+      "parallel": [1, 4, 8],
+      "top": 10,
+      "test_duration": 20,
+      "params": {
+        "ef_s": [40, 100, 200]
+      },
+      "session_settings": {
+        "enable_seqscan": "off",
+        "ivfflat.probes": 10
+      }
+    }
+  }
+]

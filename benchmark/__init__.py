@@ -1,14 +1,23 @@
+"""Vector Benchmark - A unified benchmark framework for vector databases."""
+
 import os
 import sys
 import shutil
 from pathlib import Path
 
+from .engine import (
+    BaseEngine,
+    PgvectorEngine,
+    PolarDBEngine,
+    ClickHouseEngine,
+    MyScaleEngine,
+    ENGINE_REGISTRY,
+    get_engine,
+)
+from .dataset_reader import AnnH5Reader
+
+
 def get_root_dir():
-    """
-    获取项目的根目录。
-    在打包模式下，返回可执行文件所在的物理目录；
-    在开发模式下，返回源代码根目录。
-    """
     def _looks_like_root(candidate: Path) -> bool:
         return (
             candidate.is_dir()
@@ -46,14 +55,26 @@ def get_root_dir():
 
     if getattr(sys, "frozen", False) or "__compiled__" in globals():
         return Path(sys.executable).resolve().parent
-    
-    # 开发模式：指向当前文件所在位置的上两级（请根据你的目录层级调整 .parent 数量）
+
     return Path(__file__).resolve().parent.parent
 
-# 全局根目录变量
-ROOT_DIR = get_root_dir()
 
-# 业务相关的子目录定义
-DATASETS_DIR = ROOT_DIR / "datasets"
+ROOT_DIR = get_root_dir()
+DATASETS_DIR = ROOT_DIR / "benchmark" / "datasets"
 CONFIGURATIONS_DIR = ROOT_DIR / "configurations"
 RESULTS_DIR = ROOT_DIR / "results"
+
+__all__ = [
+    "BaseEngine",
+    "PgvectorEngine",
+    "PolarDBEngine",
+    "ClickHouseEngine",
+    "MyScaleEngine",
+    "ENGINE_REGISTRY",
+    "get_engine",
+    "AnnH5Reader",
+    "ROOT_DIR",
+    "DATASETS_DIR",
+    "CONFIGURATIONS_DIR",
+    "RESULTS_DIR",
+]

@@ -8,8 +8,8 @@ import numpy as np
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.append(BASE_DIR)
 
-from benchmark.dataset_config import DatasetConfig
-from dataset_reader.base_reader import BaseReader, Query, Record
+from ..dataset_config import DatasetConfig
+from .base_reader import BaseReader, Query, Record
 
 VECTORS_FILE = "vectors.jsonl"
 PAYLOADS_FILE = "payloads.jsonl"

@@ -6,7 +6,7 @@ from typing import Iterable, List, Optional, Tuple
 
 import tqdm
 
-from dataset_reader.base_reader import Record
+from benchmark.dataset_reader.base_reader import Record
 from benchmark.cli_output import compact_kv, step, warn, set_live_line
 from engine.base_client.utils import iter_batches, get_mem_available_bytes, format_bytes
 

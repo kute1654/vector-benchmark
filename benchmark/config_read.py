@@ -1,6 +1,7 @@
 import glob
 import json
 import os
+import sys
 
 from benchmark import CONFIGURATIONS_DIR, DATASETS_DIR
 
@@ -18,8 +19,24 @@ def read_engine_configs() -> dict:
         )
     for config_file in config_files:
         with open(config_file, "r") as fd:
-            configs = json.load(fd)
+            try:
+                configs = json.load(fd)
+            except json.JSONDecodeError as e:
+                print(f"Warning: Failed to parse {config_file}: {e}", file=sys.stderr)
+                continue
+
+            if not isinstance(configs, list):
+                print(f"Warning: {config_file} should contain a JSON array, got {type(configs)}", file=sys.stderr)
+                continue
+
             for config in configs:
+                if not isinstance(config, dict):
+                    print(f"Warning: Skipping invalid config entry in {config_file}: expected dict, got {type(config)}", file=sys.stderr)
+                    continue
+                if "name" not in config:
+                    print(f"Warning: Skipping config without 'name' field in {config_file}", file=sys.stderr)
+                    continue
+
                 config_with_meta = dict(config)
                 try:
                     config_with_meta["_source_file"] = os.path.relpath(config_file, start=root_dir)
@@ -38,6 +55,3 @@ def read_dataset_config():
         for config in configs:
             all_configs[config["name"]] = config
     return all_configs
-
-# print(read_engine_configs())
-# print(read_dataset_config())
