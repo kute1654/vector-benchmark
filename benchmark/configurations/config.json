@@ -1,0 +1,1367 @@
+[
+  {
+    "name": "clickhouse-deep-image-96-angular",
+    "engine": "clickhouse",
+    "dataset": "deep-image-96-angular",
+    "upload_params": {
+      "index_params": {
+        "ef_c": 256,
+        "m": 32
+      },
+      "optimize": true,
+      "index_type": "HNSWFLAT",
+      "vector_query_plan_cache": [
+        0
+      ],
+      "vector_use_cast": [
+        0
+      ],
+      "vector_query_plan_cache_only_vector": [
+        0
+      ],
+      "vector_only_cache_query_plan": [
+        0
+      ],
+      "use_query_cache": [
+        0
+      ],
+      "search_number": 1
+    },
+    "search_params": {
+      "parallel": 1,
+      "top": 10,
+      "test_duration": 1,
+      "params": {
+        "ef_s": [
+          100
+        ]
+      }
+    }
+  },
+  {
+    "name": "clickhouse-sift-128-euclidean",
+    "engine": "clickhouse",
+    "dataset": "sift-128-euclidean",
+    "upload_params": {
+      "index_params": {
+        "ef_c": 256,
+        "m": 32
+      },
+      "optimize": true,
+      "index_type": "HNSWFLAT",
+      "vector_query_plan_cache": [
+        0,
+        1
+      ],
+      "vector_use_cast": [
+        0,
+        1
+      ],
+      "vector_query_plan_cache_only_vector": [
+        0
+      ],
+      "vector_only_cache_query_plan": [
+        0
+      ],
+      "use_query_cache": [
+        0
+      ],
+      "sql_type": [
+        "normal",
+        "cast",
+        "cast_array",
+        "raw_bytes",
+        "raw_bytes_x"
+      ],
+      "search_number": 1
+    },
+    "search_params": {
+      "parallel": 1,
+      "top": 10,
+      "test_duration": 1,
+      "params": {
+        "ef_s": [
+          100
+        ]
+      }
+    }
+  },
+  {
+    "name": "clickhouse-nytimes-256-angular",
+    "engine": "clickhouse",
+    "dataset": "nytimes-256-angular",
+    "upload_params": {
+      "index_params": {
+        "ef_c": 256,
+        "m": 32
+      },
+      "optimize": true,
+      "index_type": "HNSWFLAT",
+      "vector_query_plan_cache": [
+        0,
+        1
+      ],
+      "vector_use_cast": [
+        0,
+        1
+      ],
+      "vector_query_plan_cache_only_vector": [
+        0
+      ],
+      "vector_only_cache_query_plan": [
+        0
+      ],
+      "use_query_cache": [
+        0
+      ],
+      "sql_type": [
+        "normal",
+        "cast",
+        "cast_array",
+        "raw_bytes",
+        "raw_bytes_x"
+      ],
+      "search_number": 1
+    },
+    "search_params": {
+      "parallel": 1,
+      "top": 10,
+      "test_duration": 1,
+      "params": {
+        "ef_s": [
+          100
+        ]
+      }
+    }
+  },
+  {
+    "name": "clickhouse-hnsw-laion-768-1m-ip",
+    "engine": "clickhouse",
+    "dataset": "laion-768-1m-ip",
+    "upload_params": {
+      "index_params": {
+        "ef_c": 256,
+        "m": 32
+      },
+      "optimize": true,
+      "index_type": "HNSWFLAT",
+      "vector_query_plan_cache": [
+        0,
+        1
+      ],
+      "vector_use_cast": [
+        0,
+        1
+      ],
+      "vector_query_plan_cache_only_vector": [
+        0,
+        1
+      ],
+      "vector_only_cache_query_plan": [
+        0,
+        1
+      ],
+      "use_query_cache": [
+        0,
+        1
+      ],
+      "sql_type": [
+        "normal",
+        "cast",
+        "cast_array",
+        "raw_bytes",
+        "raw_bytes_x"
+      ],
+      "search_number": 1
+    },
+    "search_params": {
+      "parallel": [
+        1
+      ],
+      "top": 10,
+      "test_duration": 1,
+      "params": {
+        "ef_s": [
+          100
+        ]
+      }
+    }
+  },
+  {
+    "name": "clickhouse-hnsw-gist-960-euclidean-l2",
+    "engine": "clickhouse",
+    "dataset": "gist-960-euclidean-l2",
+    "upload_params": {
+      "index_params": {
+        "ef_c": 256,
+        "m": 32
+      },
+      "optimize": true,
+      "index_type": "HNSWFLAT",
+      "vector_query_plan_cache": [
+        0,
+        1
+      ],
+      "vector_use_cast": [
+        0,
+        1
+      ],
+      "vector_query_plan_cache_only_vector": [
+        0,
+        1
+      ],
+      "vector_only_cache_query_plan": [
+        0,
+        1
+      ],
+      "use_query_cache": [
+        0,
+        1
+      ],
+      "sql_type": [
+        "normal",
+        "cast",
+        "cast_array",
+        "raw_bytes",
+        "raw_bytes_x"
+      ],
+      "search_number": 1
+    },
+    "search_params": {
+      "parallel": 1,
+      "top": 10,
+      "test_duration": 1,
+      "params": {
+        "ef_s": [
+          100
+        ]
+      }
+    }
+  },
+  {
+    "name": "clickhouse-dbpedia-openai-1000k-angular",
+    "engine": "clickhouse",
+    "dataset": "dbpedia-openai-1000k-angular",
+    "upload_params": {
+      "index_params": {
+        "ef_c": 256,
+        "m": 32
+      },
+      "optimize": true,
+      "index_type": "HNSWFLAT",
+      "vector_query_plan_cache": [
+        0,
+        1
+      ],
+      "vector_use_cast": [
+        0,
+        1
+      ],
+      "vector_query_plan_cache_only_vector": [
+        0,
+        1
+      ],
+      "vector_only_cache_query_plan": [
+        0,
+        1
+      ],
+      "use_query_cache": [
+        0,
+        1
+      ],
+      "sql_type": [
+        "normal",
+        "cast",
+        "cast_array",
+        "raw_bytes",
+        "raw_bytes_x"
+      ],
+      "search_number": 1
+    },
+    "search_params": {
+      "parallel": 1,
+      "top": 10,
+      "test_duration": 1,
+      "params": {
+        "ef_s": [
+          100
+        ]
+      }
+    }
+  },
+  {
+    "name": "clickhouse-text-quora-mini-dev",
+    "engine": "clickhouse",
+    "dataset": "quora-mini-text-dev",
+    "upload_params": {
+      "fts_idx_cols": [
+        "body"
+      ],
+      "fts_idx_params": {
+        "body": {
+          "tokenizer": {
+            "type": "stem",
+            "stop_word_filters": [
+              "english"
+            ]
+          }
+        }
+      },
+      "vector_query_plan_cache": [
+        0,
+        1
+      ],
+      "vector_use_cast": [
+        0,
+        1
+      ],
+      "vector_query_plan_cache_only_vector": [
+        0,
+        1
+      ],
+      "vector_only_cache_query_plan": [
+        0,
+        1
+      ],
+      "use_query_cache": [
+        0,
+        1
+      ],
+      "search_number": 10
+    },
+    "search_params": {
+      "parallel": 16,
+      "top": 10,
+      "test_duration": 20,
+      "params": {
+        "enable_nlq": "true",
+        "operator": "OR"
+      }
+    }
+  },
+  {
+    "name": "clickhouse-mstg-hybrid-quora-mini-dev",
+    "engine": "clickhouse",
+    "dataset": "quora-mini-hybrid-dev",
+    "upload_params": {
+      "index_type": "HNSWFLAT",
+      "optimize": true,
+      "fts_idx_cols": [
+        "body"
+      ],
+      "fts_idx_params": {
+        "body": {
+          "tokenizer": {
+            "type": "stem",
+            "stop_word_filters": [
+              "english"
+            ]
+          }
+        }
+      },
+      "vector_query_plan_cache": [
+        0,
+        1
+      ],
+      "vector_use_cast": [
+        0,
+        1
+      ],
+      "vector_query_plan_cache_only_vector": [
+        0,
+        1
+      ],
+      "vector_only_cache_query_plan": [
+        0,
+        1
+      ],
+      "use_query_cache": [
+        0,
+        1
+      ],
+      "search_number": 10
+    },
+    "search_params": {
+      "parallel": 16,
+      "top": 10,
+      "test_duration": 20,
+      "params": {
+        "ef_s": [
+          100
+        ]
+      }
+    }
+  },
+  {
+    "name": "myscale-deep-image-96-angular",
+    "engine": "myscale",
+    "dataset": "deep-image-96-angular",
+    "upload_params": {
+      "index_params": {
+        "ef_c": 200,
+        "m": 32
+      },
+      "optimize": true,
+      "index_type": "HNSWFLAT",
+      "enable_query_plan_cache": [
+        0,
+        1
+      ],
+      "enable_cast_vector": [
+        0,
+        1
+      ],
+      "query_plan_cache_only_vector": [
+        0,
+        1
+      ],
+      "search_number": 5
+    },
+    "search_params": {
+      "parallel": 16,
+      "top": 10,
+      "test_duration": 10,
+      "params": {
+        "ef_s": [
+          100
+        ]
+      }
+    }
+  },
+  {
+    "name": "myscale-sift-128-euclidean",
+    "engine": "myscale",
+    "dataset": "sift-128-euclidean",
+    "upload_params": {
+      "index_params": {
+        "ef_c": 200,
+        "m": 32
+      },
+      "optimize": true,
+      "index_type": "HNSWFLAT",
+      "enable_query_plan_cache": [
+        0,
+        1
+      ],
+      "enable_cast_vector": [
+        0,
+        1
+      ],
+      "query_plan_cache_only_vector": [
+        0,
+        1
+      ],
+      "vector_only_cache_query_plan": [
+        0,
+        1
+      ],
+      "sql_type": [
+        "normal",
+        "cast",
+        "cast_array",
+        "raw_bytes",
+        "raw_bytes_x"
+      ],
+      "search_number": 1
+    },
+    "search_params": {
+      "parallel": 1,
+      "top": 10,
+      "test_duration": 1,
+      "params": {
+        "ef_s": [
+          100
+        ]
+      }
+    }
+  },
+  {
+    "name": "myscale-nytimes-256-angular",
+    "engine": "myscale",
+    "dataset": "nytimes-256-angular",
+    "upload_params": {
+      "index_params": {
+        "ef_c": 200,
+        "m": 32
+      },
+      "optimize": true,
+      "index_type": "HNSWFLAT",
+      "enable_query_plan_cache": [
+        0,
+        1
+      ],
+      "enable_cast_vector": [
+        0,
+        1
+      ],
+      "query_plan_cache_only_vector": [
+        0,
+        1
+      ],
+      "vector_only_cache_query_plan": [
+        0,
+        1
+      ],
+      "sql_type": [
+        "normal",
+        "cast",
+        "cast_array",
+        "raw_bytes",
+        "raw_bytes_x"
+      ],
+      "search_number": 1
+    },
+    "search_params": {
+      "parallel": 1,
+      "top": 10,
+      "test_duration": 1,
+      "params": {
+        "ef_s": [
+          100
+        ]
+      }
+    }
+  },
+  {
+    "name": "myscale-hnsw-laion-768-1m-ip",
+    "engine": "myscale",
+    "dataset": "laion-768-1m-ip",
+    "upload_params": {
+      "index_params": {
+        "ef_c": 200,
+        "m": 32
+      },
+      "optimize": true,
+      "index_type": "HNSWFLAT",
+      "enable_query_plan_cache": [
+        0,
+        1
+      ],
+      "enable_cast_vector": [
+        0,
+        1
+      ],
+      "query_plan_cache_only_vector": [
+        0,
+        1
+      ],
+      "vector_only_cache_query_plan": [
+        0,
+        1
+      ],
+      "sql_type": [
+        "normal",
+        "cast",
+        "cast_array",
+        "raw_bytes",
+        "raw_bytes_x"
+      ],
+      "search_number": 1
+    },
+    "search_params": {
+      "parallel": 1,
+      "top": 10,
+      "test_duration": 1,
+      "params": {
+        "ef_s": [
+          100
+        ]
+      }
+    }
+  },
+  {
+    "name": "myscale-hnsw-gist-960-euclidean-l2",
+    "engine": "myscale",
+    "dataset": "gist-960-euclidean-l2",
+    "upload_params": {
+      "index_params": {
+        "ef_c": 200,
+        "m": 32
+      },
+      "optimize": true,
+      "index_type": "HNSWFLAT",
+      "enable_query_plan_cache": [
+        0,
+        1
+      ],
+      "enable_cast_vector": [
+        0,
+        1
+      ],
+      "query_plan_cache_only_vector": [
+        0,
+        1
+      ],
+      "vector_only_cache_query_plan": [
+        0,
+        1
+      ],
+      "sql_type": [
+        "normal",
+        "cast",
+        "cast_array",
+        "raw_bytes",
+        "raw_bytes_x"
+      ],
+      "search_number": 1
+    },
+    "search_params": {
+      "parallel": 1,
+      "top": 10,
+      "test_duration": 1,
+      "params": {
+        "ef_s": [
+          100
+        ]
+      }
+    }
+  },
+  {
+    "name": "myscale-dbpedia-openai-1000k-angular",
+    "engine": "myscale",
+    "dataset": "dbpedia-openai-1000k-angular",
+    "upload_params": {
+      "index_params": {
+        "ef_c": 200,
+        "m": 32
+      },
+      "optimize": true,
+      "index_type": "HNSWFLAT",
+      "enable_query_plan_cache": [
+        0,
+        1
+      ],
+      "query_plan_cache_enable_CAST": [
+        0,
+        1
+      ],
+      "query_plan_cache_only_vector": [
+        0,
+        1
+      ],
+      "vector_only_cache_query_plan": [
+        0,
+        1
+      ],
+      "use_query_cache": [
+        0,
+        1
+      ],
+      "sql_type": [
+        "normal",
+        "cast",
+        "cast_array",
+        "raw_bytes",
+        "raw_bytes_x"
+      ],
+      "search_number": 1
+    },
+    "search_params": {
+      "parallel": 1,
+      "top": 10,
+      "test_duration": 1,
+      "params": {
+        "ef_s": [
+          100
+        ]
+      }
+    }
+  },
+  {
+    "name": "myscale-text-quora-mini-dev",
+    "engine": "myscale",
+    "dataset": "quora-mini-text-dev",
+    "upload_params": {
+      "fts_idx_cols": [
+        "body"
+      ],
+      "fts_idx_params": {
+        "body": {
+          "tokenizer": {
+            "type": "stem",
+            "stop_word_filters": [
+              "english"
+            ]
+          }
+        }
+      },
+      "enable_query_plan_cache": [
+        0,
+        1
+      ],
+      "enable_cast_vector": [
+        0,
+        1
+      ],
+      "query_plan_cache_only_vector": [
+        0,
+        1
+      ],
+      "search_number": 1
+    },
+    "search_params": {
+      "parallel": 16,
+      "top": 10,
+      "test_duration": 20,
+      "params": {
+        "enable_nlq": "true",
+        "operator": "OR"
+      }
+    }
+  },
+  {
+    "name": "myscale-mstg-hybrid-quora-mini-dev",
+    "engine": "myscale",
+    "dataset": "quora-mini-hybrid-dev",
+    "upload_params": {
+      "index_type": "HNSWFLAT",
+      "optimize": true,
+      "fts_idx_cols": [
+        "body"
+      ],
+      "fts_idx_params": {
+        "body": {
+          "tokenizer": {
+            "type": "stem",
+            "stop_word_filters": [
+              "english"
+            ]
+          }
+        }
+      },
+      "enable_query_plan_cache": [
+        0,
+        1
+      ],
+      "enable_cast_vector": [
+        0,
+        1
+      ],
+      "query_plan_cache_only_vector": [
+        0,
+        1
+      ],
+      "search_number": 1
+    },
+    "search_params": {
+      "parallel": 16,
+      "top": 10,
+      "test_duration": 20,
+      "params": {
+        "ef_s": [
+          100
+        ]
+      }
+    }
+  },
+  {
+    "name": "pgvector-deep-image-96-angular",
+    "engine": "pgvector",
+    "dataset": "deep-image-96-angular",
+    "upload_params": {
+      "index_params": {
+        "ef_c": 200,
+        "m": 32
+      },
+      "optimize": true,
+      "index_type": "HNSWFLAT",
+      "enable_query_plan_cache": [
+        0,
+        1,
+        2
+      ],
+      "use_query_cache": [
+        0,
+        1
+      ],
+      "vector_in_parse_mode": ["strtof", "inline", "fast_float"],
+      "sql_type": [
+        "text_literal",
+        "text_cast",
+        "vector_fn",
+        "array_int_cast",
+        "array_real_cast",
+        "array_cast",
+        "array_to_vector_fn",
+        "halfvec_literal",
+        "with_text_literal",
+        "with_array_cast",
+        "with_vector_fn",
+        "prepared"
+      ],
+      "search_number": 5
+    },
+    "search_params": {
+      "parallel": 16,
+      "top": 10,
+      "test_duration": 10,
+      "params": {
+        "ef_s": [
+          100
+        ]
+      }
+    }
+  },
+  {
+    "name": "pgvector-sift-128-euclidean",
+    "engine": "pgvector",
+    "dataset": "sift-128-euclidean",
+    "connection_params": {
+      "table": "benchmark_sift_128"
+    },
+    "upload_params": {
+      "index_params": {
+        "ef_c": 200,
+        "m": 16
+      },
+      "optimize": true,
+      "index_type": "HNSWFLAT",
+      "enable_query_plan_cache": [
+        0,
+        1,
+        2
+      ],
+      "use_query_cache": [
+        0,
+        1
+      ],
+      "vector_in_parse_mode": ["strtof", "inline", "fast_float"],
+      "sql_type": [
+        "text_literal",
+        "text_cast",
+        "vector_fn",
+        "array_int_cast",
+        "array_real_cast",
+        "array_cast",
+        "array_to_vector_fn",
+        "halfvec_literal",
+        "with_text_literal",
+        "with_array_cast",
+        "with_vector_fn"
+      ],
+      "search_number": 1
+    },
+    "search_params": {
+      "parallel": 1,
+      "top": 10,
+      "test_duration": 1,
+      "params": {
+        "ef_s": [
+          100
+        ]
+      }
+    }
+  },
+  {
+    "name": "pgvector-sift-128-euclidean-2m",
+    "engine": "pgvector",
+    "dataset": "sift-128-euclidean",
+    "connection_params": {
+      "table": "benchmark_sift_128_2m"
+    },
+    "upload_params": {
+      "index_params": {
+        "ef_c": 200,
+        "m": 16
+      },
+      "optimize": true,
+      "index_type": "HNSWFLAT",
+      "enable_query_plan_cache": [
+        0,
+        1,
+        2
+      ],
+      "use_query_cache": [
+        0,
+        1
+      ],
+      "vector_in_parse_mode": ["strtof", "inline", "fast_float"],
+      "sql_type": [
+        "text_literal",
+        "text_cast",
+        "vector_fn",
+        "array_int_cast",
+        "array_real_cast",
+        "array_cast",
+        "array_to_vector_fn",
+        "halfvec_literal",
+        "with_text_literal",
+        "with_array_cast",
+        "with_vector_fn"
+      ],
+      "upload_limit": 2000000,
+      "search_number": 3
+    },
+    "search_params": {
+      "parallel": 1,
+      "top": 10,
+      "test_duration": 10,
+      "params": {
+        "ef_s": [
+          100
+        ]
+      }
+    }
+  },
+  {
+    "name": "pgvector-nytimes-256-angular",
+    "engine": "pgvector",
+    "dataset": "nytimes-256-angular",
+    "upload_params": {
+      "index_params": {
+        "ef_c": 200,
+        "m": 32
+      },
+      "optimize": true,
+      "index_type": "HNSWFLAT",
+      "enable_query_plan_cache": [
+        0,
+        1,
+        2
+      ],
+      "use_query_cache": [
+        0,
+        1
+      ],
+      "vector_in_parse_mode": ["strtof", "inline", "fast_float"],
+      "sql_type": [
+        "text_literal",
+        "text_cast",
+        "vector_fn",
+        "array_int_cast",
+        "array_real_cast",
+        "array_cast",
+        "array_to_vector_fn",
+        "halfvec_literal",
+        "with_text_literal",
+        "with_array_cast",
+        "with_vector_fn"
+      ],
+      "search_number": 1
+    },
+    "search_params": {
+      "parallel": 1,
+      "top": 10,
+      "test_duration": 1,
+      "params": {
+        "ef_s": [
+          100
+        ]
+      }
+    }
+  },
+  {
+    "name": "pgvector-hnsw-laion-768-1m-ip",
+    "engine": "pgvector",
+    "dataset": "laion-768-1m-ip",
+    "upload_params": {
+      "index_params": {
+        "ef_c": 200,
+        "m": 32
+      },
+      "optimize": true,
+      "index_type": "HNSWFLAT",
+      "enable_query_plan_cache": [
+        0,
+        1,
+        2
+      ],
+      "use_query_cache": [
+        0,
+        1
+      ],
+      "vector_in_parse_mode": ["strtof", "inline", "fast_float"],
+      "sql_type": [
+        "text_literal",
+        "text_cast",
+        "vector_fn",
+        "array_int_cast",
+        "array_real_cast",
+        "array_cast",
+        "array_to_vector_fn",
+        "halfvec_literal",
+        "with_text_literal",
+        "with_array_cast",
+        "with_vector_fn"
+      ],
+      "search_number": 5
+    },
+    "search_params": {
+      "parallel": 1,
+      "top": 10,
+      "test_duration": 60,
+      "params": {
+        "ef_s": [
+          100
+        ]
+      }
+    }
+  },
+  {
+    "name": "pgvector-hnsw-gist-960-euclidean-l2",
+    "engine": "pgvector",
+    "dataset": "gist-960-euclidean-l2",
+    "upload_params": {
+      "index_params": {
+        "ef_c": 200,
+        "m": 32
+      },
+      "optimize": true,
+      "index_type": "HNSWFLAT",
+      "enable_query_plan_cache": [
+        0,
+        1,
+        2
+      ],
+      "use_query_cache": [
+        0,
+        1
+      ],
+      "vector_in_parse_mode": ["strtof", "inline", "fast_float"],
+      "sql_type": [
+        "text_literal",
+        "text_cast",
+        "vector_fn",
+        "array_int_cast",
+        "array_real_cast",
+        "array_cast",
+        "array_to_vector_fn",
+        "halfvec_literal",
+        "with_text_literal",
+        "with_array_cast",
+        "with_vector_fn"
+      ],
+      "search_number": 1
+    },
+    "search_params": {
+      "parallel": 1,
+      "top": 10,
+      "test_duration": 1,
+      "params": {
+        "ef_s": [
+          100
+        ]
+      }
+    }
+  },
+  {
+    "name": "pgvector-dbpedia-openai-1000k-angular",
+    "engine": "pgvector",
+    "dataset": "dbpedia-openai-1000k-angular",
+    "upload_params": {
+      "index_params": {
+        "ef_c": 200,
+        "m": 32
+      },
+      "optimize": true,
+      "index_type": "HNSWFLAT",
+      "enable_query_plan_cache": [
+        0,
+        1,
+        2
+      ],
+      "use_query_cache": [
+        0,
+        1
+      ],
+      "vector_in_parse_mode": ["strtof", "inline", "fast_float"],
+      "sql_type": [
+        "text_literal"
+      ],
+      "search_number": 1
+    },
+    "search_params": {
+      "parallel": 1,
+      "top": 10,
+      "test_duration": 60,
+      "params": {
+        "ef_s": [
+          100
+        ]
+      }
+    }
+  },
+  {
+    "name": "polardb-deep-image-96-angular",
+    "engine": "polardb",
+    "dataset": "deep-image-96-angular",
+    "upload_params": {
+      "index_params": {
+        "ef_c": 200,
+        "m": 32
+      },
+      "optimize": true,
+      "index_type": "HNSWFLAT",
+      "enable_query_plan_cache": [
+        0,
+        1
+      ],
+      "sql_type": [
+        "text_pase_op",
+        "pase_fn_text",
+        "pase_fn_array",
+        "pase_fn_array_extra",
+        "order_by_op",
+        "with_pase_fn_array",
+        "with_pase_fn_text",
+        "prepared"
+      ],
+      "search_number": 5
+    },
+    "search_params": {
+      "parallel": 16,
+      "top": 10,
+      "test_duration": 10,
+      "params": {
+        "ef_s": [
+          100
+        ]
+      },
+      "enable_seqscan": 0
+    }
+  },
+  {
+    "name": "polardb-sift-128-euclidean",
+    "engine": "polardb",
+    "dataset": "sift-128-euclidean",
+    "connection_params": {
+      "table": "benchmark_sift_128"
+    },
+    "upload_params": {
+      "index_params": {
+        "ef_c": 40,
+        "m": 16
+      },
+      "optimize": true,
+      "index_type": "HNSWFLAT",
+      "enable_query_plan_cache": [
+        0,
+        1
+      ],
+      "sql_type": [
+        "text_pase_op",
+        "pase_fn_text",
+        "pase_fn_array",
+        "pase_fn_array_extra",
+        "order_by_op",
+        "with_pase_fn_array",
+        "with_pase_fn_text",
+        "prepared"
+      ],
+      "search_number": 1
+    },
+    "search_params": {
+      "parallel": 1,
+      "top": 10,
+      "test_duration": 1,
+      "params": {
+        "ef_s": [
+          100
+        ]
+      },
+      "enable_seqscan": 0
+    }
+  },
+  {
+    "name": "polardb-sift-128-euclidean-2m",
+    "engine": "polardb",
+    "dataset": "sift-128-euclidean",
+    "connection_params": {
+      "table": "benchmark_sift_128_2m"
+    },
+    "upload_params": {
+      "index_params": {
+        "ef_c": 40,
+        "m": 16
+      },
+      "optimize": true,
+      "index_type": "HNSWFLAT",
+      "enable_query_plan_cache": [
+        0,
+        1
+      ],
+      "sql_type": [
+        "text_pase_op",
+        "pase_fn_text",
+        "pase_fn_array",
+        "pase_fn_array_extra",
+        "order_by_op",
+        "with_pase_fn_array",
+        "with_pase_fn_text",
+        "prepared"
+      ],
+      "upload_limit": 2000000,
+      "search_number": 3
+    },
+    "search_params": {
+      "parallel": 1,
+      "top": 10,
+      "test_duration": 10,
+      "params": {
+        "ef_s": [
+          100
+        ]
+      },
+      "enable_seqscan": 0
+    }
+  },
+  {
+    "name": "polardb-nytimes-256-angular",
+    "engine": "polardb",
+    "dataset": "nytimes-256-angular",
+    "upload_params": {
+      "index_params": {
+        "ef_c": 200,
+        "m": 32
+      },
+      "optimize": true,
+      "index_type": "HNSWFLAT",
+      "enable_query_plan_cache": [
+        0,
+        1
+      ],
+      "sql_type": [
+        "text_pase_op",
+        "pase_fn_text",
+        "pase_fn_array",
+        "pase_fn_array_extra",
+        "order_by_op",
+        "with_pase_fn_array",
+        "with_pase_fn_text",
+        "prepared"
+      ],
+      "search_number": 1
+    },
+    "search_params": {
+      "parallel": 1,
+      "top": 10,
+      "test_duration": 1,
+      "params": {
+        "ef_s": [
+          100
+        ]
+      },
+      "enable_seqscan": 0
+    }
+  },
+  {
+    "name": "polardb-hnsw-laion-768-1m-ip",
+    "engine": "polardb",
+    "dataset": "laion-768-1m-ip",
+    "upload_params": {
+      "index_params": {
+        "ef_c": 200,
+        "m": 32
+      },
+      "optimize": true,
+      "index_type": "HNSWFLAT",
+      "enable_query_plan_cache": [
+        0,
+        1
+      ],
+      "sql_type": [
+        "text_pase_op",
+        "pase_fn_text",
+        "pase_fn_array",
+        "pase_fn_array_extra",
+        "order_by_op",
+        "with_pase_fn_array",
+        "with_pase_fn_text",
+        "prepared"
+      ],
+      "search_number": 1,
+      "_pase_note": "768d > PASE_MAX_DIM(512): PASE 建不了索引, post_upload 会报错; 若需跑通请降低维度或改用 pgvector"
+    },
+    "search_params": {
+      "parallel": 1,
+      "top": 10,
+      "test_duration": 1,
+      "params": {
+        "ef_s": [
+          100
+        ]
+      },
+      "enable_seqscan": 0
+    }
+  },
+  {
+    "name": "polardb-hnsw-gist-960-euclidean-l2",
+    "engine": "polardb",
+    "dataset": "gist-960-euclidean-l2",
+    "upload_params": {
+      "index_params": {
+        "ef_c": 200,
+        "m": 32
+      },
+      "optimize": true,
+      "index_type": "HNSWFLAT",
+      "enable_query_plan_cache": [
+        0,
+        1
+      ],
+      "sql_type": [
+        "text_pase_op",
+        "pase_fn_text",
+        "pase_fn_array",
+        "pase_fn_array_extra",
+        "order_by_op",
+        "with_pase_fn_array",
+        "with_pase_fn_text",
+        "prepared"
+      ],
+      "search_number": 1,
+      "_pase_note": "960d > PASE_MAX_DIM(512): 同上, 不可建 pase 索引"
+    },
+    "search_params": {
+      "parallel": 1,
+      "top": 10,
+      "test_duration": 1,
+      "params": {
+        "ef_s": [
+          100
+        ]
+      },
+      "enable_seqscan": 0
+    }
+  },
+  {
+    "name": "polardb-dbpedia-openai-1000k-angular",
+    "engine": "polardb",
+    "dataset": "dbpedia-openai-1000k-angular",
+    "upload_params": {
+      "index_params": {
+        "ef_c": 200,
+        "m": 32
+      },
+      "optimize": true,
+      "index_type": "HNSWFLAT",
+      "enable_query_plan_cache": [
+        0,
+        1
+      ],
+      "sql_type": [
+        "text_pase_op",
+        "pase_fn_text",
+        "pase_fn_array",
+        "pase_fn_array_extra",
+        "order_by_op",
+        "with_pase_fn_array",
+        "with_pase_fn_text",
+        "prepared"
+      ],
+      "search_number": 1,
+      "_pase_note": "1536d > PASE_MAX_DIM(512): 同上, 不可建 pase 索引"
+    },
+    "search_params": {
+      "parallel": 1,
+      "top": 10,
+      "test_duration": 1,
+      "params": {
+        "ef_s": [
+          100
+        ]
+      },
+      "enable_seqscan": 0
+    }
+  }
+]

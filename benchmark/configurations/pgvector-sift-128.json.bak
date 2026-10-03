@@ -1,0 +1,89 @@
+[
+  {
+    "name": "pgvector-sift-128-10m",
+    "engine": "pgvector",
+    "dataset": "sift-128-euclidean",
+    "connection_params": {
+      "table": "benchmark_sift_128"
+    },
+    "upload_params": {
+      "index_type": "hnsw",
+      "index_params": {
+        "m": 16,
+        "ef_construction": 200
+      },
+      "parallel": 16,
+      "batch_size": 256,
+      "search_number": 3,
+      "use_cache": [0, 1],
+      "use_query_cache": [0],
+      "sql_type": [
+        "text_literal",
+        "text_cast",
+        "vector_fn",
+        "array_int_cast",
+        "array_real_cast",
+        "array_cast",
+        "array_to_vector_fn",
+        "halfvec_literal",
+        "with_text_literal",
+        "with_array_cast",
+        "with_vector_fn",
+        "prepared"
+      ],
+      "plan_cache_forms": ["prepared"]
+    },
+    "search_params": {
+      "parallel": 16,
+      "top": 10,
+      "test_duration": 15,
+      "params": {
+        "ef_s": [100]
+      }
+    }
+  },
+  {
+    "name": "pgvector-sift-128-2m",
+    "engine": "pgvector",
+    "dataset": "sift-128-euclidean",
+    "connection_params": {
+      "table": "benchmark_sift_128_2m"
+    },
+    "upload_params": {
+      "index_type": "hnsw",
+      "index_params": {
+        "m": 16,
+        "ef_construction": 200
+      },
+      "parallel": 16,
+      "batch_size": 256,
+      "search_number": 3,
+      "upload_limit": 2000000,
+      "use_cache": [0, 1],
+      "use_query_cache": [0],
+      "sql_type": [
+        "text_literal",
+        "text_cast",
+        "vector_fn",
+        "array_int_cast",
+        "array_real_cast",
+        "array_cast",
+        "array_to_vector_fn",
+        "halfvec_literal",
+        "with_text_literal",
+        "with_array_cast",
+        "with_vector_fn",
+        "prepared"
+      ],
+      "plan_cache_forms": ["prepared"]
+    },
+    "search_params": {
+      "parallel": 16,
+      "top": 10,
+      "test_duration": 10,
+      "params": {
+        "ef_s": [100]
+      }
+    }
+  }
+]

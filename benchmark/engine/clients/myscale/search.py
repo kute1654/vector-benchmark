@@ -2,6 +2,7 @@ import threading
 import string
 import re
 import json
+import struct
 from typing import List, Optional, Tuple
 import clickhouse_connect
 from clickhouse_connect.driver.client import Client
@@ -39,6 +40,55 @@ def escape_clickhouse_string_literal(input_string: str) -> str:
 
 def to_clickhouse_array_literal(values: List[float]) -> str:
     return json.dumps(values, separators=(",", ":"))
+
+
+def format_cast_array_literal(values: List[float]) -> str:
+    """Render the inline-array literal used inside CAST([...] AS Array(Float32)).
+
+    The h5 datasets (e.g. SIFT, which natively is uint8 descriptors) are stored
+    as float32 on disk, so the sampled query vectors arrive here as Python
+    floats and a plain ``str(vector)`` renders them as float literals
+    (``[119.0, 0.0, ...]``).  Those literals parse as Float64 and value-based
+    narrowing Float64 -> Float32 is always allowed, so the plan-cache
+    cast_array type-mismatch path (Integer literal -> Array(UInt8) at dim
+    <= 255 -> createColumnConst BAD_GET swallowed -> warm hits replay the first
+    query's vector) is never exercised during recall measurement.
+
+    Integral-valued vectors are therefore emitted as INTEGER literals
+    (``[119,0,...]``); genuinely fractional vectors keep float rendering.
+    """
+    try:
+        if values and all(float(v).is_integer() for v in values):
+            return "[" + ",".join(str(int(float(v))) for v in values) + "]"
+    except (TypeError, ValueError):
+        pass
+    return json.dumps(values, separators=(",", ":"))
+
+
+MYSCALE_SQL_TYPES = ["normal", "cast", "cast_array", "raw_bytes", "raw_bytes_x"]
+
+
+def _vector_to_hex(values: List[float]) -> str:
+    buf = struct.pack(f"<{len(values)}f", *values)
+    return buf.hex().upper()
+
+
+def _build_query_literal(values: List[float], sql_type: str) -> str:
+    v_str = ",".join(str(v) for v in values)
+    if sql_type == "normal":
+        return f"[{v_str}]"
+    elif sql_type == "cast":
+        return f"cast('[{v_str}]','Array(Float32)')"
+    elif sql_type == "cast_array":
+        return f"CAST([{v_str}] AS Array(Float32))"
+    elif sql_type == "raw_bytes":
+        hex_str = _vector_to_hex(values)
+        return f"reinterpret(unhex('{hex_str}'), 'Array(Float32)')"
+    elif sql_type == "raw_bytes_x":
+        hex_str = _vector_to_hex(values)
+        return f"reinterpret(x'{hex_str}', 'Array(Float32)')"
+    else:
+        return f"CAST([{v_str}] AS Array(Float32))"
 
 
 thread_local = threading.local()
@@ -215,12 +265,14 @@ class MyScaleSearcher(BaseSearcher):
 
     @classmethod
     def apply_query_plan_cache_settings(cls, search_params: dict, protocol: str):
-        cache_mode = _to_int((search_params or {}).get("enable_query_plan_cache", search_params.get("use_query_plan_cache", 0)), 0)
-        CAST_mode = _to_int((search_params or {}).get("enable_cast_vector", 0), 0)
+        print(search_params)
+        cache_mode = _to_int((search_params or {}).get("use_query_plan_cache", search_params.get("use_query_plan_cache", 0)), 0)
+        CAST_mode = _to_int((search_params or {}).get("query_plan_cache_enable_CAST", 0), 0)
         query_cache = _to_int((search_params or {}).get("use_query_cache", 0), 0)
-        if cache_mode > 1:
-            query_cache = 1
-            cache_mode = cache_mode - 2
+        only_cache_query_plan = _to_int((search_params or {}).get("vector_only_cache_query_plan", 0), 0)
+        # if cache_mode > 1:
+        #     query_cache = 1
+        #     cache_mode = cache_mode - 2
         if cache_mode == 0:
             only_vector = 0
         else:
@@ -228,6 +280,7 @@ class MyScaleSearcher(BaseSearcher):
         set_cache_sql = f"SET enable_query_plan_cache = {cache_mode}"
         set_replace_sql = f"SET enable_cast_vector = {CAST_mode}"
         set_only_vector_sql = f"SET query_plan_cache_only_vector = {only_vector}"
+        set_only_cache_query_plan_sql = f"SET only_cache_query_plan = {only_cache_query_plan}"
         drop_query_cache_sql = "SYSTEM DROP QUERY CACHE"
         drop_query_plan_cache_sql = "SYSTEM DROP QUERY PLAN CACHE"
         set_query_cache_sql = f"SET use_query_cache = {query_cache}"
@@ -246,6 +299,7 @@ class MyScaleSearcher(BaseSearcher):
                 client.execute(set_cache_sql)
                 client.execute(set_replace_sql)
                 client.execute(set_only_vector_sql)
+                client.execute(set_only_cache_query_plan_sql)
             else:
                 client.command(drop_query_cache_sql)
                 client.command(drop_query_plan_cache_sql)
@@ -256,6 +310,7 @@ class MyScaleSearcher(BaseSearcher):
                 client.command(set_cache_sql)
                 client.command(set_replace_sql)
                 client.command(set_only_vector_sql)
+                client.command(set_only_cache_query_plan_sql)
         except Exception as e:
             warn(f"failed to set query plan cache settings: {e}")
 
@@ -269,6 +324,7 @@ class MyScaleSearcher(BaseSearcher):
         protocol = str(conn.get("protocol", "tcp")).lower()
         table_name = validate_table_name(conn.get("table", MYSCALE_DATABASE_NAME))
         search_params_dict = (cls.search_params or {}).get("params") or {}
+        sql_type = str((cls.search_params or {}).get("sql_type", "cast_array") or "cast_array")
         par = ""
         reserved_keys = {
             "only_text_search",
@@ -283,10 +339,14 @@ class MyScaleSearcher(BaseSearcher):
             par += ", \'{}={}\'".format(key, value)
         if par != "":
             par = par[2:]
-        if par != "":
-            dist_expr = f"distance({par})(vector, {vector})"
+        if vector is not None:
+            query_literal = _build_query_literal(vector, sql_type)
         else:
-            dist_expr = f"distance(vector, {vector})"
+            query_literal = ""
+        if par != "":
+            dist_expr = f"distance({par})(vector, {query_literal})"
+        else:
+            dist_expr = f"distance(vector, {query_literal})"
         search_str = f"SELECT id, {dist_expr} as dis FROM {table_name}"
 
         if meta_conditions is not None:
@@ -298,6 +358,7 @@ class MyScaleSearcher(BaseSearcher):
             search_str += f" order by dis limit {top}"
 
         res_list = []
+        
         try:
             if protocol == "tcp":
                 res = cls.get_client().execute(search_str)

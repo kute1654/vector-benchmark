@@ -405,8 +405,10 @@ def generate_polardb_sql_forms(
             )
 
         if "pase_fn_text_default" in collectors:
+            # 陷阱: pase(text) 构造函数绑定 pase_text_i_i (base64 解码), 逗号文本会被
+            # 解出垃圾维度; 文本进 pase 唯一安全路径是 'txt'::pase 输入函数。
             collectors["pase_fn_text_default"].append(
-                f"SELECT id, (vector <?> pase('{v_str}')) AS dis "
+                f"SELECT id, (vector <?> '{v_str}'::pase) AS dis "
                 f"FROM {table} ORDER BY dis {sort} LIMIT {top_k};"
             )
 
@@ -455,9 +457,10 @@ def generate_polardb_sql_forms(
             )
 
         if "with_pase_fn_text" in collectors:
+            # 同上: pase('...') 是 base64 陷阱, 用 cast 走 pase_in
             collectors["with_pase_fn_text"].append(
                 f"WITH query_pase AS "
-                f"(SELECT pase('{v_str}') AS p) "
+                f"(SELECT '{v_str}'::pase AS p) "
                 f"SELECT id, (vector <?> query_pase.p) AS dis "
                 f"FROM {table} CROSS JOIN query_pase "
                 f"ORDER BY dis {sort} LIMIT {top_k};"
@@ -498,15 +501,47 @@ def generate_clickhouse_sql_forms(
     dimension: int = 0,
     sql_types: Optional[List[str]] = None,
     engine: str = "clickhouse",
+    search_params: Optional[dict] = None,
 ) -> Dict[str, str]:
-    """Generate all ClickHouse SQL query forms."""
-    # MyScale deployments expose the same concrete distance functions as
-    # ClickHouse.  In particular, the local MyScale target is backed by the
-    # ClickHouse server on port 9000 and has no distance() function.
+    """Generate all ClickHouse SQL query forms.
+
+    ``engine`` distinguishes the two ClickHouse-family servers, which index
+    different function families:
+
+    * ``clickhouse`` (the ``xxb-vectorqueryplancache`` branch) accelerates the
+      plain scalar helpers ``L2Distance`` / ``cosineDistance`` in an
+      ORDER BY ... LIMIT query, so the forms keep those names.
+    * ``myscale`` (the ``myscaledb-oss-queryplancache`` branch) only routes a
+      query through its ANN vector index when the top-level function belongs to
+      the ``distance(...)`` family (the planner prefix-matches the function
+      name; ``L2Distance`` etc. only produce a full-table scan).  For that
+      engine the same query-vector literal spellings are therefore wrapped in
+      ``distance('key=value', ...)(vector, query)``, mirroring how
+      ``engine/clients/myscale/search.py::vector_search`` issues the query.
+      ``search_params`` supplies the tuple arguments (e.g. ``ef_s``) and is
+      ignored for any other engine.
+    """
     dist_func = _ch_dist_func(distance)
     is_myscale = engine.lower() == "myscale"
     sort = _sort_dir(distance)
     dim = dimension or _detect_dim_from_vectors(vectors) or 768
+
+    # distance() search parameters rendered as its curried tuple, e.g.
+    # "('ef_s=100', 'k=20')" -- the exact form run.py sends via the MyScale
+    # client.  A bare `distance(vector, q)` is used when none are configured.
+    dist_params = ""
+    if is_myscale and search_params:
+        rendered = []
+        for key, value in dict(search_params).items():
+            if isinstance(value, (list, tuple)):
+                value = value[0] if value else None
+            if value is None:
+                continue
+            if isinstance(value, bool):
+                value = int(value)
+            rendered.append(f"'{key}={value}'")
+        if rendered:
+            dist_params = "(" + ", ".join(rendered) + ")"
 
     if sql_types is None:
         sql_types = CLICKHOUSE_SQL_TYPES
@@ -514,6 +549,8 @@ def generate_clickhouse_sql_forms(
     collectors: Dict[str, List[str]] = {t: [] for t in sql_types}
 
     def distance_expr(query_expr: str) -> str:
+        if is_myscale:
+            return f"distance{dist_params}(vector, {query_expr})"
         return f"{dist_func}(vector, {query_expr})"
 
     def select_sql(query_expr: str, order: str = sort) -> str:

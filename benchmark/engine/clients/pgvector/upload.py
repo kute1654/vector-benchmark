@@ -1,3 +1,4 @@
+import math
 import time
 import sys
 from typing import List, Optional
@@ -95,7 +96,8 @@ class PGVectorUploader(BaseUploader):
             
             if has_vector:
                 # Convert vector to string format: '[1.0,2.0,3.0]'
-                vector_str = '[' + ','.join(str(x) for x in vectors[i]) + ']'
+                # Replace NaN values with 0.0 since pgvector does not support NaN
+                vector_str = '[' + ','.join('0.0' if math.isnan(x) else str(x) for x in vectors[i]) + ']'
                 row.append(vector_str)
             
             if metadata[i] is not None:
@@ -130,16 +132,23 @@ class PGVectorUploader(BaseUploader):
     def post_upload(cls, distance):
         stage("POST UPLOAD")
         
-        index_type = cls.upload_params.get("index_type", "hnsw")
-        index_params = cls.upload_params.get("index_params", {})
-        
+        index_type = str(
+            cls.upload_params.get("_index_type")
+            or cls.upload_params.get("index_type", "hnsw")
+            or "hnsw"
+        ).lower()
+        if index_type == "hnswflat":
+            index_type = "hnsw"
+        index_params = cls.upload_params.get("index_params", {}) or {}
+
         step(f"pgvector post upload: distance={distance} metric={cls.distance_op} table={cls.table_name} index_type={index_type}")
 
         # Create HNSW index
         if index_type.lower() == "hnsw":
-            # Default HNSW parameters
+            # Default HNSW parameters. config.json uses the ck/myscale-style key
+            # `ef_c`; `ef_construction` is kept as a fallback.
             m = index_params.get("m", 16)
-            ef_construction = index_params.get("ef_construction", 64)
+            ef_construction = index_params.get("ef_construction", index_params.get("ef_c", 64))
             
             # Get the correct operator class for the distance type
             operator_class = DISTANCE_TO_OPERATOR_CLASS.get(cls.distance_op, "vector_l2_ops")
@@ -227,7 +236,15 @@ class PGVectorUploader(BaseUploader):
                 signal.signal(signal.SIGINT, original_handler)
             
             step(f"✓ Vector index built successfully in {vector_index_build_time:.3f}s")
-            
+
+            # `optimize: true` (ck/myscale convention) -> ANALYZE so the planner has
+            # fresh statistics for both custom and generic plans
+            if cls.upload_params.get("optimize"):
+                analyze_begin = time.perf_counter()
+                sql_log(f"ANALYZE {cls.table_name}")
+                cls.command(f"ANALYZE {cls.table_name}")
+                step(f"ANALYZE finished, time: {time.perf_counter() - analyze_begin:.3f}s")
+
             return {
                 "vector_index_build_time": vector_index_build_time,
             }

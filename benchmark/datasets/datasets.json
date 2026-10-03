@@ -22,17 +22,6 @@
     "link": "https://ann-benchmarks.com/glove-50-angular.hdf5"
   },
   {
-    "name": "lastfm-65-angular",
-    "result_group": "vector_search",
-    "vector_size": 65,
-    "vector_count": 292385,
-    "queries_pool_size": 1000,
-    "distance": "cosine",
-    "type": "h5",
-    "path": "downloads/lastfm-65-angular.hdf5",
-    "link": "https://ann-benchmarks.com/lastfm-65-angular.hdf5"
-  },
-  {
     "name": "deep-image-96-angular",
     "result_group": "vector_search",
     "vector_size": 96,
@@ -66,17 +55,6 @@
     "link": "https://ann-benchmarks.com/sift-128-euclidean.hdf5"
   },
   {
-    "name": "random-128-euclidean",
-    "result_group": "vector_search",
-    "vector_size": 128,
-    "vector_count": 1000000,
-    "queries_pool_size": 1000,
-    "distance": "l2",
-    "type": "h5",
-    "path": "downloads/random-128-euclidean.hdf5",
-    "link": "https://ann-benchmarks.com/random-128-euclidean.hdf5"
-  },
-  {
     "name": "glove-200-angular",
     "result_group": "vector_search",
     "vector_size": 200,
@@ -86,17 +64,6 @@
     "type": "h5",
     "path": "downloads/glove-200-angular.hdf5",
     "link": "https://ann-benchmarks.com/glove-200-angular.hdf5"
-  },
-  {
-    "name": "sift-256-euclidean",
-    "result_group": "vector_search",
-    "vector_size": 256,
-    "vector_count": 10000000,
-    "queries_pool_size": 1000,
-    "distance": "l2",
-    "type": "h5",
-    "path": "downloads/sift-256-euclidean.hdf5",
-    "link": "https://ann-benchmarks.com/sift-256-euclidean.hdf5"
   },
   {
     "name": "nytimes-256-angular",

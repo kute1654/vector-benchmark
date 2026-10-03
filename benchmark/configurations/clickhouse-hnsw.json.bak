@@ -12,6 +12,8 @@
       "vector_query_plan_cache": [0],
       "vector_use_cast": [0],
       "vector_query_plan_cache_only_vector": [0],
+      "vector_only_cache_query_plan": [0],
+      "use_query_cache": [0],
       "search_number": 1
     }, 
     "search_params": {
@@ -33,9 +35,39 @@
       },
       "optimize": true,
       "index_type": "HNSWFLAT",
-      "vector_query_plan_cache": [0],
-      "vector_use_cast": [0],
+      "vector_query_plan_cache": [0,1],
+      "vector_use_cast": [0,1],
       "vector_query_plan_cache_only_vector": [0],
+      "vector_only_cache_query_plan": [0],
+      "use_query_cache": [0],
+      "sql_type": ["normal", "cast", "cast_array", "raw_bytes", "raw_bytes_x"],
+      "search_number": 1
+    }, 
+    "search_params": {
+      "parallel": 1,
+      "top": 10,
+      "test_duration": 1,
+      "params": {
+        "ef_s": [100]
+      }
+    }
+  },
+  {
+    "name": "clickhouse-nytimes-256-angular",
+    "dataset": "nytimes-256-angular",
+    "upload_params": {
+      "index_params": {
+        "ef_c": 256,
+        "m": 32
+      },
+      "optimize": true,
+      "index_type": "HNSWFLAT",
+      "vector_query_plan_cache": [0,1],
+      "vector_use_cast": [0,1],
+      "vector_query_plan_cache_only_vector": [0],
+      "vector_only_cache_query_plan": [0],
+      "use_query_cache": [0],
+      "sql_type": ["normal", "cast", "cast_array", "raw_bytes", "raw_bytes_x"],
       "search_number": 1
     }, 
     "search_params": {
@@ -57,9 +89,12 @@
       },
       "optimize": true,
       "index_type": "HNSWFLAT",
-      "vector_query_plan_cache": [0,1,2,3,4,5],
+      "vector_query_plan_cache": [0,1],
       "vector_use_cast": [0,1],
       "vector_query_plan_cache_only_vector": [0,1],
+      "vector_only_cache_query_plan": [0,1],
+      "use_query_cache": [0,1],
+      "sql_type": ["normal", "cast", "cast_array", "raw_bytes", "raw_bytes_x"],
       "search_number": 1
     }, 
     "search_params": {
@@ -81,9 +116,12 @@
       },
       "optimize": true,
       "index_type": "HNSWFLAT",
-      "vector_query_plan_cache": [0],
-      "vector_use_cast": [0],
-      "vector_query_plan_cache_only_vector": [0],
+      "vector_query_plan_cache": [0,1],
+      "vector_use_cast": [0,1],
+      "vector_query_plan_cache_only_vector": [0,1],
+      "vector_only_cache_query_plan": [0,1],
+      "use_query_cache": [0,1],
+      "sql_type": ["normal", "cast", "cast_array", "raw_bytes", "raw_bytes_x"],
       "search_number": 1
     },
     "search_params": {
@@ -105,9 +143,12 @@
       },
       "optimize": true,
       "index_type": "HNSWFLAT",
-      "vector_query_plan_cache": [0],
-      "vector_use_cast": [0],
-      "vector_query_plan_cache_only_vector": [0],
+      "vector_query_plan_cache": [0,1],
+      "vector_use_cast": [0,1],
+      "vector_query_plan_cache_only_vector": [0,1],
+      "vector_only_cache_query_plan": [0,1],
+      "use_query_cache": [0,1],
+      "sql_type": ["normal", "cast", "cast_array", "raw_bytes", "raw_bytes_x"],
       "search_number": 1
     },
     "search_params": {
@@ -127,9 +168,11 @@
       "fts_idx_params": {
         "body": { "tokenizer": { "type": "stem", "stop_word_filters": ["english"] } }
       },
-      "vector_query_plan_cache": [0, 1,2,3],
+      "vector_query_plan_cache": [0,1],
       "vector_use_cast": [0,1],
       "vector_query_plan_cache_only_vector": [0,1],
+      "vector_only_cache_query_plan": [0,1],
+      "use_query_cache": [0,1],
       "search_number": 10
     },
     "search_params": {
@@ -152,9 +195,11 @@
       "fts_idx_params": {
         "body": { "tokenizer": { "type": "stem", "stop_word_filters": ["english"] } }
       },
-      "vector_query_plan_cache": [0, 1,2,3],
+      "vector_query_plan_cache": [0,1],
       "vector_use_cast": [0,1],
       "vector_query_plan_cache_only_vector": [0,1],
+      "vector_only_cache_query_plan": [0,1],
+      "use_query_cache": [0,1],
       "search_number": 10
     },
     "search_params": {

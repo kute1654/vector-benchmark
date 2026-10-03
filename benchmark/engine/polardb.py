@@ -8,6 +8,33 @@ import psycopg2.extras
 from .base import BaseEngine
 
 
+def _int_or(value, default: int) -> int:
+    return int(value) if isinstance(value, int) else default
+
+
+def _pase_distance_sql(
+    table: str,
+    vector: List[float],
+    top_k: int = 10,
+    distance: str = "l2",
+) -> str:
+    """PASE 查询 SQL: float4[] <?> pase。
+
+    `<?>` 右侧必须是 pase 类型; 用 '逗号文本[:extra[:ds]]'::pase 走输入函数
+    pase_in (安全), 不能用 pase('...') 构造函数 (那是 base64 解码, 只有
+    pase(float4[]) / pase(float4[], extra, ds) 数组构造函数是安全的)。
+    ds: 0 = L2 (cosine 需先归一化), 1 = inner product (返回原始内积, 越大越好)。
+    """
+    dist_lower = str(distance or "l2").lower()
+    ds = 1 if dist_lower == "ip" else 0
+    sort_dir = "DESC" if ds == 1 else "ASC"
+    vec_str = ",".join(str(v) for v in vector)
+    return (
+        f"SELECT id, (vector <?> '{vec_str}:{ds}'::pase) AS ds "
+        f"FROM {table} ORDER BY ds {sort_dir} LIMIT {top_k}"
+    )
+
+
 class PolarDBEngine(BaseEngine):
     """PolarDB for PostgreSQL with PASE vector extension."""
 
@@ -122,25 +149,38 @@ class PolarDBEngine(BaseEngine):
 
     def query(
         self,
-        table: str,
-        vector: List[float],
+        conn_or_table,
+        vector: Optional[List[float]] = None,
         top_k: int = 10,
         distance: str = "l2",
     ) -> List[Tuple[int, float]]:
-        """Query nearest neighbors using PASE operator."""
-        conn = self.connect()
-        try:
-            sort_dir = "ASC" if distance == "l2" else "DESC"
-            vec_str = "{" + ",".join(str(v) for v in vector) + "}"
+        """Query nearest neighbors using PASE operator.
 
+        Callable as ``engine.query(table, vector, top_k, distance)`` (manages its
+        own connection) or ``engine.query(conn, table, vector, top_k, distance)``
+        (same conn-first shape as BaseEngine.measure_qps; mirrors
+        ``engine/pgvector.py``).
+        """
+        if vector is None:
+            raise ValueError("vector is required")
+        if isinstance(conn_or_table, str):
+            table = conn_or_table
+            conn = self.connect()
+            own_conn = True
+        else:
+            conn = conn_or_table
+            own_conn = False
+            table = top_k
+            top_k = distance if isinstance(distance, int) else 10
+
+        sql = _pase_distance_sql(table, vector, _int_or(top_k, 10), distance if not isinstance(distance, int) else "l2")
+        try:
             with conn.cursor() as cur:
-                cur.execute(
-                    f"SELECT id, (vector <?> CAST('{vec_str}' AS float4[])) AS ds "
-                    f"FROM {table} ORDER BY ds {sort_dir} LIMIT {top_k}"
-                )
+                cur.execute(sql)
                 return [(row[0], row[1]) for row in cur.fetchall()]
         finally:
-            conn.close()
+            if own_conn:
+                conn.close()
 
     def query_sql(
         self,
@@ -150,12 +190,7 @@ class PolarDBEngine(BaseEngine):
         distance: str = "l2",
     ) -> str:
         """Generate the SQL for a query."""
-        sort_dir = "ASC" if distance == "l2" else "DESC"
-        vec_str = "{" + ",".join(str(v) for v in vector) + "}"
-        return (
-            f"SELECT id, (vector <?> CAST('{vec_str}' AS float4[])) AS ds "
-            f"FROM {table} ORDER BY ds {sort_dir} LIMIT {top_k}"
-        )
+        return _pase_distance_sql(table, vector, top_k, distance)
 
     def detect_vector_column(self, table: str) -> Tuple[Optional[str], int, Optional[str]]:
         """Detect the vector column."""

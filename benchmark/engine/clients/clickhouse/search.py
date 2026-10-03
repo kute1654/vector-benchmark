@@ -2,6 +2,7 @@ import threading
 import string
 import re
 import json
+import struct
 from typing import List, Optional, Tuple
 import clickhouse_connect
 from clickhouse_connect.driver.client import Client
@@ -39,6 +40,70 @@ def escape_clickhouse_string_literal(input_string: str) -> str:
 
 def to_clickhouse_array_literal(values: List[float]) -> str:
     return json.dumps(values, separators=(",", ":"))
+
+def format_cast_array_literal(values: List[float]) -> str:
+    """Render the inline-array literal used inside CAST([...] AS Array(Float32)).
+
+    The h5 datasets (e.g. SIFT, which natively is uint8 descriptors) are stored
+    as float32 on disk, so the sampled query vectors arrive here as Python
+    floats and a plain ``str(vector)`` renders them as float literals
+    (``[119.0, 0.0, ...]``).  Those literals parse as Float64 and value-based
+    narrowing Float64 -> Float32 is always allowed, so the plan-cache
+    cast_array type-mismatch path (Integer literal -> Array(UInt8) at dim
+    <= 255 -> createColumnConst BAD_GET swallowed -> warm hits replay the first
+    query's vector) is never exercised during recall measurement.
+
+    Integral-valued vectors are therefore emitted as INTEGER literals
+    (``[119,0,...]``); genuinely fractional vectors keep float rendering.
+    """
+    try:
+        if values and all(float(v).is_integer() for v in values):
+            return "[" + ",".join(str(int(float(v))) for v in values) + "]"
+    except (TypeError, ValueError):
+        pass
+    return json.dumps(values, separators=(",", ":"))
+
+
+CLICKHOUSE_SQL_TYPES = ["normal", "cast", "cast_array", "raw_bytes", "raw_bytes_x"]
+
+
+def _vector_to_hex(values: List[float]) -> str:
+    """Convert a float32 vector to uppercase hex string (no prefix).
+
+    Each float is packed as little-endian Float32 (4 bytes), then the whole
+    buffer is hex-encoded.  This matches the ClickHouse
+    ``reinterpret(unhex('...'), 'Array(Float32)')`` and
+    ``reinterpret(x'...', 'Array(Float32)')`` SQL forms.
+    """
+    buf = struct.pack(f"<{len(values)}f", *values)
+    return buf.hex().upper()
+
+
+def _build_query_literal(values: List[float], sql_type: str) -> str:
+    """Build the query-vector literal expression for a given SQL type.
+
+    Supported types (matching the bash benchmark naming convention):
+      - normal:       [v1,v2,...]
+      - cast:         cast('[v1,v2,...]','Array(Float32)')
+      - cast_array:   CAST([v1,v2,...] AS Array(Float32))
+      - raw_bytes:    reinterpret(unhex('HEX'), 'Array(Float32)')
+      - raw_bytes_x:  reinterpret(x'HEX', 'Array(Float32)')
+    """
+    v_str = ",".join(str(v) for v in values)
+    if sql_type == "normal":
+        return f"[{v_str}]"
+    elif sql_type == "cast":
+        return f"cast('[{v_str}]','Array(Float32)')"
+    elif sql_type == "cast_array":
+        return f"CAST([{v_str}] AS Array(Float32))"
+    elif sql_type == "raw_bytes":
+        hex_str = _vector_to_hex(values)
+        return f"reinterpret(unhex('{hex_str}'), 'Array(Float32)')"
+    elif sql_type == "raw_bytes_x":
+        hex_str = _vector_to_hex(values)
+        return f"reinterpret(x'{hex_str}', 'Array(Float32)')"
+    else:
+        return f"CAST([{v_str}] AS Array(Float32))"
 
 
 thread_local = threading.local()
@@ -235,22 +300,36 @@ class ClickHouseSearcher(BaseSearcher):
 
     @classmethod
     def apply_query_plan_cache_settings(cls, search_params: dict, protocol: str):
+        """Apply query plan cache and query result cache settings to ClickHouse session.
+
+        每个配置参数都是独立的一等参数，参照 MyScale 实现方式：
+          - vector_query_plan_cache:              启用/关闭查询计划缓存 (0/1)
+          - vector_use_cast:                      启用/关闭 CAST 向量 (0/1)
+          - vector_query_plan_cache_only_vector:  仅缓存向量的查询计划 (0/1)
+          - vector_only_cache_query_plan:         仅缓存 QueryPlan，不缓存完整执行计划 (0/1)
+          - use_query_cache:                      启用/关闭查询结果缓存 (0/1)
+
+        注意：与旧方案不同，这里不再从 vector_query_plan_cache 的编码值中
+              推导 vector_only_cache_query_plan 和 use_query_cache，而是
+              直接从 search_params 中读取独立值。
+        """
         ef_s = search_params.get("ef_s", None)
         if ef_s is not None:
             set_ef_s_sql = f"SET hnsw_candidate_list_size_for_search = {ef_s}"
+
+        # 以独立参数形式读取所有缓存配置，不再使用编码合并方案
         cache_mode = _to_int((search_params or {}).get("vector_query_plan_cache", 0), 0)
         CAST_mode = _to_int((search_params or {}).get("vector_use_cast", 0), 0)
         only_vector = _to_int((search_params or {}).get("vector_query_plan_cache_only_vector", 0), 0)
-        clear_cache_sql = f"SYSTEM DROP VECTOR QUERY PLAN CACHE"
-        only_cache_query_plan = 0
+        # use_query_cache: 独立控制查询结果缓存，不从 cache_mode 推导
         query_cache = _to_int((search_params or {}).get("use_query_cache", 0), 0)
-        if cache_mode % 3 == 2:
-            only_cache_query_plan = 1
-        if cache_mode > 2:
-            query_cache = 1
-        cache_mode = cache_mode // 3
+        # vector_only_cache_query_plan: 独立控制"仅缓存 QueryPlan"模式，不从 cache_mode 推导
+        only_cache_query_plan = _to_int((search_params or {}).get("vector_only_cache_query_plan", 0), 0)
+
+        # 如果查询计划缓存未启用，则 only_vector 必须为 0
         if cache_mode == 0:
             only_vector = 0
+
         set_cache_sql = f"SET vector_query_plan_cache = {cache_mode}"
         set_cast_sql = f"SET vector_use_cast = {CAST_mode}"
         set_only_vector_sql = f"SET vector_query_plan_cache_only_vector = {only_vector}"
@@ -258,10 +337,11 @@ class ClickHouseSearcher(BaseSearcher):
         set_only_cache_query_plan_sql = f"SET vector_only_cache_query_plan = {only_cache_query_plan}"
         try:
             client = cls.get_client()
+            # 先清除缓存，再设置新参数，确保每次实验从干净的缓存状态开始
             if protocol == "tcp":
                 if ef_s is not None:
                     client.execute(set_ef_s_sql)
-                client.execute(clear_cache_sql)
+                client.execute("SYSTEM DROP VECTOR QUERY PLAN CACHE")
                 client.execute(set_query_cache_sql)
                 client.execute(set_cache_sql)
                 client.execute(set_cast_sql)
@@ -270,12 +350,12 @@ class ClickHouseSearcher(BaseSearcher):
             else:
                 if ef_s is not None:
                     client.command(set_ef_s_sql)
-                client.command(clear_cache_sql)
+                client.command("SYSTEM DROP VECTOR QUERY PLAN CACHE")
                 client.command(set_query_cache_sql)
                 client.command(set_cache_sql)
                 client.command(set_cast_sql)
                 client.command(set_only_vector_sql)
-                client.execute(set_only_cache_query_plan_sql)
+                client.command(set_only_cache_query_plan_sql)
         except Exception as e:
             warn(f"failed to set query plan cache settings: {e}")
 
@@ -290,18 +370,19 @@ class ClickHouseSearcher(BaseSearcher):
         table_name = validate_table_name(conn.get("table", CLICKHOUSE_DATABASE_NAME))
         search_params_dict = (cls.search_params or {}).get("params") or {}
 
-        # ClickHouse 26.6.1.1 使用标准的距离函数
-        # 从 DISTANCE_MAPPING 获取正确的距离函数名（L2Distance, cosineDistance, dotProduct）
-        dist_func = cls.distance  # 已经通过 DISTANCE_MAPPING 转换为 ClickHouse 函数名
-        dist_expr = f"{dist_func}(vector, {vector})"
+        dist_func = cls.distance
+        sql_type = str((cls.search_params or {}).get("sql_type", "cast_array") or "cast_array")
+        if vector is not None:
+            query_literal = _build_query_literal(vector, sql_type)
+        else:
+            query_literal = ""
+        dist_expr = f"{dist_func}(vector, {query_literal})"
 
         search_str = f"SELECT id, {dist_expr} as dis FROM {table_name}"
 
         if meta_conditions is not None:
             search_str += f" prewhere {cls.parser.parse(meta_conditions=meta_conditions)}"
 
-        # ClickHouse 距离函数返回的是距离值，越小越相似（除了点积）
-        # dotProduct 返回的是相似度分数，越大越相似
         if cls.distance == "dotProduct":
             search_str += f" order by dis DESC limit {top}"
         else:

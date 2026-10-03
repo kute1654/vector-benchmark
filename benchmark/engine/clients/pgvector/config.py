@@ -20,6 +20,18 @@ DISTANCE_MAPPING = {
     Distance.COSINE: "<=>"
 }
 
+# 查询结果缓存 GUC (与 bash-test/pgvector-benchmark.sh 对齐:
+#   SET pgvector.result_cache_debug = on/off, 并同步主开关 pgvector.result_cache)
+PGVECTOR_RESULT_CACHE_GUC = "pgvector.result_cache"
+PGVECTOR_RESULT_CACHE_DEBUG_GUC = "pgvector.result_cache_debug"
+
+# 向量文本输入的十进制->float 解析器 GUC (运行时切换, 与 src/vector.c 的
+# DefineCustomEnumVariable("vector.in_parse_mode") 对齐):
+#   strtof       -> libc strtof
+#   inline       -> 手写 inline 解析器
+#   fast_float   -> fast_float_parse() (Eisel-Lemire)
+PGVECTOR_IN_PARSE_MODE_GUC = "vector.in_parse_mode"
+
 H5_COLUMN_TYPES_MAPPING = {
     "float64": "DOUBLE PRECISION",
     "float32": "REAL", 

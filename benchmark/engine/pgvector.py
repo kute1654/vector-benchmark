@@ -1,5 +1,8 @@
 """Pgvector engine implementation."""
 
+import math
+import random
+import threading
 from typing import Any, Dict, List, Optional, Tuple
 
 import psycopg2
@@ -9,6 +12,35 @@ from .base import BaseEngine
 
 DIST_OPS = {"l2": "<->", "ip": "<#>", "cosine": "<=>"}
 SORT_DIR = {"l2": "ASC", "ip": "DESC", "cosine": "ASC"}
+
+# =========================================================================
+# 查询计划缓存与向量检索测试工具
+# =========================================================================
+
+# 待测的 SQL 语句类型
+SQL_TYPES = [
+    "text_literal",      # SELECT ... WHERE vector <-> '[vec]'::vector (默认)
+    "text_cast",         # SELECT ... WHERE vector <-> CAST('[vec]' AS vector)
+    "array_cast",        # SELECT ... WHERE vector <-> ARRAY[...]::real[]::vector
+    "with_text_literal", # WITH qv AS (...) SELECT ... CROSS JOIN qv
+    "prepared",          # PREPARE/EXECUTE (受 plan_cache_mode 控制)
+]
+
+# 查询计划缓存模式映射
+PLAN_CACHE_MODES = {
+    "off":  "force_custom_plan",   # 每次重新规划（不使用缓存）
+    "on":   "force_generic_plan",  # 强制通用计划（复用缓存）
+    "auto": "auto",                # PostgreSQL 自动选择
+}
+
+# 已知的 5 个测试表
+BENCHMARK_TABLES = [
+    {"label": "128dim",  "table": "benchmark_sift_128",   "dim": 128,  "distance": "l2"},
+    {"label": "256dim",  "table": "benchmark_256_290k",   "dim": 256,  "distance": "cosine"},
+    {"label": "768dim",  "table": "benchmark_768_1m",     "dim": 768,  "distance": "cosine"},
+    {"label": "960dim",  "table": "benchmark_960_1m",     "dim": 960,  "distance": "l2"},
+    {"label": "1536dim", "table": "benchmark_1536_1m",    "dim": 1536, "distance": "cosine"},
+]
 
 
 class PgvectorEngine(BaseEngine):
@@ -231,3 +263,88 @@ class PgvectorEngine(BaseEngine):
                 return result
         finally:
             conn.close()
+
+    # =====================================================================
+    # QPS Benchmark 工具方法
+    # =====================================================================
+
+    @staticmethod
+    def gen_vector_text(dim: int) -> str:
+        """生成随机向量文本，如 '[0.1,-0.2,0.3,...]'"""
+        v = [round(random.uniform(-1.0, 1.0), 6) for _ in range(dim)]
+        return '[' + ','.join(str(x) for x in v) + ']'
+
+    @staticmethod
+    def gen_vector_list(dim: int) -> List[float]:
+        """生成随机向量列表"""
+        return [round(random.uniform(-1.0, 1.0), 6) for _ in range(dim)]
+
+    def gen_query_vectors(self, dim: int, n: int) -> List[str]:
+        """预生成 n 个随机查询向量（文本格式）"""
+        return [self.gen_vector_text(dim) for _ in range(n)]
+
+    def _make_inline_sql(self, table: str, dim: int, distance: str,
+                         sql_type: str, top_k: int, vec_text: str) -> str:
+        """生成 inline 类型 SQL（不涉及 PREPARE/EXECUTE）"""
+        op = DIST_OPS.get(distance, "<->")
+        sort = SORT_DIR.get(distance, "ASC")
+        t = table
+
+        if sql_type == "text_literal":
+            return f"SELECT id, (vector {op} '{vec_text}'::vector) AS dis FROM {t} ORDER BY dis {sort} LIMIT {top_k}"
+        elif sql_type == "text_cast":
+            return f"SELECT id, (vector {op} CAST('{vec_text}' AS vector)) AS dis FROM {t} ORDER BY dis {sort} LIMIT {top_k}"
+        elif sql_type == "array_cast":
+            bare = vec_text.strip("[]")
+            return f"SELECT id, (vector {op} CAST(ARRAY[{bare}]::real[] AS vector)) AS dis FROM {t} ORDER BY dis {sort} LIMIT {top_k}"
+        elif sql_type == "with_text_literal":
+            return (f"WITH qv AS (SELECT '{vec_text}'::vector AS v) "
+                    f"SELECT t.id, (t.vector {op} qv.v) AS dis FROM {t} t CROSS JOIN qv "
+                    f"ORDER BY dis {sort} LIMIT {top_k}")
+        # fallback
+        return f"SELECT id, (vector {op} '{vec_text}'::vector) AS dis FROM {t} ORDER BY dis {sort} LIMIT {top_k}"
+
+    def _make_prepare_sql(self, table: str, dim: int, distance: str,
+                          top_k: int) -> str:
+        """生成 PREPARE 语句的 SQL 模板"""
+        op = DIST_OPS.get(distance, "<->")
+        sort = SORT_DIR.get(distance, "ASC")
+        return (f"SELECT id, (vector {op} $1::vector) AS dis "
+                f"FROM {table} ORDER BY dis {sort} LIMIT {top_k}")
+
+    def _execute_query(self, conn, sql: str, params=None) -> list:
+        """执行 SQL 查询并返回结果"""
+        with conn.cursor() as cur:
+            cur.execute(sql, params)
+            return [(row[0], float(row[1])) for row in cur.fetchall()]
+
+    def query_with_type(
+        self,
+        conn,
+        table: str,
+        dim: int,
+        distance: str,
+        sql_type: str,
+        top_k: int,
+        vec_text: str,
+        stmt_name: str = "qps_stmt",
+    ) -> list:
+        """使用指定 SQL 类型执行一次向量查询
+
+        Args:
+            conn: 数据库连接
+            table: 表名
+            dim: 向量维度
+            distance: 距离类型 (l2/cosine/ip)
+            sql_type: SQL 语句类型
+            top_k: 返回 top-k 结果
+            vec_text: 查询向量文本 (如 '[0.1,0.2,...]')
+            stmt_name: PREPARE 语句名（仅 prepared 类型使用）
+        Returns:
+            结果列表 [(id, distance), ...]
+        """
+        if sql_type == "prepared":
+            return self._execute_query(conn, f"EXECUTE {stmt_name}(%s)", (vec_text,))
+        else:
+            sql = self._make_inline_sql(table, dim, distance, sql_type, top_k, vec_text)
+            return self._execute_query(conn, sql)

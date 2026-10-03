@@ -162,6 +162,9 @@ class ClientFactory(ABC):
             index_type_raw = upload_params.get("index_type", "hnsw")
             index_type_str = str(index_type_raw or "").strip()
             index_type = index_type_str.lower()
+            # config.json uses the ClickHouse-style name HNSWFLAT for all engines
+            if index_type == "hnswflat":
+                index_type = "hnsw"
 
             if index_type not in ["hnsw", "ivfflat", "none"]:
                 raise RuntimeError(f"PGVector only supports 'hnsw', 'ivfflat' or 'none', got: {index_type}")
@@ -175,6 +178,9 @@ class ClientFactory(ABC):
             )
         elif engine_type == "polardb" and POLARDB_AVAILABLE:
             index_type = str(upload_params.get("index_type", "hnsw") or "").strip().lower()
+            # config.json uses the ClickHouse-style name HNSWFLAT for all engines
+            if index_type == "hnswflat":
+                index_type = "hnsw"
             if index_type not in {"hnsw", "ivfflat", "none"}:
                 raise RuntimeError(f"PolarDB only supports 'hnsw', 'ivfflat' or 'none', got: {index_type}")
             upload_params["_index_type"] = index_type

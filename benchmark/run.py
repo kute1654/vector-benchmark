@@ -27,6 +27,7 @@ def run(
     host: str | None = None,
     port: int | None = None,
     skip_upload: bool = False,
+    skip_search: bool = False,
     recall_only: bool = False,
 ):
 
@@ -56,16 +57,16 @@ def run(
     }
 
     # 如果指定了 engine_type，进一步过滤引擎
-    if engine_type:
-        engine_type_lower = engine_type.lower()
-        before_count = len(selected_engines)
-        selected_engines = {
-            name: config
-            for name, config in selected_engines.items()
-            if (config.get("engine") or "").lower() == engine_type_lower
-        }
-        if len(selected_engines) < before_count:
-            step(f"已按 engine_type='{engine_type}' 过滤: {before_count} -> {len(selected_engines)} 个配置")
+    # if engine_type:
+    #     engine_type_lower = engine_type.lower()
+    #     before_count = len(selected_engines)
+    #     selected_engines = {
+    #         name: config
+    #         for name, config in selected_engines.items()
+    #         if (config.get("engine") or "").lower() == engine_type_lower
+    #     }
+    #     if len(selected_engines) < before_count:
+    #         step(f"已按 engine_type='{engine_type}' 过滤: {before_count} -> {len(selected_engines)} 个配置")
 
     selected_datasets = {
         name: config
@@ -186,7 +187,7 @@ def run(
         dataset = Dataset(dataset_config)
         dataset.download()
         try:
-            client.run_experiment(dataset, skip_upload, recall_only=recall_only)
+            client.run_experiment(dataset, skip_upload, recall_only=recall_only, skip_search=skip_search)
         except IncompatibilityError as e:
             step(f"skipped: {engine_name} - {dataset_name} - {e}")
             continue
@@ -209,6 +210,12 @@ if __name__ == "__main__":
     parser.add_argument("--port", type=int, default=None, help="override server port; otherwise use each config")
     parser.add_argument("--skip-upload", action="store_true", help="skip data upload and index build stages")
     parser.add_argument(
+        "--skip-search",
+        action="store_true",
+        help="only create table + build index (CONFIGURE/UPLOAD/post_upload), then exit without running SEARCH. "
+        "Used to prepare tables for sql-bench/polardb-pase-query-forms-benchmark.sh",
+    )
+    parser.add_argument(
         "--recall-only",
         action="store_true",
         help="only run recall/metric evaluation on all test queries; ignores queries_pool_size limits"
@@ -222,5 +229,6 @@ if __name__ == "__main__":
         host=args.host,
         port=args.port,
         skip_upload=args.skip_upload,
+        skip_search=args.skip_search,
         recall_only=args.recall_only,
     )

@@ -5,6 +5,20 @@ measures every SQL shape emitted by :mod:`generate_sql_files` using the same
 sampled query pool, concurrency, duration and cache profile, so the result is
 directly comparable.  Table creation and index building remain owned by
 ``benchmark.run``; use ``python run.py`` once per target before this command.
+
+Cache profiles on the ClickHouse-family engines are expressed through the query's
+own SETTINGS clause (e.g. ``... SETTINGS vector_query_plan_cache=1``).  For those
+per-query settings to reach the server-side query-plan-cache probe, the server must
+run with the ``enable_vector_performance_test`` mode on; each worker turns it on for
+its session (``_session_setup``) and the server caches are cleared once per profile
+(``_clear_server_caches``).  PostgreSQL-compatible engines keep using prepared
+statements (``PREPARE``/``EXECUTE``) for their plan cache.
+
+ClickHouse and MyScale listen on the same port and cannot be up at the same time, so
+they are measured in separate, sequential invocations: ``--engines clickhouse`` while
+the ClickHouse server runs, then ``--engines myscale`` while the MyScale server runs.
+A single invocation that would measure two engines against the same host:port is
+rejected up front (``_check_endpoint_conflicts``).
 """
 
 from __future__ import annotations
@@ -75,20 +89,26 @@ def _profiles(target: dict[str, Any], requested: list[str]) -> list[dict[str, An
     if not configured:
         engine = str(target["engine"]).lower()
         if engine == "myscale":
+            # MyScale plan-cache settings. Each profile is expressed as the server-side
+            # setting names the myscaledb-oss-queryplancache branch understands. The values
+            # are attached to the query's own SETTINGS clause and only take effect for the
+            # plan-cache probe once `enable_vector_performance_test` is on at the session.
             configured = [
-                # The local MyScale-compatible endpoint exposes the
-                # ClickHouse setting name for vector plan caching.
-                {"name": "off", "use_query_cache": 0, "vector_query_plan_cache": 0},
-                {"name": "result-cache", "use_query_cache": 1, "vector_query_plan_cache": 0},
-                {"name": "plan-cache", "use_query_cache": 0, "vector_query_plan_cache": 1},
-                {"name": "plan-result-cache", "use_query_cache": 1, "vector_query_plan_cache": 1},
+                {"name": "off", "enable_query_plan_cache": 0, "enable_cast_vector": 0, "query_plan_cache_only_vector": 0, "use_query_cache": 0},
+                {"name": "result-cache", "enable_query_plan_cache": 0, "enable_cast_vector": 0, "query_plan_cache_only_vector": 0, "use_query_cache": 1},
+                {"name": "plan-cache", "enable_query_plan_cache": 1, "enable_cast_vector": 0, "query_plan_cache_only_vector": 0, "use_query_cache": 0},
+                {"name": "plan-cast", "enable_query_plan_cache": 1, "enable_cast_vector": 1, "query_plan_cache_only_vector": 0, "use_query_cache": 0},
+                {"name": "plan-only-vector", "enable_query_plan_cache": 1, "enable_cast_vector": 0, "query_plan_cache_only_vector": 1, "use_query_cache": 0},
+                {"name": "plan-result-cache", "enable_query_plan_cache": 1, "enable_cast_vector": 0, "query_plan_cache_only_vector": 0, "use_query_cache": 1},
             ]
         elif engine == "clickhouse":
             configured = [
-                {"name": "off", "use_query_cache": 0, "vector_query_plan_cache": 0},
-                {"name": "result-cache", "use_query_cache": 1, "vector_query_plan_cache": 0},
-                {"name": "plan-cache", "use_query_cache": 0, "vector_query_plan_cache": 1},
-                {"name": "plan-result-cache", "use_query_cache": 1, "vector_query_plan_cache": 1},
+                {"name": "off", "vector_query_plan_cache": 0, "vector_use_cast": 0, "vector_query_plan_cache_only_vector": 0, "use_query_cache": 0},
+                {"name": "result-cache", "vector_query_plan_cache": 0, "vector_use_cast": 0, "vector_query_plan_cache_only_vector": 0, "use_query_cache": 1},
+                {"name": "plan-cache", "vector_query_plan_cache": 1, "vector_use_cast": 0, "vector_query_plan_cache_only_vector": 0, "use_query_cache": 0},
+                {"name": "plan-cast", "vector_query_plan_cache": 1, "vector_use_cast": 1, "vector_query_plan_cache_only_vector": 0, "use_query_cache": 0},
+                {"name": "plan-only-vector", "vector_query_plan_cache": 1, "vector_use_cast": 0, "vector_query_plan_cache_only_vector": 1, "use_query_cache": 0},
+                {"name": "plan-result-cache", "vector_query_plan_cache": 1, "vector_use_cast": 0, "vector_query_plan_cache_only_vector": 0, "use_query_cache": 1},
             ]
         else:
             configured = [
@@ -101,6 +121,74 @@ def _profiles(target: dict[str, Any], requested: list[str]) -> list[dict[str, An
         return [dict(x) for x in configured]
     names = set(requested)
     return [dict(x) for x in configured if str(x.get("name")) in names]
+
+
+def _check_endpoint_conflicts(targets: list[dict[str, Any]]) -> None:
+    """Refuse to measure two engines against the same host:port in one run.
+
+    ClickHouse and MyScale both listen on the same port (typically 9000), so at most one
+    of them can be up at a time.  A config that lists both on the same endpoint would
+    silently query whichever server happens to own the port, and the other engine's
+    queries would be executed with setting names its server ignores - giving fake
+    plan-cache numbers.  Such engines must be measured in separate, sequential runs
+    (``--engines <target>``), each against its own running server.
+    """
+    owner: dict[tuple[str, int], str] = {}
+    for target in targets:
+        conn = target.get("connection_params") or {}
+        endpoint = (conn.get("host", "127.0.0.1"), int(conn.get("port", 9000)))
+        engine = str(target.get("engine", "")).lower()
+        other = owner.get(endpoint)
+        if other is not None and other != engine:
+            raise SystemExit(
+                f"targets of engines '{other}' and '{engine}' both use "
+                f"{endpoint[0]}:{endpoint[1]}, which the two databases cannot share at the "
+                f"same time. Run them sequentially, one engine per invocation, e.g. "
+                f"'--engines {other}' then '--engines {engine}', and write each result to "
+                f"its own CSV."
+            )
+        owner[endpoint] = engine
+
+
+def _session_setup(engine: str) -> list[str]:
+    """Session-level SQL each worker must run once on its connection.
+
+    The ClickHouse and MyScale branches drive the query plan cache from the query's own
+    SETTINGS clause (see ``_setting_clause``). That only works while the server is in
+    ``enable_vector_performance_test`` mode: without it, per-query SETTINGS clauses are
+    applied after AST parsing, i.e. after the plan-cache probe has already run. The flag
+    is session state (putting it in the SETTINGS clause would be circular), so every worker
+    enables it on its own session before measuring.
+    """
+    if engine not in {"clickhouse", "myscale"}:
+        return []
+    return ["SET enable_vector_performance_test = 1"]
+
+
+def _clear_server_caches(target: dict[str, Any], profile: dict[str, Any]) -> None:
+    """Start each cache profile from an empty server cache so its first QPS row is
+    measured the same way across runs."""
+    engine = str(target["engine"]).lower()
+    if engine not in {"clickhouse", "myscale"}:
+        return
+    drops = []
+    if int(profile.get("use_query_cache", 0) or 0):
+        drops.append("SYSTEM DROP QUERY CACHE")
+    if engine == "clickhouse" and int(profile.get("vector_query_plan_cache", 0) or 0):
+        drops.append("SYSTEM DROP VECTOR QUERY PLAN CACHE")
+    if engine == "myscale" and int(profile.get("enable_query_plan_cache", 0) or 0):
+        drops.append("SYSTEM DROP QUERY PLAN CACHE")
+    if not drops:
+        return
+    connection = _connect(target)
+    try:
+        for statement in drops:
+            connection.execute(statement)
+    except Exception as exc:  # noqa: BLE001 - the benchmark must survive unprivileged users
+        print(f"warning: failed to clear server caches for {profile.get('name', '?')}: {exc}")
+    finally:
+        if hasattr(connection, "close"):
+            connection.close()
 
 
 def _sample(target: dict[str, Any], count: int):
@@ -135,8 +223,20 @@ def _forms(target: dict[str, Any], vectors):
             table, vectors, top, distance, int(target.get("pase_extra", 5)),
             int(target.get("pase_ds", 0)), selected or POLARDB_SQL_TYPES,
         )
+    # The ClickHouse-family generator serves both engines: engine="clickhouse"
+    # keeps the plain L2Distance/cosineDistance forms, while engine="myscale"
+    # emits distance(...)(vector, q) forms and receives the search parameters
+    # (ef_s etc.) nested under search_params.params exactly as run.py's MyScale
+    # configuration expresses them.
+    search_params = None
+    if engine == "myscale":
+        sp = target.get("search_params") or {}
+        search_params = sp.get("params") if isinstance(sp, dict) else None
+        if not isinstance(search_params, dict):
+            search_params = {}
     return generate_clickhouse_sql_forms(
-        table, vectors, top, distance, dimension, selected or CLICKHOUSE_SQL_TYPES, engine=engine
+        table, vectors, top, distance, dimension,
+        selected or CLICKHOUSE_SQL_TYPES, engine=engine, search_params=search_params,
     )
 
 
@@ -198,6 +298,10 @@ def _measure(target, sql_statements: list[str], profile: dict[str, Any], concurr
     def worker(slot: int):
         connection = _connect(target)
         try:
+            # Enable the per-query-SETTINGS-clause plan-cache path on this session
+            # (ClickHouse-family engines only; no-op for pg/polardb).
+            for setup_statement in _session_setup(engine):
+                connection.execute(setup_statement)
             prepared = _prepare(connection, engine, statements, profile)
         except Exception:
             # A server may reject one particular SQL shape when preparing it.
@@ -258,6 +362,7 @@ def run(args) -> int:
         targets = [t for t in targets if t.get("name") in wanted or t.get("engine") in wanted]
     if not targets:
         raise SystemExit("no matching query-form targets")
+    _check_endpoint_conflicts(targets)
     output = Path(args.output)
     output.parent.mkdir(parents=True, exist_ok=True)
     fields = ["timestamp", "target", "engine", "table", "cache_profile", "sql_type", "queries", "concurrency", "duration_s", "qps", "errors"]
@@ -268,6 +373,7 @@ def run(args) -> int:
             vectors = _sample(target, args.query_count)
             forms = _forms(target, vectors)
             for profile in _profiles(target, args.cache_profiles):
+                _clear_server_caches(target, profile)
                 for sql_type, sql_text in forms.items():
                     statements = [line for line in sql_text.splitlines() if line.strip()]
                     qps, errors = _measure(target, statements, profile, args.concurrency, args.duration)

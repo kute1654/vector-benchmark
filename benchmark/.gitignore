@@ -10,4 +10,3 @@ scripts/__pycache__
 experiments/test
 experiments/configurations
 venv/
-bash-test/*

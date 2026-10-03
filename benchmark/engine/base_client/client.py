@@ -1,4 +1,5 @@
 import functools
+import itertools
 import json
 import csv
 import os
@@ -16,6 +17,8 @@ from engine.base_client.utils import get_mem_available_bytes, format_bytes
 RESULTS_DIR = ROOT_DIR / "results"
 RESULTS_DIR.mkdir(exist_ok=True)
 CSV_RESULTS_FILE = RESULTS_DIR / "benchmark_results.csv"
+# PGvector / PolarDB write to their own CSV (different column schema than MyScale/ClickHouse)
+PGVECTOR_CSV_FILE = RESULTS_DIR / "pgvector_benchmark_results.csv"
 
 
 class BaseClient:
@@ -77,14 +80,14 @@ class BaseClient:
 
     def save_search_and_upload_results(
             self, search_results: dict, search_id: int, search_params: dict,
-            upload_params: dict, upload_results: dict, result_group: str, cache_mode: int, CAST_mode: int, only_vector: int, use_number: int, result_cache: int = 0
+            upload_params: dict, upload_results: dict, result_group: str, cache_mode: int, CAST_mode: int, only_vector: int, only_cache_query_plan: int, result_cache: int = 0
     ):
         now = datetime.now()
         timestamp = now.strftime("%Y-%m-%d-%H-%M-%S")
         parallel = (search_params or {}).get("parallel", 1)
         top = (search_params or {}).get("top", None)
         top_label = top if top is not None else "default"
-        experiments_file = (f"{self.name}-search-{search_id}-cache-{cache_mode}-CAST-{CAST_mode}-only_vector-{only_vector}-use_number-{use_number}-parallel-{parallel}"
+        experiments_file = (f"{self.name}-search-{search_id}-cache-{cache_mode}-CAST-{CAST_mode}-only_vector-{only_vector}-only_cache_query_plan-{only_cache_query_plan}-result_cache-{result_cache}-parallel-{parallel}"
                             f"-top-{top_label}-{timestamp}.json")
         step(f"saved search results: results/{experiments_file}")
         with open(RESULTS_DIR / experiments_file, "w") as out:
@@ -113,7 +116,7 @@ class BaseClient:
             search_results["cache_mode"] = cache_mode
             search_results["CAST_mode"] = CAST_mode
             search_results["only_vector"] = only_vector
-            search_results["use_number"] = use_number
+            search_results["only_cache_query_plan"] = only_cache_query_plan
             search_results["use_result_cache"] = int(result_cache)
             payload = {
                 "result_group": result_group,  # single search or hybrid search
@@ -253,20 +256,17 @@ class BaseClient:
                 "If that happens, reduce search_params.parallel in the config and the dataset queries_pool_size field in datasets.json (see README.md)."
             )
 
-    def save_to_csv(self, search_results, search_params, dataset_config, cache_mode, CAST_mode, only_vector, use_number, threads):
+    def save_to_csv(self, search_results, search_params, dataset_config, cache_mode, CAST_mode, only_vector, only_cache_query_plan, query_cache, sql_type="cast_array"):
         """
         Save benchmark results to CSV file with all required parameters for comparison.
         """
         try:
-            # Extract required parameters
             parallel = search_params.get("parallel", 0)
             test_duration = search_params.get("test_duration", 0)
             ef_s = search_params.get("params", {}).get("ef_s", 0) if isinstance(search_params.get("params"), dict) else 0
             
-            # Extract QPS from search results
             qps = search_results.get("rps", 0)
             
-            # Prepare CSV row data
             csv_row = {
                 'timestamp': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
                 'experiment_name': self.name,
@@ -276,8 +276,9 @@ class BaseClient:
                 'use_query_plan_cache': int(cache_mode),
                 'query_plan_cache_enable_CAST': int(CAST_mode),
                 'query_plan_cache_only_vector': int(only_vector),
-                'query_plan_cache_use_number': int(use_number),
-                'query_parameterizer_max_threads': int(threads),
+                'vector_only_cache_query_plan': int(only_cache_query_plan),
+                'use_query_cache': int(query_cache),
+                'sql_type': sql_type,
                 'parallel': int(parallel),
                 'test_duration': int(test_duration),
                 'ef_s': int(ef_s),
@@ -287,15 +288,14 @@ class BaseClient:
                 'mrr': search_results.get("mrr", 0),
             }
             
-            # Write to CSV file
             file_exists = os.path.exists(CSV_RESULTS_FILE)
             
             with open(CSV_RESULTS_FILE, 'a', newline='') as csvfile:
                 fieldnames = [
                     'timestamp', 'experiment_name', 'dataset', 'vector_size', 'distance',
                     'use_query_plan_cache', 'query_plan_cache_enable_CAST', 
-                    'query_plan_cache_only_vector', 'query_plan_cache_use_number', 
-                    'query_parameterizer_max_threads', 'parallel', 'test_duration', 'ef_s',
+                    'query_plan_cache_only_vector', 'vector_only_cache_query_plan', 
+                    'use_query_cache', 'sql_type', 'parallel', 'test_duration', 'ef_s',
                     'rps', 'recall', 'mean_precisions', 'mrr'
                 ]
                 
@@ -311,434 +311,456 @@ class BaseClient:
     
     def _run_myscale_experiment(self, dataset: Dataset, skip_upload: bool, recall_only: bool, upload_stats, reader):
         """Complete MyScale-specific experiment implementation with full query plan cache parameters"""
-        
-        search_number = self.uploader.upload_params.get("search_number", 1)
-        search_number = int(search_number or 1)
-        use_query_plan_cache = self.uploader.upload_params.get("use_query_plan_cache", self.uploader.upload_params.get("enable_query_plan_cache", [0]))
-        # MyScale encodes result-cache mode as +2 in the existing cache mode
-        # field.  This preserves the old result format while allowing plan-only,
-        # result-only and combined tests in one run.
-        result_cache_modes = self.uploader.upload_params.get("use_query_cache", [0])
-        if not isinstance(use_query_plan_cache, list):
-            use_query_plan_cache = [use_query_plan_cache]
-        if not isinstance(result_cache_modes, list):
-            result_cache_modes = [result_cache_modes]
-        encoded_cache_modes = []
-        for plan_mode in use_query_plan_cache:
-            for result_mode in result_cache_modes:
-                encoded_cache_modes.append(int(plan_mode) + (2 if int(result_mode) else 0))
-        query_plan_cache_enable_CAST = self.uploader.upload_params.get("query_plan_cache_enable_CAST", [0])
-       
-        for cache_mode in encoded_cache_modes:
-            if cache_mode == 0:
-                query_plan_cache_only_vector = [0]
-                query_plan_cache_use_number = [0]
-            else:
-                query_plan_cache_only_vector = self.uploader.upload_params.get("query_plan_cache_only_vector", [0])
-                query_plan_cache_use_number = self.uploader.upload_params.get("query_plan_cache_use_number", [0])  
-            for CAST_mode in query_plan_cache_enable_CAST:
-                if cache_mode == 0 or CAST_mode == 1:
-                    query_parameterizer_max_threads = [0]
-                else:
-                    query_parameterizer_max_threads = self.uploader.upload_params.get("query_parameterizer_max_threads", [4])
-                for only_vector in query_plan_cache_only_vector:
-                    for use_number in query_plan_cache_use_number:
-                        for threads in query_parameterizer_max_threads:
-                            def with_cache_modes(search_params):
-                                params = dict(search_params or {})
-                                params["use_query_plan_cache"] = int(cache_mode)
-                                params["query_plan_cache_enable_CAST"] = int(CAST_mode)
-                                params["query_plan_cache_only_vector"] = int(only_vector)
-                                params["query_plan_cache_use_number"] = int(use_number)
-                                params["query_parameterizer_max_threads"] = int(threads)
-                                return params
-
-                            if self.searchers:
-                                duration_searchers = [
-                                    s for s in self.searchers if int((s.search_params or {}).get("test_duration", 0) or 0) > 0
-                                ]
-                                if duration_searchers:
-                                    last_searcher = duration_searchers[-1]
-                                    last_test_duration = int((last_searcher.search_params or {}).get("test_duration", 0) or 0)
-                                    stage("WARMUP")
-                                    warmup_seconds = int(round(last_test_duration * 0.1))
-                                    warmup_seconds = max(1, min(5, warmup_seconds))
-                                    # warmup_seconds = max(2, min(5, warmup_seconds))
-                                    warmup_search_params = with_cache_modes(last_searcher.search_params)
-                                    warmup_search_params["test_duration"] = warmup_seconds
-                                    warmup_search_params["_warmup"] = True
-                                    warmup_searcher = last_searcher.__class__(
-                                        last_searcher.host,
-                                        connection_params={**(last_searcher.connection_params or {})},
-                                        search_params=warmup_search_params,
-                                    )
-                                    warmup_params = (warmup_search_params.get("params") or {})
-                                    if not isinstance(warmup_params, dict):
-                                        warmup_params = {}
-                                    compact_kv(
-                                        "warmup params",
-                                        parallel=warmup_search_params.get("parallel"),
-                                        top=warmup_search_params.get("top"),
-                                        test_duration=warmup_search_params.get("test_duration"),
-                                        use_query_plan_cache=warmup_search_params.get("use_query_plan_cache"),
-                                        query_plan_cache_enable_CAST=warmup_search_params.get("query_plan_cache_enable_CAST"),
-                                        query_plan_cache_only_vector=warmup_search_params.get("query_plan_cache_only_vector"),
-                                        query_plan_cache_use_number=warmup_search_params.get("query_plan_cache_use_number"),
-                                        query_parameterizer_max_threads=warmup_search_params.get("query_parameterizer_max_threads"),
-                                        **warmup_params,
-                                    )
-                                    get_queries = functools.partial(reader.read_queries)
-                                    warmup_searcher.search_all(
-                                        dataset.config.distance,
-                                        get_queries,
-                                        reader.get_query_files(),
-                                        dataset.config.queries_pool_size,
-                                        dataset.config.schema,
-                                        dataset.config,
-                                        warn_memory=False,
-                                        recall_only=False,
-                                    )
-                                    warmup_searcher.post_warmup(dataset.config)
-                        
-                            stage("SEARCH")
-                            if not recall_only:
-                                self._warn_search_memory(reader, dataset)
-                            recall_only_results: list[dict] = [] if recall_only else []
-                            for search_id, searcher in enumerate(self.searchers):
-                                if recall_only:
-                                    stage(f"SEARCHER {search_id + 1}/{len(self.searchers)} (recall-only)")
-                                else:
-                                    stage(f"SEARCHER {search_id + 1}/{len(self.searchers)}")
-                                original_search_params = {**searcher.search_params}
-                                effective_search_params = with_cache_modes(original_search_params)
-                                if recall_only:
-                                    effective_search_params["test_duration"] = 0
-                                
-                                # Collect multiple search results for averaging
-                                all_search_stats = []
-                                for i in range(search_number):
-                                    # Create a fresh searcher instance for each iteration to avoid state contamination
-                                    current_searcher = searcher.__class__(
-                                        searcher.host,
-                                        connection_params={**(searcher.connection_params or {})},
-                                        search_params=effective_search_params,
-                                    )
-                                    
-                                    params = (effective_search_params.get("params") or {})
-                                    if not isinstance(params, dict):
-                                        params = {}
-                                    if i == 0:  # Only show params once for the first iteration
-                                        compact_kv(
-                                            "search params",
-                                            parallel=effective_search_params.get("parallel"),
-                                            top=effective_search_params.get("top"),
-                                            test_duration=effective_search_params.get("test_duration"),
-                                            use_query_plan_cache=effective_search_params.get("use_query_plan_cache"),
-                                            query_plan_cache_enable_CAST=effective_search_params.get("query_plan_cache_enable_CAST"),
-                                            query_plan_cache_only_vector=effective_search_params.get("query_plan_cache_only_vector"),
-                                            query_plan_cache_use_number=effective_search_params.get("query_plan_cache_use_number"),
-                                            query_parameterizer_max_threads=effective_search_params.get("query_parameterizer_max_threads"),
-                                            **params,
-                                        )
-                                    
-                                    get_queries = functools.partial(reader.read_queries)
-                                    search_stats = current_searcher.search_all(
-                                        dataset.config.distance,
-                                        get_queries,
-                                        reader.get_query_files(),
-                                        dataset.config.queries_pool_size,
-                                        dataset.config.schema,
-                                        dataset.config,
-                                        warn_memory=not recall_only,
-                                        recall_only=recall_only,
-                                    )
-                                    all_search_stats.append(search_stats)
-                                
-                                # Calculate trimmed mean (remove max and min, then average)
-                                if search_number > 2 and not recall_only:
-                                    # For QPS values, we want to remove outliers
-                                    if "rps" in all_search_stats[0]:
-                                        qps_values = [stats["rps"] for stats in all_search_stats]
-                                        qps_values_sorted = sorted(qps_values)
-                                        # Remove min and max
-                                        trimmed_qps = qps_values_sorted[1:-1]
-                                        avg_qps = sum(trimmed_qps) / len(trimmed_qps) if trimmed_qps else qps_values_sorted[0]
-                                        
-                                        # Use the first search stats as base and update QPS with trimmed mean
-                                        averaged_stats = dict(all_search_stats[0])
-                                        averaged_stats["rps"] = avg_qps
-                                        # Store original values for reference
-                                        averaged_stats["original_qps_values"] = qps_values
-                                        averaged_stats["trimmed_mean_qps"] = avg_qps
-                                    else:
-                                        averaged_stats = all_search_stats[0]  # Fallback if no QPS
-                                elif not recall_only:
-                                    # If search_number <= 2, just use the average of all results
-                                    if "rps" in all_search_stats[0]:
-                                        qps_values = [stats["rps"] for stats in all_search_stats]
-                                        avg_qps = sum(qps_values) / len(qps_values)
-                                        averaged_stats = dict(all_search_stats[0])
-                                        averaged_stats["rps"] = avg_qps
-                                        averaged_stats["original_rps_values"] = qps_values
-                                        averaged_stats["average_rps"] = avg_qps
-                                    else:
-                                        averaged_stats = all_search_stats[0]
-                                else:
-                                    # For recall_only, we don't average, just collect results
-                                    averaged_stats = all_search_stats[0] if all_search_stats else {}
-
-                                if recall_only:
-                                    result_group = getattr(dataset.config, "result_group", "")
-                                    if result_group in ("text_search", "hybrid_search"):
-                                        metric_key = "mrr"
-                                    else:
-                                        metric_key = "mean_precisions"
-                                    metric_value = averaged_stats.get(metric_key, 0.0)
-                                    params_only = effective_search_params.get("params", {})
-                                    if not isinstance(params_only, dict):
-                                        params_only = {}
-                                    recall_only_results.append(
-                                        {
-                                            "params": params_only,
-                                            metric_key: metric_value,
-                                        }
-                                    )
-                                else:
-                                    self.save_search_and_upload_results(
-                                        search_results=averaged_stats, search_id=search_id, search_params=effective_search_params,
-                                        upload_params={
-                                            **self.uploader.upload_params,
-                                            **self.configurator.collection_params,
-                                        },
-                                        upload_results=upload_stats,
-                                        result_group=dataset.config.result_group,
-                                        cache_mode=cache_mode,
-                                        CAST_mode=CAST_mode,
-                                        only_vector=only_vector,
-                                        use_number = use_number
-                                    )
-                                    # Save results to CSV for easy comparison
-                                    self.save_to_csv(
-                                        search_results=averaged_stats,
-                                        search_params=effective_search_params,
-                                        dataset_config=dataset.config,
-                                        cache_mode=cache_mode,
-                                        CAST_mode=CAST_mode,
-                                        only_vector=only_vector,
-                                        use_number=use_number,
-                                        threads=threads
-                                    )
-                            if recall_only and recall_only_results:
-                                self.save_recall_only_results(recall_only_results)
-
-    def _run_clickhouse_experiment(self, dataset: Dataset, skip_upload: bool, recall_only: bool, upload_stats, reader):
-        """Complete ClickHouse-specific experiment implementation with query plan cache parameters"""
         import functools
 
         search_number = self.uploader.upload_params.get("search_number", 1)
         search_number = int(search_number or 1)
+        use_query_plan_cache = self.uploader.upload_params.get("use_query_plan_cache", self.uploader.upload_params.get("enable_query_plan_cache", [0]))
+        query_plan_cache_enable_CAST = self.uploader.upload_params.get("query_plan_cache_enable_CAST", [0])
+        query_plan_cache_only_vector = self.uploader.upload_params.get("query_plan_cache_only_vector", [0])
+        vector_only_cache_query_plan = self.uploader.upload_params.get("vector_only_cache_query_plan", [0])
+        use_query_cache = self.uploader.upload_params.get("use_query_cache", [0])
+        sql_type_values = self.uploader.upload_params.get("sql_type", ["cast_array"])
+        if not isinstance(use_query_plan_cache, list):
+            use_query_plan_cache = [use_query_plan_cache]
+        if not isinstance(query_plan_cache_enable_CAST, list):
+            query_plan_cache_enable_CAST = [query_plan_cache_enable_CAST]
+        if not isinstance(query_plan_cache_only_vector, list):
+            query_plan_cache_only_vector = [query_plan_cache_only_vector]
+        if not isinstance(vector_only_cache_query_plan, list):
+            vector_only_cache_query_plan = [vector_only_cache_query_plan]
+        if not isinstance(use_query_cache, list):
+            use_query_cache = [use_query_cache]
+        if not isinstance(sql_type_values, list):
+            sql_type_values = [sql_type_values]
+        for cache_mode in use_query_plan_cache:
+            for CAST_mode in query_plan_cache_enable_CAST:
+                for only_vector in query_plan_cache_only_vector:
+                    for only_cache_query_plan in vector_only_cache_query_plan:
+                        for query_cache in use_query_cache:
+                            for sql_type in sql_type_values:
+                                def with_cache_modes(search_params):
+                                    params = dict(search_params or {})
+                                    params["use_query_plan_cache"] = int(cache_mode)
+                                    params["query_plan_cache_enable_CAST"] = int(CAST_mode)
+                                    params["query_plan_cache_only_vector"] = int(only_vector)
+                                    params["vector_only_cache_query_plan"] = int(only_cache_query_plan)
+                                    params["use_query_cache"] = int(query_cache)
+                                    params["sql_type"] = sql_type
+                                    return params
 
-        # ClickHouse supports vector-plan and result-cache settings together.
-        # Preserve the legacy encoded modes when use_query_cache is absent;
-        # otherwise expand an explicit plan-cache × result-cache matrix.
+                                if self.searchers:
+                                    duration_searchers = [
+                                        s for s in self.searchers if int((s.search_params or {}).get("test_duration", 0) or 0) > 0
+                                    ]
+                                    if duration_searchers:
+                                        last_searcher = duration_searchers[-1]
+                                        last_test_duration = int((last_searcher.search_params or {}).get("test_duration", 0) or 0)
+                                        stage("WARMUP")
+                                        warmup_seconds = int(round(last_test_duration * 0.1))
+                                        warmup_seconds = max(1, min(5, warmup_seconds))
+                                        warmup_search_params = with_cache_modes(last_searcher.search_params)
+                                        warmup_search_params["test_duration"] = warmup_seconds
+                                        warmup_search_params["_warmup"] = True
+                                        warmup_searcher = last_searcher.__class__(
+                                            last_searcher.host,
+                                            connection_params={**(last_searcher.connection_params or {})},
+                                            search_params=warmup_search_params,
+                                        )
+                                        warmup_params = (warmup_search_params.get("params") or {})
+                                        if not isinstance(warmup_params, dict):
+                                            warmup_params = {}
+                                        compact_kv(
+                                            "warmup params",
+                                            parallel=warmup_search_params.get("parallel"),
+                                            top=warmup_search_params.get("top"),
+                                            test_duration=warmup_search_params.get("test_duration"),
+                                            use_query_plan_cache=warmup_search_params.get("use_query_plan_cache"),
+                                            query_plan_cache_enable_CAST=warmup_search_params.get("query_plan_cache_enable_CAST"),
+                                            query_plan_cache_only_vector=warmup_search_params.get("query_plan_cache_only_vector"),
+                                            vector_only_cache_query_plan=warmup_search_params.get("vector_only_cache_query_plan"),
+                                            use_query_cache=warmup_search_params.get("use_query_cache"),
+                                            sql_type=warmup_search_params.get("sql_type"),
+                                            **warmup_params,
+                                        )
+                                        get_queries = functools.partial(reader.read_queries)
+                                        warmup_searcher.search_all(
+                                            dataset.config.distance,
+                                            get_queries,
+                                            reader.get_query_files(),
+                                            dataset.config.queries_pool_size,
+                                            dataset.config.schema,
+                                            dataset.config,
+                                            warn_memory=False,
+                                            recall_only=False,
+                                        )
+                                        warmup_searcher.post_warmup(dataset.config)
+
+                                stage("SEARCH")
+                                if not recall_only:
+                                    self._warn_search_memory(reader, dataset)
+                                recall_only_results: list[dict] = [] if recall_only else []
+                                for search_id, searcher in enumerate(self.searchers):
+                                    if recall_only:
+                                        stage(f"SEARCHER {search_id + 1}/{len(self.searchers)} (recall-only, sql_type={sql_type})")
+                                    else:
+                                        stage(f"SEARCHER {search_id + 1}/{len(self.searchers)} (sql_type={sql_type})")
+                                    original_search_params = {**searcher.search_params}
+                                    effective_search_params = with_cache_modes(original_search_params)
+                                    if recall_only:
+                                        effective_search_params["test_duration"] = 0
+
+                                    all_search_stats = []
+                                    for i in range(search_number):
+                                        current_searcher = searcher.__class__(
+                                            searcher.host,
+                                            connection_params={**(searcher.connection_params or {})},
+                                            search_params=effective_search_params,
+                                        )
+
+                                        params = (effective_search_params.get("params") or {})
+                                        if not isinstance(params, dict):
+                                            params = {}
+                                        if i == 0:
+                                            compact_kv(
+                                                "search params",
+                                                parallel=effective_search_params.get("parallel"),
+                                                top=effective_search_params.get("top"),
+                                                test_duration=effective_search_params.get("test_duration"),
+                                                use_query_plan_cache=effective_search_params.get("use_query_plan_cache"),
+                                                query_plan_cache_enable_CAST=effective_search_params.get("query_plan_cache_enable_CAST"),
+                                                query_plan_cache_only_vector=effective_search_params.get("query_plan_cache_only_vector"),
+                                                vector_only_cache_query_plan=effective_search_params.get("vector_only_cache_query_plan"),
+                                                use_query_cache=effective_search_params.get("use_query_cache"),
+                                                sql_type=effective_search_params.get("sql_type"),
+                                                **params,
+                                            )
+
+                                        get_queries = functools.partial(reader.read_queries)
+                                        search_stats = current_searcher.search_all(
+                                            dataset.config.distance,
+                                            get_queries,
+                                            reader.get_query_files(),
+                                            dataset.config.queries_pool_size,
+                                            dataset.config.schema,
+                                            dataset.config,
+                                            warn_memory=not recall_only,
+                                            recall_only=recall_only,
+                                        )
+                                        all_search_stats.append(search_stats)
+
+                                    if search_number > 2 and not recall_only:
+                                        if "rps" in all_search_stats[0]:
+                                            qps_values = [stats["rps"] for stats in all_search_stats]
+                                            qps_values_sorted = sorted(qps_values)
+                                            trimmed_qps = qps_values_sorted[1:-1]
+                                            avg_qps = sum(trimmed_qps) / len(trimmed_qps) if trimmed_qps else qps_values_sorted[0]
+
+                                            averaged_stats = dict(all_search_stats[0])
+                                            averaged_stats["rps"] = avg_qps
+                                            averaged_stats["original_qps_values"] = qps_values
+                                            averaged_stats["trimmed_mean_qps"] = avg_qps
+                                        else:
+                                            averaged_stats = all_search_stats[0]
+                                    elif not recall_only:
+                                        if "rps" in all_search_stats[0]:
+                                            qps_values = [stats["rps"] for stats in all_search_stats]
+                                            avg_qps = sum(qps_values) / len(qps_values)
+                                            averaged_stats = dict(all_search_stats[0])
+                                            averaged_stats["rps"] = avg_qps
+                                            averaged_stats["original_rps_values"] = qps_values
+                                            averaged_stats["average_rps"] = avg_qps
+                                        else:
+                                            averaged_stats = all_search_stats[0]
+                                    else:
+                                        averaged_stats = all_search_stats[0] if all_search_stats else {}
+
+                                    if recall_only:
+                                        result_group = getattr(dataset.config, "result_group", "")
+                                        if result_group in ("text_search", "hybrid_search"):
+                                            metric_key = "mrr"
+                                        else:
+                                            metric_key = "mean_precisions"
+                                        metric_value = averaged_stats.get(metric_key, 0.0)
+                                        params_only = effective_search_params.get("params", {})
+                                        if not isinstance(params_only, dict):
+                                            params_only = {}
+                                        recall_only_results.append(
+                                            {
+                                                "sql_type": sql_type,
+                                                "params": params_only,
+                                                metric_key: metric_value,
+                                            }
+                                        )
+                                    else:
+                                        self.save_search_and_upload_results(
+                                            search_results=averaged_stats, search_id=search_id, search_params=effective_search_params,
+                                            upload_params={
+                                                **self.uploader.upload_params,
+                                                **self.configurator.collection_params,
+                                            },
+                                            upload_results=upload_stats,
+                                            result_group=dataset.config.result_group,
+                                            cache_mode=cache_mode,
+                                            CAST_mode=CAST_mode,
+                                            only_vector=only_vector,
+                                            only_cache_query_plan=only_cache_query_plan,
+                                            result_cache=query_cache,
+                                        )
+                                        self.save_to_csv(
+                                            search_results=averaged_stats,
+                                            search_params=effective_search_params,
+                                            dataset_config=dataset.config,
+                                            cache_mode=cache_mode,
+                                            CAST_mode=CAST_mode,
+                                            only_vector=only_vector,
+                                            only_cache_query_plan=only_cache_query_plan,
+                                            query_cache=query_cache,
+                                            sql_type=sql_type,
+                                        )
+                                if recall_only and recall_only_results:
+                                    self.save_recall_only_results(recall_only_results)
+
+    def _run_clickhouse_experiment(self, dataset: Dataset, skip_upload: bool, recall_only: bool, upload_stats, reader):
+        """Complete ClickHouse-specific experiment implementation with query plan cache parameters.
+
+        Uses explicit independent parameters: vector_only_cache_query_plan (only cache QueryPlan)
+        and use_query_cache (query result cache), referencing MyScale's approach.
+
+        NOTE: 与旧的编码方案不同，现在 vector_only_cache_query_plan 和 use_query_cache
+              是独立的一等参数。这参照了 MyScale 引擎的实现方式，使得配置更清晰、
+              组合更灵活。两个参数的说明：
+              - vector_only_cache_query_plan: 仅缓存 QueryPlan，不缓存完整执行计划
+              - use_query_cache: 启用查询结果缓存，重复查询直接返回缓存结果
+        """
+        import functools
+
+        search_number = int(self.uploader.upload_params.get("search_number", 1))
+
+        # 读取所有缓存相关参数，每个参数都是独立的一等配置项
+        # 参照 MyScale 引擎的做法，不再使用旧的编码合并方案
         vector_query_plan_cache = self.uploader.upload_params.get("vector_query_plan_cache", [0])
         vector_use_cast = self.uploader.upload_params.get("vector_use_cast", [0])
-        result_cache_values = self.uploader.upload_params.get("use_query_cache")
+        vector_query_plan_cache_only_vector = self.uploader.upload_params.get("vector_query_plan_cache_only_vector", [0])
+        # vector_only_cache_query_plan: 独立控制"仅缓存 QueryPlan"模式
+        # 0 = 缓存完整执行计划, 1 = 仅缓存 QueryPlan（减少缓存占用）
+        vector_only_cache_query_plan = self.uploader.upload_params.get("vector_only_cache_query_plan", [0])
+        # use_query_cache: 独立控制"查询结果缓存"
+        # 0 = 关闭结果缓存, 1 = 开启结果缓存（相同查询直接返回缓存结果）
+        use_query_cache = self.uploader.upload_params.get("use_query_cache", [0])
+        sql_type_values = self.uploader.upload_params.get("sql_type", ["cast_array"])
+
+        # Normalize to lists
         if not isinstance(vector_query_plan_cache, list):
             vector_query_plan_cache = [vector_query_plan_cache]
         if not isinstance(vector_use_cast, list):
             vector_use_cast = [vector_use_cast]
-        if result_cache_values is not None and not isinstance(result_cache_values, list):
-            result_cache_values = [result_cache_values]
-        if result_cache_values is None:
-            encoded_cache_modes = vector_query_plan_cache
-        else:
-            encoded_cache_modes = [
-                int(plan_mode) + (3 if int(result_mode) else 0)
-                for plan_mode in vector_query_plan_cache
-                for result_mode in result_cache_values
-            ]
-        
+        if not isinstance(vector_query_plan_cache_only_vector, list):
+            vector_query_plan_cache_only_vector = [vector_query_plan_cache_only_vector]
+        if not isinstance(vector_only_cache_query_plan, list):
+            vector_only_cache_query_plan = [vector_only_cache_query_plan]
+        if not isinstance(use_query_cache, list):
+            use_query_cache = [use_query_cache]
+        if not isinstance(sql_type_values, list):
+            sql_type_values = [sql_type_values]
 
-        for cache_mode in encoded_cache_modes:
-            if cache_mode == 0:
-                vector_query_plan_cache_only_vector = [0]
-            else:
-                vector_query_plan_cache_only_vector = self.uploader.upload_params.get("vector_query_plan_cache_only_vector", [0])
+        # 使用嵌套循环遍历所有参数组合，确保每种组合都被测试到
+        # 每个参数都是独立维度，不再像旧方案那样编码到单个整数中
+        for cache_mode in vector_query_plan_cache:
             for CAST_mode in vector_use_cast:
                 for only_vector in vector_query_plan_cache_only_vector:
-                    def with_cache_modes(search_params):
-                        params = dict(search_params or {})
-                        params["vector_query_plan_cache"] = int(cache_mode)
-                        params["vector_use_cast"] = int(CAST_mode)
-                        params["vector_query_plan_cache_only_vector"] = only_vector
-                        return params
+                    for only_cache_query_plan in vector_only_cache_query_plan:
+                        for query_cache in use_query_cache:
+                            for sql_type in sql_type_values:
+                                # 将当前迭代的参数注入到 search_params 中，
+                                # 传递给 ClickHouseSearcher 的 apply_query_plan_cache_settings
+                                def with_cache_modes(search_params):
+                                    params = dict(search_params or {})
+                                    params["vector_query_plan_cache"] = int(cache_mode)
+                                    params["vector_use_cast"] = int(CAST_mode)
+                                    params["vector_query_plan_cache_only_vector"] = int(only_vector)
+                                    # 直接传递独立的 only_cache_query_plan（仅缓存 QueryPlan）
+                                    params["vector_only_cache_query_plan"] = int(only_cache_query_plan)
+                                    # 直接传递独立的 query_cache（查询结果缓存）
+                                    params["use_query_cache"] = int(query_cache)
+                                    params["sql_type"] = sql_type
+                                    return params
 
-                    def log_clickhouse_params(params_dict, prefix):
-                        log_kwargs = {
-                            "parallel": params_dict.get("parallel"),
-                            "top": params_dict.get("top"),
-                            "test_duration": params_dict.get("test_duration"),
-                            "vector_query_plan_cache": params_dict.get("vector_query_plan_cache"),
-                            "vector_use_cast": params_dict.get("vector_use_cast"),
-                        }
-                        params_only = (params_dict.get("params") or {})
-                        if not isinstance(params_only, dict):
-                            params_only = {}
-                        compact_kv(prefix, **log_kwargs, **params_only)
+                                def log_clickhouse_params(params_dict, prefix):
+                                    log_kwargs = {
+                                        "parallel": params_dict.get("parallel"),
+                                        "top": params_dict.get("top"),
+                                        "test_duration": params_dict.get("test_duration"),
+                                        "vector_query_plan_cache": params_dict.get("vector_query_plan_cache"),
+                                        "vector_use_cast": params_dict.get("vector_use_cast"),
+                                        "vector_only_cache_query_plan": params_dict.get("vector_only_cache_query_plan"),
+                                        "use_query_cache": params_dict.get("use_query_cache"),
+                                        "sql_type": params_dict.get("sql_type"),
+                                    }
+                                    params_only = (params_dict.get("params") or {})
+                                    if not isinstance(params_only, dict):
+                                        params_only = {}
+                                    compact_kv(prefix, **log_kwargs, **params_only)
 
-                    if self.searchers:
-                        duration_searchers = [
-                            s for s in self.searchers if int((s.search_params or {}).get("test_duration", 0) or 0) > 0
-                        ]
-                        if duration_searchers:
-                            last_searcher = duration_searchers[-1]
-                            last_test_duration = int((last_searcher.search_params or {}).get("test_duration", 0) or 0)
-                            stage("WARMUP")
-                            warmup_seconds = int(round(last_test_duration * 0.1))
-                            warmup_seconds = max(1, min(5, warmup_seconds))
-                            warmup_search_params = with_cache_modes(last_searcher.search_params)
-                            warmup_search_params["test_duration"] = warmup_seconds
-                            warmup_search_params["_warmup"] = True
-                            warmup_searcher = last_searcher.__class__(
-                                last_searcher.host,
-                                connection_params={**(last_searcher.connection_params or {})},
-                                search_params=warmup_search_params,
-                            )
-                            log_clickhouse_params(warmup_search_params, "warmup params")
-                            get_queries = functools.partial(reader.read_queries)
-                            warmup_searcher.search_all(
-                                dataset.config.distance,
-                                get_queries,
-                                reader.get_query_files(),
-                                dataset.config.queries_pool_size,
-                                dataset.config.schema,
-                                dataset.config,
-                                warn_memory=False,
-                                recall_only=False,
-                            )
-                            warmup_searcher.post_warmup(dataset.config)
+                                if self.searchers:
+                                    duration_searchers = [
+                                        s for s in self.searchers if int((s.search_params or {}).get("test_duration", 0) or 0) > 0
+                                    ]
+                                    if duration_searchers:
+                                        last_searcher = duration_searchers[-1]
+                                        last_test_duration = int((last_searcher.search_params or {}).get("test_duration", 0) or 0)
+                                        stage("WARMUP")
+                                        warmup_seconds = int(round(last_test_duration * 0.1))
+                                        warmup_seconds = max(1, min(5, warmup_seconds))
+                                        warmup_search_params = with_cache_modes(last_searcher.search_params)
+                                        warmup_search_params["test_duration"] = warmup_seconds
+                                        warmup_search_params["_warmup"] = True
+                                        warmup_searcher = last_searcher.__class__(
+                                            last_searcher.host,
+                                            connection_params={**(last_searcher.connection_params or {})},
+                                            search_params=warmup_search_params,
+                                        )
+                                        log_clickhouse_params(warmup_search_params, "warmup params")
+                                        get_queries = functools.partial(reader.read_queries)
+                                        warmup_searcher.search_all(
+                                            dataset.config.distance,
+                                            get_queries,
+                                            reader.get_query_files(),
+                                            dataset.config.queries_pool_size,
+                                            dataset.config.schema,
+                                            dataset.config,
+                                            warn_memory=False,
+                                            recall_only=False,
+                                        )
+                                        warmup_searcher.post_warmup(dataset.config)
 
-                    stage("SEARCH")
-                    if not recall_only:
-                        self._warn_search_memory(reader, dataset)
-                    recall_only_results: list[dict] = [] if recall_only else []
-                    for search_id, searcher in enumerate(self.searchers):
-                        if recall_only:
-                            stage(f"SEARCHER {search_id + 1}/{len(self.searchers)} (recall-only)")
-                        else:
-                            stage(f"SEARCHER {search_id + 1}/{len(self.searchers)}")
-                        original_search_params = {**searcher.search_params}
-                        effective_search_params = with_cache_modes(original_search_params)
-                        if recall_only:
-                            effective_search_params["test_duration"] = 0
+                                stage("SEARCH")
+                                if not recall_only:
+                                    self._warn_search_memory(reader, dataset)
+                                recall_only_results: list[dict] = [] if recall_only else []
+                                for search_id, searcher in enumerate(self.searchers):
+                                    if recall_only:
+                                        stage(f"SEARCHER {search_id + 1}/{len(self.searchers)} (recall-only, sql_type={sql_type})")
+                                    else:
+                                        stage(f"SEARCHER {search_id + 1}/{len(self.searchers)} (sql_type={sql_type})")
+                                    original_search_params = {**searcher.search_params}
+                                    effective_search_params = with_cache_modes(original_search_params)
+                                    if recall_only:
+                                        effective_search_params["test_duration"] = 0
 
-                        # Collect multiple search results for averaging
-                        all_search_stats = []
-                        for i in range(search_number):
-                            # Create a fresh searcher instance for each iteration to avoid state contamination
-                            current_searcher = searcher.__class__(
-                                searcher.host,
-                                connection_params={**(searcher.connection_params or {})},
-                                search_params=effective_search_params,
-                            )
+                                    all_search_stats = []
+                                    for i in range(search_number):
+                                        current_searcher = searcher.__class__(
+                                            searcher.host,
+                                            connection_params={**(searcher.connection_params or {})},
+                                            search_params=effective_search_params,
+                                        )
 
-                            if i == 0:  # Only show params once for the first iteration
-                                log_clickhouse_params(effective_search_params, "search params")
+                                        if i == 0:
+                                            log_clickhouse_params(effective_search_params, "search params")
 
-                            get_queries = functools.partial(reader.read_queries)
-                            search_stats = current_searcher.search_all(
-                                dataset.config.distance,
-                                get_queries,
-                                reader.get_query_files(),
-                                dataset.config.queries_pool_size,
-                                dataset.config.schema,
-                                dataset.config,
-                                warn_memory=not recall_only,
-                                recall_only=recall_only,
-                            )
-                            all_search_stats.append(search_stats)
+                                        get_queries = functools.partial(reader.read_queries)
+                                        search_stats = current_searcher.search_all(
+                                            dataset.config.distance,
+                                            get_queries,
+                                            reader.get_query_files(),
+                                            dataset.config.queries_pool_size,
+                                            dataset.config.schema,
+                                            dataset.config,
+                                            warn_memory=not recall_only,
+                                            recall_only=recall_only,
+                                        )
+                                        all_search_stats.append(search_stats)
 
-                        # Calculate trimmed mean (remove max and min, then average)
-                        if search_number > 2 and not recall_only:
-                            # For QPS values, we want to remove outliers
-                            if "rps" in all_search_stats[0]:
-                                qps_values = [stats["rps"] for stats in all_search_stats]
-                                qps_values_sorted = sorted(qps_values)
-                                # Remove min and max
-                                trimmed_qps = qps_values_sorted[1:-1]
-                                avg_qps = sum(trimmed_qps) / len(trimmed_qps) if trimmed_qps else qps_values_sorted[0]
+                                    # Calculate trimmed mean (remove max and min, then average)
+                                    if search_number > 2 and not recall_only:
+                                        if "rps" in all_search_stats[0]:
+                                            qps_values = [stats["rps"] for stats in all_search_stats]
+                                            qps_values_sorted = sorted(qps_values)
+                                            trimmed_qps = qps_values_sorted[1:-1]
+                                            avg_qps = sum(trimmed_qps) / len(trimmed_qps) if trimmed_qps else qps_values_sorted[0]
 
-                                # Use the first search stats as base and update QPS with trimmed mean
-                                averaged_stats = dict(all_search_stats[0])
-                                averaged_stats["rps"] = avg_qps
-                                # Store original values for reference
-                                averaged_stats["original_rps_values"] = qps_values
-                                averaged_stats["trimmed_mean_rps"] = avg_qps
-                            else:
-                                averaged_stats = all_search_stats[0]  # Fallback if no QPS
-                        elif not recall_only:
-                            # If search_number <= 2, just use the average of all results
-                            if "rps" in all_search_stats[0]:
-                                qps_values = [stats["rps"] for stats in all_search_stats]
-                                avg_qps = sum(qps_values) / len(qps_values)
-                                averaged_stats = dict(all_search_stats[0])
-                                averaged_stats["rps"] = avg_qps
-                                averaged_stats["original_rps_values"] = qps_values
-                                averaged_stats["average_rps"] = avg_qps
-                            else:
-                                averaged_stats = all_search_stats[0]
-                        else:
-                            # For recall_only, we don't average, just collect results
-                            averaged_stats = all_search_stats[0] if all_search_stats else {}
+                                            averaged_stats = dict(all_search_stats[0])
+                                            averaged_stats["rps"] = avg_qps
+                                            averaged_stats["original_rps_values"] = qps_values
+                                            averaged_stats["trimmed_mean_rps"] = avg_qps
+                                        else:
+                                            averaged_stats = all_search_stats[0]
+                                    elif not recall_only:
+                                        if "rps" in all_search_stats[0]:
+                                            qps_values = [stats["rps"] for stats in all_search_stats]
+                                            avg_qps = sum(qps_values) / len(qps_values)
+                                            averaged_stats = dict(all_search_stats[0])
+                                            averaged_stats["rps"] = avg_qps
+                                            averaged_stats["original_rps_values"] = qps_values
+                                            averaged_stats["average_rps"] = avg_qps
+                                        else:
+                                            averaged_stats = all_search_stats[0]
+                                    else:
+                                        averaged_stats = all_search_stats[0] if all_search_stats else {}
 
-                        if recall_only:
-                            result_group = getattr(dataset.config, "result_group", "")
-                            if result_group in ("text_search", "hybrid_search"):
-                                metric_key = "mrr"
-                            else:
-                                metric_key = "mean_precisions"
-                            metric_value = averaged_stats.get(metric_key, 0.0)
-                            params_only = effective_search_params.get("params", {})
-                            if not isinstance(params_only, dict):
-                                params_only = {}
-                            recall_only_results.append(
-                                {
-                                    "params": params_only,
-                                    metric_key: metric_value,
-                                }
-                            )
-                        else:
-                            # For ClickHouse, use query plan cache parameters
-                            self.save_search_and_upload_results(
-                                search_results=averaged_stats, search_id=search_id, search_params=effective_search_params,
-                                upload_params={
-                                    **self.uploader.upload_params,
-                                    **self.configurator.collection_params,
-                                },
-                                upload_results=upload_stats,
-                                result_group=dataset.config.result_group,
-                                cache_mode=cache_mode,
-                                CAST_mode=CAST_mode,
-                                only_vector=only_vector,
-                                use_number = 0,
-                                result_cache=1 if int(cache_mode) > 2 else 0
-                            )
-                            # Save results to CSV for easy comparison
-                            self.save_clickhouse_to_csv(
-                                search_results=averaged_stats,
-                                search_params=effective_search_params,
-                                dataset_config=dataset.config,
-                                cache_mode=cache_mode,
-                                CAST_mode=CAST_mode,
-                                only_vector=only_vector
-                            )
-                    if recall_only and recall_only_results:
-                        self.save_recall_only_results(recall_only_results)
+                                    if recall_only:
+                                        result_group = getattr(dataset.config, "result_group", "")
+                                        if result_group in ("text_search", "hybrid_search"):
+                                            metric_key = "mrr"
+                                        else:
+                                            metric_key = "mean_precisions"
+                                        metric_value = averaged_stats.get(metric_key, 0.0)
+                                        params_only = effective_search_params.get("params", {})
+                                        if not isinstance(params_only, dict):
+                                            params_only = {}
+                                        recall_only_results.append(
+                                            {
+                                                "sql_type": sql_type,
+                                                "params": params_only,
+                                                metric_key: metric_value,
+                                            }
+                                        )
+                                    else:
+                                        self.save_search_and_upload_results(
+                                            search_results=averaged_stats, search_id=search_id, search_params=effective_search_params,
+                                            upload_params={
+                                                **self.uploader.upload_params,
+                                                **self.configurator.collection_params,
+                                            },
+                                            upload_results=upload_stats,
+                                            result_group=dataset.config.result_group,
+                                            cache_mode=cache_mode,
+                                            CAST_mode=CAST_mode,
+                                            only_vector=only_vector,
+                                            only_cache_query_plan=only_cache_query_plan,
+                                            result_cache=query_cache,
+                                        )
+                                        # CSV 中也记录完整的独立缓存参数，便于后续分析和对比
+                                        self.save_clickhouse_to_csv(
+                                            search_results=averaged_stats,
+                                            search_params=effective_search_params,
+                                            dataset_config=dataset.config,
+                                            cache_mode=cache_mode,
+                                            CAST_mode=CAST_mode,
+                                            only_vector=only_vector,
+                                            only_cache_query_plan=only_cache_query_plan,
+                                            query_cache=query_cache,
+                                            sql_type=sql_type,
+                                        )
+                                if recall_only and recall_only_results:
+                                    self.save_recall_only_results(recall_only_results)
 
-    def save_clickhouse_to_csv(self, search_results, search_params, dataset_config, cache_mode, CAST_mode, only_vector):
+    def save_clickhouse_to_csv(self, search_results, search_params, dataset_config, cache_mode, CAST_mode, only_vector, only_cache_query_plan=0, query_cache=0, sql_type="cast_array"):
         """
         Save ClickHouse benchmark results to CSV file with all required parameters for comparison.
+
+        注意：only_cache_query_plan 和 query_cache 作为独立参数存储，
+              不再像旧方案那样从 cache_mode 编码推导。这确保了 CSV 中的
+              记录与配置文件中的参数一一对应，便于后续分析和对比。
+
+        Args:
+            cache_mode: vector_query_plan_cache 值 (0/1)
+            CAST_mode: vector_use_cast 值 (0/1)
+            only_vector: vector_query_plan_cache_only_vector 值 (0/1)
+            only_cache_query_plan: vector_only_cache_query_plan (仅缓存 QueryPlan, 0/1)
+            query_cache: use_query_cache (查询结果缓存, 0/1)
+            sql_type: SQL 查询类型
         """
         try:
             # Extract required parameters
@@ -759,7 +781,11 @@ class BaseClient:
                 'vector_query_plan_cache': int(cache_mode),
                 'vector_use_cast': int(CAST_mode),
                 'vector_query_plan_cache_only_vector': int(only_vector),
-                'use_query_cache': 1 if int(cache_mode) > 2 else 0,
+                # vector_only_cache_query_plan: 独立存储，不从 cache_mode 推导
+                'vector_only_cache_query_plan': int(only_cache_query_plan),
+                # use_query_cache: 独立存储，不从 cache_mode 推导
+                'use_query_cache': int(query_cache),
+                'sql_type': sql_type,
                 'parallel': int(parallel),
                 'test_duration': int(test_duration),
                 'ef_s': int(ef_s),
@@ -778,8 +804,10 @@ class BaseClient:
             with open(CSV_RESULTS_FILE, 'a', newline='') as csvfile:
                 fieldnames = [
                     'timestamp', 'experiment_name', 'dataset', 'vector_size', 'distance',
-                    'vector_query_plan_cache', 'vector_use_cast', 'vector_query_plan_cache_only_vector', 'use_query_cache',
-                    'parallel', 'test_duration', 'ef_s',
+                    'vector_query_plan_cache', 'vector_use_cast', 'vector_query_plan_cache_only_vector',
+                    'vector_only_cache_query_plan',  # 独立字段：仅缓存 QueryPlan
+                    'use_query_cache',               # 独立字段：查询结果缓存
+                    'sql_type', 'parallel', 'test_duration', 'ef_s',
                     'rps', 'recall', 'mean_precisions', 'mrr', 'mean_time', 'p95_time', 'p99_time'
                 ]
 
@@ -794,209 +822,241 @@ class BaseClient:
             warn(f"Failed to save CSV results: {e}")
 
     def _run_pgvector_experiment(self, dataset: Dataset, skip_upload: bool, recall_only: bool, upload_stats, reader):
-        """Complete PGvector-specific experiment implementation with basic cache parameters only"""
+        """PGvector / PolarDB experiment (cartesian over sql_type x enable_query_plan_cache x use_query_cache).
+
+        All sql_type values are swept over the full enable_query_plan_cache range;
+        the engine's _can_prepare() method internally decides whether PREPARE is
+        applicable for each sql_type. Non-parameterizable types (array-based, etc.)
+        simply execute inline SQL even when use_query_plan_cache=1.
+
+        QPS (rps) and recall (mean_precisions) are measured together by the base searcher.
+        """
         import functools
-        
+
         search_number = self.uploader.upload_params.get("search_number", 1)
         search_number = int(search_number or 1)
-        
-        use_cache_values = self.uploader.upload_params.get("use_cache", [0])
+
+        # config.json uses the ck/myscale-style key `enable_query_plan_cache`;
+        # the older `use_cache` key is kept as a fallback.
+        use_cache_values = self.uploader.upload_params.get(
+            "enable_query_plan_cache",
+            self.uploader.upload_params.get("use_cache", [0]),
+        )
         result_cache_values = self.uploader.upload_params.get("use_query_cache", [0])
+        sql_type_values = self.uploader.upload_params.get("sql_type", ["text_literal"])
+        in_parse_mode_values = self.uploader.upload_params.get("vector_in_parse_mode", [None])
         if not isinstance(use_cache_values, list):
             use_cache_values = [use_cache_values]
         if not isinstance(result_cache_values, list):
             result_cache_values = [result_cache_values]
-        
-        for use_cache_val in use_cache_values:
-          for result_cache_val in result_cache_values:
-            # PGvector-specific parameter injection - only use_cache
-            def with_pgvector_cache_modes(search_params):
-                params = dict(search_params or {})
-                params["use_query_plan_cache"] = int(use_cache_val)
-                params["use_result_cache"] = int(result_cache_val)
-                return params
+        if not isinstance(sql_type_values, list):
+            sql_type_values = [sql_type_values]
+        if not isinstance(in_parse_mode_values, list):
+            in_parse_mode_values = [in_parse_mode_values]
 
-            def log_pgvector_params(params_dict, prefix):
-                log_kwargs = {
-                    "parallel": params_dict.get("parallel"),
-                    "top": params_dict.get("top"),
-                    "test_duration": params_dict.get("test_duration"),
-                    "use_query_plan_cache": params_dict.get("use_query_plan_cache"),
-                    "use_result_cache": params_dict.get("use_result_cache"),
-                }
-                params_only = (params_dict.get("params") or {})
-                if not isinstance(params_only, dict):
-                    params_only = {}
-                compact_kv(prefix, **log_kwargs, **params_only)
+        for in_parse_mode_val in in_parse_mode_values:
+            for sql_type in sql_type_values:
+                for use_cache_val in use_cache_values:
+                    for result_cache_val in result_cache_values:
+                        dataset_dim = self.uploader.upload_params.get("_vector_size")
+                        if dataset_dim:
+                            dataset_dim = int(dataset_dim)
 
-            if self.searchers:
-                duration_searchers = [
-                    s for s in self.searchers if int((s.search_params or {}).get("test_duration", 0) or 0) > 0
-                ]
-                if duration_searchers:
-                    last_searcher = duration_searchers[-1]
-                    last_test_duration = int((last_searcher.search_params or {}).get("test_duration", 0) or 0)
-                    stage("WARMUP")
-                    warmup_seconds = int(round(last_test_duration * 0.1))
-                    warmup_seconds = max(1, min(5, warmup_seconds))
-                    warmup_search_params = with_pgvector_cache_modes(last_searcher.search_params)
-                    warmup_search_params["test_duration"] = warmup_seconds
-                    warmup_search_params["_warmup"] = True
-                    warmup_searcher = last_searcher.__class__(
-                        last_searcher.host,
-                        connection_params={**(last_searcher.connection_params or {})},
-                        search_params=warmup_search_params,
-                    )
-                    log_pgvector_params(warmup_search_params, "warmup params")
-                    get_queries = functools.partial(reader.read_queries)
-                    warmup_searcher.search_all(
-                        dataset.config.distance,
-                        get_queries,
-                        reader.get_query_files(),
-                        dataset.config.queries_pool_size,
-                        dataset.config.schema,
-                        dataset.config,
-                        warn_memory=False,
-                        recall_only=False,
-                    )
-                    warmup_searcher.post_warmup(dataset.config)
-            
-            stage("SEARCH")
-            if not recall_only:
-                self._warn_search_memory(reader, dataset)
-            recall_only_results: list[dict] = [] if recall_only else []
-            for search_id, searcher in enumerate(self.searchers):
-                if recall_only:
-                    stage(f"SEARCHER {search_id + 1}/{len(self.searchers)} (recall-only)")
-                else:
-                    stage(f"SEARCHER {search_id + 1}/{len(self.searchers)}")
-                original_search_params = {**searcher.search_params}
-                effective_search_params = with_pgvector_cache_modes(original_search_params)
-                if recall_only:
-                    effective_search_params["test_duration"] = 0
-                
-                # Collect multiple search results for averaging
-                all_search_stats = []
-                for i in range(search_number):
-                    # Create a fresh searcher instance for each iteration to avoid state contamination
-                    current_searcher = searcher.__class__(
-                        searcher.host,
-                        connection_params={**(searcher.connection_params or {})},
-                        search_params=effective_search_params,
-                    )
-                    
-                    if i == 0:  # Only show params once for the first iteration
-                        log_pgvector_params(effective_search_params, "search params")
-                    
-                    get_queries = functools.partial(reader.read_queries)
-                    search_stats = current_searcher.search_all(
-                        dataset.config.distance,
-                        get_queries,
-                        reader.get_query_files(),
-                        dataset.config.queries_pool_size,
-                        dataset.config.schema,
-                        dataset.config,
-                        warn_memory=not recall_only,
-                        recall_only=recall_only,
-                    )
-                    all_search_stats.append(search_stats)
-                
-                # Calculate trimmed mean (remove max and min, then average)
-                if search_number > 2 and not recall_only:
-                    # For RPS values, we want to remove outliers
-                    if "rps" in all_search_stats[0]:
-                        rps_values = [stats["rps"] for stats in all_search_stats]
-                        rps_values_sorted = sorted(rps_values)
-                        # Remove min and max
-                        trimmed_rps = rps_values_sorted[1:-1]
-                        avg_rps = sum(trimmed_rps) / len(trimmed_rps) if trimmed_rps else rps_values_sorted[0]
-                        
-                        # Use the first search stats as base and update RPS with trimmed mean
-                        averaged_stats = dict(all_search_stats[0])
-                        averaged_stats["rps"] = avg_rps
-                        # Store original values for reference
-                        averaged_stats["original_rps_values"] = rps_values
-                        averaged_stats["trimmed_mean_rps"] = avg_rps
-                    else:
-                        averaged_stats = all_search_stats[0]  # Fallback if no RPS
-                elif not recall_only:
-                    # If search_number <= 2, just use the average of all results
-                    if "rps" in all_search_stats[0]:
-                        rps_values = [stats["rps"] for stats in all_search_stats]
-                        avg_rps = sum(rps_values) / len(rps_values)
-                        averaged_stats = dict(all_search_stats[0])
-                        averaged_stats["rps"] = avg_rps
-                        averaged_stats["original_rps_values"] = rps_values
-                        averaged_stats["average_rps"] = avg_rps
-                    else:
-                        averaged_stats = all_search_stats[0]
-                else:
-                    # For recall_only, we don't average, just collect results
-                    averaged_stats = all_search_stats[0] if all_search_stats else {}
+                        def with_pgvector_cache_modes(search_params):
+                            params = dict(search_params or {})
+                            params["use_query_plan_cache"] = int(use_cache_val)
+                            params["use_result_cache"] = int(result_cache_val)
+                            params["sql_type"] = sql_type
+                            if in_parse_mode_val is not None:
+                                params["vector_in_parse_mode"] = in_parse_mode_val
+                            if dataset_dim:
+                                params.setdefault("dims", dataset_dim)
+                            return params
 
-                if recall_only:
-                    result_group = getattr(dataset.config, "result_group", "")
-                    if result_group in ("text_search", "hybrid_search"):
-                        metric_key = "mrr"
-                    else:
-                        metric_key = "mean_precisions"
-                    metric_value = averaged_stats.get(metric_key, 0.0)
-                    params_only = effective_search_params.get("params", {})
-                    if not isinstance(params_only, dict):
-                        params_only = {}
-                    recall_only_results.append(
-                        {
-                            "params": params_only,
-                            metric_key: metric_value,
-                        }
-                    )
-                else:
-                    # For PGvector, always pass 0 for MyScale-specific parameters
-                    self.save_search_and_upload_results(
-                        search_results=averaged_stats, search_id=search_id, search_params=effective_search_params,
-                        upload_params={
-                            **self.uploader.upload_params,
-                            **self.configurator.collection_params,
-                        },
-                        upload_results=upload_stats,
-                        result_group=dataset.config.result_group,
-                        cache_mode=use_cache_val,
-                        CAST_mode=0,
-                        only_vector=0,
-                        use_number=0,
-                        result_cache=result_cache_val
-                    )
-                    # Save results to CSV for easy comparison
-                    self.save_pgvector_to_csv(
-                        search_results=averaged_stats,
-                        search_params=effective_search_params,
-                        dataset_config=dataset.config,
-                        use_cache=use_cache_val,
-                        result_cache=result_cache_val
-                    )
-                if recall_only and recall_only_results:
-                    self.save_recall_only_results(recall_only_results)
+                        def log_pgvector_params(params_dict, prefix):
+                            log_kwargs = {
+                                "sql_type": params_dict.get("sql_type"),
+                                "vector_in_parse_mode": params_dict.get("vector_in_parse_mode"),
+                                "parallel": params_dict.get("parallel"),
+                                "top": params_dict.get("top"),
+                                "test_duration": params_dict.get("test_duration"),
+                                "use_query_plan_cache": params_dict.get("use_query_plan_cache"),
+                                "use_result_cache": params_dict.get("use_result_cache"),
+                            }
+                            params_only = (params_dict.get("params") or {})
+                            if not isinstance(params_only, dict):
+                                params_only = {}
+                            compact_kv(prefix, **log_kwargs, **params_only)
 
-    def save_pgvector_to_csv(self, search_results, search_params, dataset_config, use_cache, result_cache=0):
+                        if self.searchers:
+                            duration_searchers = [
+                                s for s in self.searchers if int((s.search_params or {}).get("test_duration", 0) or 0) > 0
+                            ]
+                            if duration_searchers:
+                                last_searcher = duration_searchers[-1]
+                                last_test_duration = int((last_searcher.search_params or {}).get("test_duration", 0) or 0)
+                                stage("WARMUP")
+                                warmup_seconds = int(round(last_test_duration * 0.1))
+                                warmup_seconds = max(1, min(5, warmup_seconds))
+                                warmup_search_params = with_pgvector_cache_modes(last_searcher.search_params)
+                                warmup_search_params["test_duration"] = warmup_seconds
+                                warmup_search_params["_warmup"] = True
+                                warmup_searcher = last_searcher.__class__(
+                                    last_searcher.host,
+                                    connection_params={**(last_searcher.connection_params or {})},
+                                    search_params=warmup_search_params,
+                                )
+                                log_pgvector_params(warmup_search_params, "warmup params")
+                                get_queries = functools.partial(reader.read_queries)
+                                warmup_searcher.search_all(
+                                    dataset.config.distance,
+                                    get_queries,
+                                    reader.get_query_files(),
+                                    dataset.config.queries_pool_size,
+                                    dataset.config.schema,
+                                    dataset.config,
+                                    warn_memory=False,
+                                    recall_only=False,
+                                )
+                                warmup_searcher.post_warmup(dataset.config)
+
+                        stage(f"SEARCH (sql_type={sql_type}, use_cache={use_cache_val})")
+                        if not recall_only:
+                            self._warn_search_memory(reader, dataset)
+                        recall_only_results: list[dict] = [] if recall_only else []
+                        for search_id, searcher in enumerate(self.searchers):
+                            if recall_only:
+                                stage(f"SEARCHER {search_id + 1}/{len(self.searchers)} (recall-only, sql_type={sql_type}, use_cache={use_cache_val})")
+                            else:
+                                stage(f"SEARCHER {search_id + 1}/{len(self.searchers)} (sql_type={sql_type}, use_cache={use_cache_val})")
+                            original_search_params = {**searcher.search_params}
+                            effective_search_params = with_pgvector_cache_modes(original_search_params)
+                            if recall_only:
+                                effective_search_params["test_duration"] = 0
+
+                            all_search_stats = []
+                            for i in range(search_number):
+                                current_searcher = searcher.__class__(
+                                    searcher.host,
+                                    connection_params={**(searcher.connection_params or {})},
+                                    search_params=effective_search_params,
+                                )
+                                if i == 0:
+                                    log_pgvector_params(effective_search_params, "search params")
+                                get_queries = functools.partial(reader.read_queries)
+                                search_stats = current_searcher.search_all(
+                                    dataset.config.distance,
+                                    get_queries,
+                                    reader.get_query_files(),
+                                    dataset.config.queries_pool_size,
+                                    dataset.config.schema,
+                                    dataset.config,
+                                    warn_memory=not recall_only,
+                                    recall_only=recall_only,
+                                )
+                                all_search_stats.append(search_stats)
+
+                            if search_number > 2 and not recall_only:
+                                if "rps" in all_search_stats[0]:
+                                    rps_values = [stats["rps"] for stats in all_search_stats]
+                                    rps_values_sorted = sorted(rps_values)
+                                    trimmed_rps = rps_values_sorted[1:-1]
+                                    avg_rps = sum(trimmed_rps) / len(trimmed_rps) if trimmed_rps else rps_values_sorted[0]
+                                    averaged_stats = dict(all_search_stats[0])
+                                    averaged_stats["rps"] = avg_rps
+                                    averaged_stats["original_rps_values"] = rps_values
+                                    averaged_stats["trimmed_mean_rps"] = avg_rps
+                                else:
+                                    averaged_stats = all_search_stats[0]
+                            elif not recall_only:
+                                if "rps" in all_search_stats[0]:
+                                    rps_values = [stats["rps"] for stats in all_search_stats]
+                                    avg_rps = sum(rps_values) / len(rps_values)
+                                    averaged_stats = dict(all_search_stats[0])
+                                    averaged_stats["rps"] = avg_rps
+                                    averaged_stats["original_rps_values"] = rps_values
+                                    averaged_stats["average_rps"] = avg_rps
+                                else:
+                                    averaged_stats = all_search_stats[0]
+                            else:
+                                averaged_stats = all_search_stats[0] if all_search_stats else {}
+
+                            if recall_only:
+                                result_group = getattr(dataset.config, "result_group", "")
+                                if result_group in ("text_search", "hybrid_search"):
+                                    metric_key = "mrr"
+                                else:
+                                    metric_key = "mean_precisions"
+                                metric_value = averaged_stats.get(metric_key, 0.0)
+                                params_only = effective_search_params.get("params", {})
+                                if not isinstance(params_only, dict):
+                                    params_only = {}
+                                recall_only_results.append(
+                                    {
+                                        "sql_type": sql_type,
+                                        "use_cache": use_cache_val,
+                                        "params": params_only,
+                                        metric_key: metric_value,
+                                    }
+                                )
+                            else:
+                                self.save_search_and_upload_results(
+                                    search_results=averaged_stats, search_id=search_id, search_params=effective_search_params,
+                                    upload_params={
+                                        **self.uploader.upload_params,
+                                        **self.configurator.collection_params,
+                                    },
+                                    upload_results=upload_stats,
+                                    result_group=dataset.config.result_group,
+                                    cache_mode=use_cache_val,
+                                    CAST_mode=0,
+                                    only_vector=0,
+                                    only_cache_query_plan=0,
+                                    result_cache=result_cache_val
+                                )
+                                self.save_pgvector_to_csv(
+                                    search_results=averaged_stats,
+                                    search_params=effective_search_params,
+                                    dataset_config=dataset.config,
+                                    use_cache=use_cache_val,
+                                    result_cache=result_cache_val,
+                                    sql_type=sql_type,
+                                )
+                            if recall_only and recall_only_results:
+                                self.save_recall_only_results(recall_only_results)
+
+    def save_pgvector_to_csv(self, search_results, search_params, dataset_config, use_cache, result_cache=0, sql_type="text_literal"):
         """
-        Save PGvector benchmark results to CSV file with all required parameters for comparison.
+        Save PGvector / PolarDB benchmark results to a dedicated CSV file with
+        sql_type and plan-cache columns for per-form / plan-cache comparison.
+
+        Writes to PGVECTOR_CSV_FILE (separate from the MyScale/ClickHouse
+        benchmark_results.csv, which uses a different column schema).
         """
         try:
             # Extract required parameters
             parallel = search_params.get("parallel", 0)
             test_duration = search_params.get("test_duration", 0)
             ef_s = search_params.get("params", {}).get("ef_s", 0) if isinstance(search_params.get("params"), dict) else 0
-            
+            if isinstance(ef_s, list):
+                ef_s = ef_s[0] if ef_s else 0
+
             # Extract RPS from search results (PGvector uses RPS, not QPS)
             rps = search_results.get("rps", 0)
-            
+
+            # Effective number of rows loaded (upload_limit overrides the dataset's full count)
+            upload_limit = self.uploader.upload_params.get("upload_limit", None)
+            vector_count = int(upload_limit) if upload_limit else int(getattr(dataset_config, 'vector_count', 0) or 0)
+
             # Prepare CSV row data
             csv_row = {
                 'timestamp': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
                 'experiment_name': self.name,
                 'dataset': getattr(dataset_config, 'name', ''),
                 'vector_size': getattr(dataset_config, 'vector_size', 0),
+                'rows': vector_count,
                 'distance': getattr(dataset_config, 'distance', ''),
+                'sql_type': str(sql_type),
                 'use_cache': int(use_cache),
                 'use_query_cache': int(result_cache),
                 'parallel': int(parallel),
@@ -1010,28 +1070,28 @@ class BaseClient:
                 'p95_time': search_results.get("p95_time", 0),
                 'p99_time': search_results.get("p99_time", 0),
             }
-            
+
             # Write to CSV file
-            file_exists = os.path.exists(CSV_RESULTS_FILE)
-            
-            with open(CSV_RESULTS_FILE, 'a', newline='') as csvfile:
+            file_exists = os.path.exists(PGVECTOR_CSV_FILE)
+
+            with open(PGVECTOR_CSV_FILE, 'a', newline='') as csvfile:
                 fieldnames = [
-                    'timestamp', 'experiment_name', 'dataset', 'vector_size', 'distance',
-                    'use_cache', 'use_query_cache', 'parallel', 'test_duration', 'ef_s',
+                    'timestamp', 'experiment_name', 'dataset', 'vector_size', 'rows', 'distance',
+                    'sql_type', 'use_cache', 'use_query_cache', 'parallel', 'test_duration', 'ef_s',
                     'rps', 'recall', 'mean_precisions', 'mrr', 'mean_time', 'p95_time', 'p99_time'
                 ]
-                
+
                 writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
-                
+
                 if not file_exists:
                     writer.writeheader()
-                
+
                 writer.writerow(csv_row)
-                
+
         except Exception as e:
             warn(f"Failed to save CSV results: {e}")
 
-    def run_experiment(self, dataset: Dataset, skip_upload: bool = False, recall_only: bool = False):
+    def run_experiment(self, dataset: Dataset, skip_upload: bool = False, recall_only: bool = False, skip_search: bool = False):
 
         execution_params = self.configurator.execution_params(
             distance=dataset.config.distance, vector_size=dataset.config.vector_size
@@ -1063,10 +1123,19 @@ class BaseClient:
                 corpus_count = getattr(dataset.config, "corpus_count", 0) or 0
                 if corpus_count:
                     effective_vector_count = corpus_count
+            records = reader.read_data()
+            # Optional subset: upload only the first `upload_limit` rows (e.g. a 2M slice of a 10M dataset)
+            upload_limit = self.uploader.upload_params.get("upload_limit", None)
+            if upload_limit:
+                upload_limit = int(upload_limit)
+                records = itertools.islice(records, upload_limit)
+                if upload_limit < effective_vector_count:
+                    effective_vector_count = upload_limit
+                step(f"upload_limit: loading first {upload_limit} rows")
             upload_stats = self.uploader.upload(
                 distance=dataset.config.distance,
                 vector_count=effective_vector_count,
-                records=reader.read_data(),
+                records=records,
                 extra_columns_name=extra_columns_name,
                 extra_columns_type=extra_columns_type,
             )
@@ -1079,6 +1148,11 @@ class BaseClient:
             #     result_group=dataset.config.result_group
             # )
         
+        if skip_search:
+            stage("SKIP SEARCH")
+            step("--skip-search: table + index built; skipping SEARCH phase (use the bash QPS scripts against this table)")
+            return upload_stats
+
         if is_myscale:
             self._run_myscale_experiment(dataset, skip_upload, recall_only, upload_stats, reader)
         elif is_pgvector:

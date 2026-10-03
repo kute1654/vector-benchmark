@@ -60,7 +60,7 @@ def get_root_dir():
 
 
 ROOT_DIR = get_root_dir()
-DATASETS_DIR = ROOT_DIR / "benchmark" / "datasets"
+DATASETS_DIR = ROOT_DIR / "datasets"
 CONFIGURATIONS_DIR = ROOT_DIR / "configurations"
 RESULTS_DIR = ROOT_DIR / "results"
 
