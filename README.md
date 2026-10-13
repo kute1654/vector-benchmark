@@ -1,6 +1,7 @@
 # vector-benchmark
 
 A unified benchmark framework for vector database performance testing. Supports **pgvector**, **ClickHouse**, **MyScale**, and **PolarDB-pg (PASE)**.
+See [Design Document](benchmark/docs/design.md) for the architecture and design.
 
 Language: English | [中文](README.zh-CN.md)
 
@@ -8,74 +9,61 @@ Language: English | [中文](README.zh-CN.md)
 
 ```
 vector-benchmark/
-├── benchmark/                          # Python benchmark framework
-│   ├── run.py                          #   Main entry point (Nuitka compilation target)
-│   ├── config_read.py                  #   Configuration file reader
-│   ├── dataset.py                      #   Dataset management
-│   ├── dataset_config.py               #   Dataset configuration
+├── benchmark/                          # Python benchmark framework (main package)
+│   ├── run.py                          #   Main entry (MyscaleBench, Nuitka target)
+│   ├── query_forms.py                  #   SQL-form × cache-profile QPS comparison
+│   ├── generate_sql_files.py           #   Generate SQL benchmark files for bash tests
+│   ├── analyze_pgvector_log.py         #   pgvector server-log analysis
+│   ├── analyze_myscale_log.py          #   MyScale server-log analysis
+│   ├── analyze_polardb_log.py          #   PolarDB PASE server-log analysis
+│   ├── config_read.py                  #   Config reader (engines / datasets)
+│   ├── dataset.py                      #   Dataset management (download / reader dispatch)
+│   ├── dataset_config.py               #   Dataset configuration model
 │   ├── cli_output.py                   #   CLI output formatting
+│   ├── __init__.py                     #   Package exports + directory resolution
+│   ├── requirements.txt                #   Python dependencies
 │   ├── datasets/                       #   Datasets
 │   │   ├── datasets.json               #     Dataset registry
-│   │   ├── downloads/                  #     Downloaded HDF5 files
-│   │   └── .gitignore
+│   │   └── downloads/                  #     Downloaded data files
+│   ├── configurations/                 #   Experiment configs (JSON arrays)
+│   │   ├── config.json                 #     Default experiment config
+│   │   └── templates/                  #     Config templates (copy into configurations/)
 │   ├── engine/                         #   Engine abstraction layer
+│   │   ├── base.py                     #     BaseEngine (QPS / recall measurement)
+│   │   ├── pgvector.py / polardb.py / clickhouse.py / myscale.py
 │   │   ├── base_client/                #     Base client classes
-│   │   │   ├── base.py                 #       BaseClient (upload/build/search)
-│   │   │   ├── configure.py            #       BaseConfigure (table/index creation)
+│   │   │   ├── client.py               #       BaseClient (orchestrates upload/index/search)
+│   │   │   ├── configure.py            #       BaseConfigurator (table/index creation)
 │   │   │   ├── search.py               #       BaseSearcher (query + session_settings)
-│   │   │   └── upload.py               #       BaseUploader (data import)
-│   │   ├── clients/                    #     Database client implementations
-│   │   │   ├── pgvector/               #       pgvector
-│   │   │   │   ├── config.py           #         Default config constants
-│   │   │   │   ├── configure.py        #         Table/index creation
-│   │   │   │   ├── search.py           #         Vector search (with SET support)
-│   │   │   │   └── upload.py           #         Data import
-│   │   │   ├── clickhouse/             #       ClickHouse
-│   │   │   │   ├── config.py
-│   │   │   │   ├── configure.py
-│   │   │   │   ├── search.py           #         Vector search (with SET support)
-│   │   │   │   └── upload.py
-│   │   │   ├── myscale/                #       MyScale
-│   │   │   │   ├── config.py
-│   │   │   │   ├── configure.py
-│   │   │   │   ├── search.py           #         Vector search (with SET support)
-│   │   │   │   └── upload.py
-│   │   │   └── polardb/                #       PolarDB-pg (PASE)
-│   │   │       ├── config.py
-│   │   │       ├── configure.py
-│   │   │       ├── search.py
-│   │   │       └── upload.py
-│   │   ├── client_factory.py           #     Client factory
-│   │   └── __init__.py
+│   │   │   ├── upload.py               #       BaseUploader (data import)
+│   │   │   ├── parser.py               #       BaseClientParser (result parsing)
+│   │   │   └── distances.py / utils.py
+│   │   └── clients/                    #     Database client implementations
+│   │       ├── client_factory.py       #       Client factory (cartesian expansion)
+│   │       └── pgvector/ clickhouse/ myscale/ polardb/
 │   ├── dataset_reader/                 #   Dataset readers
 │   │   ├── base_reader.py              #     Base reader
-│   │   ├── h5_reader.py                #     HDF5 format reader
+│   │   ├── ann_h5_reader.py            #     ann-benchmarks HDF5 (h5)
+│   │   ├── ann_compound_reader.py      #     Compound archive (tar)
+│   │   ├── json_reader.py              #     JSONL (jsonl)
+│   │   ├── gz_tsv_reader.py            #     BeIR text retrieval (gz_tsv)
 │   │   └── utils.py
 │   ├── results/                        #   Test results (CSV/JSON)
-│   └── __init__.py                     #   Package exports
+│   ├── docs/                           #   Framework docs
+│   │   ├── design.md                   #     Design document
+│   │   └── dataset.md                  #     Dataset format guide
+│   └── bash-test/                      #   sh QPS tests (ClickHouse / MyScale)
+│       ├── clickhouse-benchmark.sh     #   ClickHouse/MyScale native QPS load
+│       ├── pgvector-benchmark.sh       #   [removable] pgvector (pgbench, see design.md App. B)
+│       ├── polardb-pase-query-forms-benchmark.sh # [removable] PolarDB PASE (pgbench, see design.md App. B)
+│       ├── generate-sql-files.sh       #   Sample-generated SQL
+│       ├── verify_string_to_vector_engine.py   #  MyScale string→vector verification
+│       └── sql-bench/                  #   Generated SQL files
 │
-├── bash-test/                          # Shell-level precise QPS tests
-│   ├── clickhouse-benchmark.sh         #   ClickHouse benchmark (clickhouse-benchmark)
-│   ├── pgvector-query-forms-benchmark.sh # pgvector benchmark (pgbench)
-│   ├── polardb-pase-query-forms-benchmark.sh # PolarDB benchmark (pgbench)
-│   ├── setup-pgvector-from-h5.sh       #   pgvector HDF5 -> table setup
-│   ├── setup-polardb-pase-from-h5.sh   #   PolarDB HDF5 -> table setup
-│   ├── generate-sql-files.sh           #   SQL generation for benchmarking
-│   └── sql-bench/                      #   Generated SQL files
-│
-├── configurations/                     # Experiment configuration files (JSON)
-│   ├── pgvector.json                   #   pgvector test config
-│   ├── clickhouse.json                 #   ClickHouse test config
-│   ├── myscale.json                    #   MyScale test config
-│   └── polardb.json                    #   PolarDB test config
-│
-├── docs/                               # Detailed documentation
-│   ├── README.md                       #   English version
-│   └── README.zh-CN.md                 #   Chinese version
-│
+├── docs/                               # Query-form / plan-cache analysis docs
+├── results/                            # Shell benchmark summary CSVs
 ├── README.md                           # This file (English)
 ├── README.zh-CN.md                     # Chinese version
-├── requirements.txt                    # Python dependencies
 ├── build_nuitka.sh                     # Nuitka build script (x86_64)
 └── build_nuitka_arm.sh                 # Nuitka build script (ARM64)
 ```
@@ -85,7 +73,7 @@ vector-benchmark/
 ### 1. Install Dependencies
 
 ```bash
-cd vector-benchmark
+cd vector-benchmark/benchmark
 pip install -r requirements.txt
 ```
 
@@ -160,7 +148,9 @@ python run.py --engines pgvector-sift-128-euclidean --recall-only
 ### 5. Compare all SQL forms and cache profiles
 
 After the four target tables have been created and indexed, run one matrix
-covering every registered query form:
+covering every registered query form. Prepare a JSON target config file first
+(connection params + table names; if it lists multiple engines, run one at a
+time — see the `--config` docs in `query_forms.py`), for example:
 
 ```bash
 cd ..
@@ -290,7 +280,7 @@ Configure `session_settings` under `search_params` to execute SET commands befor
 | Distance functions | `l2`, `ip`, `cosine` |
 | Default port | 5432 |
 | Connection | psycopg2 |
-| Shell benchmark | pgbench |
+| QPS measurement | Python (run.py / query_forms.py) |
 
 ### ClickHouse
 
@@ -300,7 +290,7 @@ Configure `session_settings` under `search_params` to execute SET commands befor
 | Distance functions | `l2`, `dot`, `cosine` |
 | Default port | 9000 (tcp) / 8123 (http) |
 | Connection | clickhouse-driver (tcp) / clickhouse-connect (http) |
-| Shell benchmark | clickhouse-benchmark |
+| QPS measurement | clickhouse-benchmark.sh |
 
 ### MyScale
 
@@ -310,7 +300,7 @@ Configure `session_settings` under `search_params` to execute SET commands befor
 | Distance functions | `l2`, `dot`, `cosine` |
 | Default port | 9000 (tcp) / 8123 (http) |
 | Connection | clickhouse-driver (tcp) / clickhouse-connect (http) |
-| Shell benchmark | clickhouse-benchmark |
+| QPS measurement | clickhouse-benchmark.sh |
 
 ### PolarDB-pg (PASE)
 
@@ -320,66 +310,50 @@ Configure `session_settings` under `search_params` to execute SET commands befor
 | Distance functions | `l2`, `ip`, `cosine` |
 | Default port | 5433 |
 | Connection | psycopg2 |
-| Shell benchmark | pgbench |
+| QPS measurement | Python (run.py / query_forms.py) |
 
 ## Testing Modes
 
-### Python Benchmark (Coarse QPS + Recall)
+The framework keeps exactly **two** kinds of test scripts:
+
+### Python Benchmark (create/index + QPS + recall)
+
+Driven by `run.py` (and `query_forms.py`): creates the database, tables, indexes,
+imports data, then measures QPS and recall:
 
 - **Duration mode**: Sends queries continuously for a specified duration, measures QPS
 - **Count mode**: Executes a fixed number of queries, measures latency and recall
 - **Recall-only mode**: Runs single-process search over all test queries, outputs recall metrics only
 
-### Shell Benchmark (Precise QPS)
+**pgvector and PolarDB-pg (PASE)** use this Python path as the authoritative QPS
+measurement — pgbench cannot measure the real QPS of the query plan cache, while
+the Python client can precisely apply session-level `SET` and prepared statements.
 
-Uses native database benchmarking tools (pgbench / clickhouse-benchmark) for precise QPS measurement, eliminating Python network overhead:
+### sh Benchmark (ClickHouse / MyScale vector-search QPS)
+
+Uses the native `clickhouse-benchmark` tool to measure vector-search QPS directly.
+Python-driven measurement is low here because the script overhead inflates latency
+significantly, so **ClickHouse / MyScale** use this sh path as the authoritative QPS
+measurement:
 
 ```bash
-# pgvector
-cd bash-test
-PSQL=/usr/local/pgsql/bin/psql PGBENCH=/usr/local/pgsql/bin/pgbench \
-    REPEAT=5 TIMELIMIT=30 \
-    ./pgvector-query-forms-benchmark.sh benchmark_sift_128_1k
+cd benchmark/bash-test
 
 # ClickHouse
-cd bash-test
 ./clickhouse-benchmark.sh benchmark_sift_128
 
-# PolarDB
-cd bash-test
-PSQL=/usr/local/pgsql/bin/psql PGBENCH=/usr/local/pgsql/bin/pgbench \
-    REPEAT=5 TIMELIMIT=30 \
-    ./polardb-pase-query-forms-benchmark.sh benchmark_sift_128_1k
+# MyScale
+ENGINE=myscale ./clickhouse-benchmark.sh benchmark_sift_128
 ```
+
+> Create the target table, indexes, and import data first via the `python run.py`
+> upload phase, then run the sh script. See the header comments of
+> `clickhouse-benchmark.sh` for usage details.
 
 ## Shell Setup & Index Operations
 
-### pgvector: Create Table and Import Data
-
-```bash
-cd bash-test
-PSQL=/usr/local/pgsql/bin/psql ./setup-pgvector-from-h5.sh \
-    ../benchmark/datasets/downloads/sift-128-euclidean.hdf5 \
-    benchmark_sift_128_1k 1000 10 l2
-
-# Arguments:
-#   $1: HDF5 file path
-#   $2: table name
-#   $3: row count to import (train_count)
-#   $4: top_k
-#   $5: distance type (l2/ip/cosine)
-```
-
-### PolarDB: Create Table and Import Data
-
-```bash
-cd bash-test
-PSQL=/usr/local/pgsql/bin/psql ./setup-polardb-pase-from-h5.sh \
-    ../benchmark/datasets/downloads/sift-128-euclidean.hdf5 \
-    benchmark_sift_128_1k 1000 10 l2
-```
-
-### Manual Index Creation
+Table/index creation and data import are all done through the `python run.py`
+upload phase (see the `upload_params` config). You may also create indexes manually:
 
 ```sql
 -- pgvector HNSW index
@@ -406,7 +380,7 @@ cat benchmark_results.csv | column -t -s,
 ls -la *search*.json
 cat pgvector-sift-128-euclidean-search-*.json | python -m json.tool
 
-# View Shell benchmark results
+# View sh (ClickHouse/MyScale) benchmark results
 cat results/vector-query-forms-pgvector-results.csv
 ```
 
@@ -444,7 +418,8 @@ If you see `Seq Scan` instead of `Index Scan`:
 
 - Check if `ef_search` is too large
 - Verify concurrency settings are reasonable
-- Use Shell scripts to isolate Python network overhead
+- Use the sh path (`bash-test/clickhouse-benchmark.sh`) for ClickHouse/MyScale precise QPS
+  (Python driver overhead can depress ClickHouse/MyScale QPS)
 
 ### Connection Failure
 

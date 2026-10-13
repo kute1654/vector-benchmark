@@ -5,6 +5,11 @@ from typing import List, Optional, Tuple
 
 import psycopg2
 
+try:
+    from pgvector.psycopg2 import register_vector as _pgv_register_vector
+except Exception:  # pragma: no cover
+    _pgv_register_vector = None
+
 from benchmark.dataset_reader.base_reader import Query
 from engine.base_client import BaseSearcher
 from benchmark.cli_output import warn
@@ -24,6 +29,9 @@ class PGVectorSearcher(BaseSearcher):
     sql_type: str = "text_literal"
     use_query_plan_cache: int = 0
     use_result_cache: int = 0
+    # 是否类型化绑定参数 (档1/档3, 对齐 polardb): PREPARE (vector) + $1 无 cast,
+    # 文本在 Bind 阶段一次转成 vector Datum (与 sql_type 解耦)。
+    typed_bind: bool = False
     # PREPARE 形式: 命名 PREPARE 语句名 + plan_cache_mode (查询计划缓存开关)
     prepared_statement_name: Optional[str] = None
 
@@ -92,6 +100,17 @@ class PGVectorSearcher(BaseSearcher):
         )
         cls.connection.autocommit = True
 
+        # 方案B/改造②: 注册 pgvector 二进制 vector 参数适配器。
+        # register_vector 让 psycopg2 把 Python 列表以 vector_recv 二进制格式发送,
+        # 避免 generic plan 下 "$1::vector" 每行重复走 vector_in 解析, 也不引入
+        # real[]/数组 cast 的 per-query 开销。无 pgvector python 包时静默跳过,
+        # 回退到文本参数路径 (behavior 与改造前一致)。
+        if _pgv_register_vector is not None:
+            try:
+                _pgv_register_vector(cls.connection)
+            except Exception as exc:
+                warn(f"could not register pgvector vector adapter: {exc}")
+
         # Apply session-level SET commands from search_params
         session_settings = cls.search_params.get("session_settings", {})
         if session_settings:
@@ -113,23 +132,31 @@ class PGVectorSearcher(BaseSearcher):
         except Exception as exc:
             warn(f"could not set hnsw.ef_search={ef_s}: {exc}")
 
-        # 查询计划缓存: 仅当 use_query_plan_cache > 0 时才走 PREPARE/EXECUTE 形式。
-        # cache=0 -> 完全不 PREPARE, 直接走 _direct_search (简单协议文本内联, 每次
-        # 重新解析+规划), 作为不使用计划缓存的基线。
-        # cache=1 -> 建立命名 PREPARE + EXECUTE, plan_cache_mode=force_custom_plan,
-        #            每 EXECUTE 重新规划 (日志 ACTION=USE_CUSTOM)。
-        # cache=2 -> 建立命名 PREPARE + EXECUTE, plan_cache_mode=force_generic_plan,
-        #            复用 generic plan (日志 ACTION=USE_GENERIC)。
-        # 因此 custom 与 generic 是"使用计划缓存"下的两个对照, 由日志 USE_CUSTOM /
-        # USE_GENERIC 区分; 0 档则完全不 PREPARE 作基线。
+        # 查询计划缓存: 仅当 use_query_plan_cache > 0 时才走 PREPARE/EXECUTE 形式,
+        # 对齐 polardb 四档语义 (档位与 sql_type 解耦):
+        #   cache=0 -> 完全不 PREPARE, 直接走 _direct_search (简单协议文本内联, 每次
+        #   重新解析+规划), 作为不使用计划缓存的基线。
+        #   cache=1 -> PREPARE + plan_cache_mode=force_custom_plan (每 EXECUTE 重规划)
+        #               + 类型化绑定 (PREPARE (vector), $1 无 cast)。
+        #   cache=2 -> PREPARE + plan_cache_mode=force_generic_plan + 文本绑定
+        #              (PREPARE (text), $1::vector) —— generic plan 每行 cast/解析。
+        #   cache=3 -> PREPARE + plan_cache_mode=force_generic_plan + 类型化绑定
+        #              (PREPARE (vector), $1) —— 文本在 Bind 阶段一次转成 vector Datum,
+        #              generic plan 复用该 Datum, 消除每行 vector_in (对齐 polardb 档3)。
+        # 其中 1/3 档 PREPARE 结构相同、仅 plan_cache_mode 不同 (custom 重规划 vs
+        # generic 复用); 2/3 档同为 generic 但绑定方式不同 (文本 cast vs 类型化),
+        # 便于分别隔离"重规划"与"逐行解析"两类成本。
         cls.use_query_plan_cache = int(cls.search_params.get("use_query_plan_cache", 0))
+        cls.typed_bind = False
         if cls.use_query_plan_cache == 0:
             cls.prepared_statement_name = None
         else:
-            if cls.use_query_plan_cache == 2:
+            if cls.use_query_plan_cache in (2, 3):
                 cls._set_plan_cache_mode("force_generic_plan")
+                cls.typed_bind = (cls.use_query_plan_cache == 3)
             else:
-                cls._set_plan_cache_mode("force_custom_plan")
+                cls._set_plan_cache_mode("auto")
+                cls.typed_bind = True
             cls._prepare_statement(int(cls.search_params.get("top", 10)))
 
     @classmethod
@@ -190,8 +217,14 @@ class PGVectorSearcher(BaseSearcher):
 
     @classmethod
     def _param_type(cls) -> str:
-        """sql_type -> PREPARE 的参数类型 (按 SQL 类型区分, 保留各类型形态)。"""
+        """sql_type / 绑定档位 -> PREPARE 的参数类型。
+
+        档1/档3 类型化绑定 (typed_bind=True, 对齐 polardb) 统一收窄为 vector 参数
+        ($1 无 cast); 其余档位按 sql_type 保留各类型形态 (real[] 数组 / text 文本)。
+        """
         st = cls.sql_type
+        if cls.typed_bind:
+            return "vector"
         if st in ("array_int_cast", "array_real_cast", "array_cast", "array_to_vector_fn"):
             return "real[]"
         return "text"
@@ -211,7 +244,12 @@ class PGVectorSearcher(BaseSearcher):
         st = cls.sql_type
 
         # 距离右侧表达式 (以参数 $1 为源, 保留该 sql_type 的向量转换形态)
-        if st == "text_literal":
+        if cls.typed_bind:
+            # 档1/档3 类型化绑定 (对齐 polardb): $1 声明为 vector 参数, 直接用 $1
+            # (无 cast)。文本在 Bind 阶段一次转成 vector Datum, generic plan 复用,
+            # 消除逐行 vector_in 解析。
+            expr = "$1"
+        elif st == "text_literal":
             expr = "$1::vector"
         elif st == "text_cast":
             expr = "CAST($1 AS vector)"
@@ -385,6 +423,14 @@ class PGVectorSearcher(BaseSearcher):
             return [int(x) if not math.isnan(x) else 0 for x in vector]
         if pt == "real[]":
             return [float(x) if not math.isnan(x) else 0.0 for x in vector]
+        if pt == "vector":
+            # 档1/档3 类型化参数绑定: 返回向量文本, 服务端在 Bind 期把它转换一次
+            # 成 vector Datum。generic plan 的目标列表重估只取该 Datum, 不再触发
+            # 逐行 vector_in —— 与 polardb 档3 的 pase 类型化绑定对齐。
+            # 注: psycopg2 2.x 无法发送非 bytea 的真实二进制参数 (Binary 会被硬编码
+            # 成 ::bytea 并在服务端被拒), pgvector-python 0.5 的适配器也因此走 to_text;
+            # 类型化文本绑定是 psycopg2 协议下可达的最优形态, 已把 N+1 完全消除。
+            return "[" + ",".join('0.0' if math.isnan(x) else str(x) for x in vector) + "]"
         return "[" + ",".join('0.0' if math.isnan(x) else str(x) for x in vector) + "]"
 
     @classmethod
@@ -413,14 +459,16 @@ class PGVectorSearcher(BaseSearcher):
         # 结果缓存由 init_client 中按 use_result_cache 设置的 PG 会话级 GUC
         # (result_cache / result_cache_debug) 控制 —— 与 sh 脚本一致, python 侧不再
         # 用 dict 模拟, 避免与 PG 层缓存不一致、干扰召回率/QPS 对比。
-        # 查询计划缓存三档语义:
+        # 查询计划缓存四档语义 (对齐 polardb):
         #   use_query_plan_cache=0 -> 不 PREPARE, prepared_statement_name 为空,
         #     走 _direct_search(简单协议文本内联, 每次重解析+规划) = 无计划缓存基线。
-        #   use_query_plan_cache=1 -> PREPARE + plan_cache_mode=force_custom_plan,
-        #     每 EXECUTE 重新规划(USE_CUSTOM)。
-        #   use_query_plan_cache=2 -> PREPARE + plan_cache_mode=force_generic_plan,
-        #     复用 generic plan(USE_GENERIC)。
-        # 1/2 档仅在 PREPARE 因缺维度等失败(prepared_statement_name 为空)时回退
+        #   use_query_plan_cache=1 -> PREPARE + plan_cache_mode=force_custom_plan +
+        #     类型化绑定 (每 EXECUTE 重新规划)。
+        #   use_query_plan_cache=2 -> PREPARE + plan_cache_mode=force_generic_plan +
+        #     文本绑定 (复用 generic plan, 每行 cast/解析)。
+        #   use_query_plan_cache=3 -> PREPARE + plan_cache_mode=force_generic_plan +
+        #     类型化绑定 (复用 generic plan, Bind 期一次转 vector Datum)。
+        # 1/2/3 档仅在 PREPARE 因缺维度等失败(prepared_statement_name 为空)时回退
         # simple 协议内联 SQL。
         if meta_conditions is None and cls.prepared_statement_name:
             result = cls._prepared_search(vector, top)

@@ -20,6 +20,22 @@ DISTANCE_MAPPING = {
 
 PASE_MAX_DIM = 512
 
+# 查询结果缓存 GUC (与 bash-test/polardb-pase-query-forms-benchmark.sh 对齐:
+#   SET pase_result_cache = on/off, 并按需 SET pase_result_cache_debug = on/off)
+# 结果缓存是 PolarDB pase 扩展在源码层实现的功能 (对齐 pgvector 的 veccache),
+# 引擎侧只负责开关会话级 GUC, 不在 python 侧用 dict 模拟缓存。
+# 注: 这些 GUC 不再使用 "pase." 限定前缀, 而注册为普通 GUC 名。
+PASE_RESULT_CACHE_GUC = "pase_result_cache"
+PASE_RESULT_CACHE_DEBUG_GUC = "pase_result_cache_debug"
+
+# pase_in() 文本向量的十进制->float 解析器 GUC (运行时切换, 对齐 pgvector 的
+# vector.in_parse_mode, 源码见 external/pase/type/pase_type.c pase_parse_float):
+#   strtof       -> libc strtof
+#   inline       -> 手写 inline 解析器
+#   fast_float   -> fast_float_parse() (Eisel-Lemire, 与 pgvector 同源移植)
+# 由 pase_handler.c _PG_init 注册; LOAD '$libdir/pase' 后会话内可 SET。
+PASE_IN_PARSE_MODE_GUC = "pase_in_parse_mode"
+
 H5_COLUMN_TYPES_MAPPING = {
     "float64": "DOUBLE PRECISION",
     "float32": "REAL",

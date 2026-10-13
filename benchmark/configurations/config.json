@@ -415,6 +415,8 @@
         0,
         1
       ],
+      "string_to_vector_parallel_mode": [0, 1, 2],
+      "string_to_vector_parallel_threads": 8,
       "search_number": 5
     },
     "search_params": {
@@ -462,6 +464,8 @@
         "raw_bytes",
         "raw_bytes_x"
       ],
+      "string_to_vector_parallel_mode": [0, 1, 2],
+      "string_to_vector_parallel_threads": 8,
       "search_number": 1
     },
     "search_params": {
@@ -490,18 +494,11 @@
         0,
         1
       ],
-      "enable_cast_vector": [
-        0,
-        1
-      ],
-      "query_plan_cache_only_vector": [
-        0,
-        1
-      ],
       "vector_only_cache_query_plan": [
         0,
         1
       ],
+      "use_query_cache":[0,1],
       "sql_type": [
         "normal",
         "cast",
@@ -549,6 +546,10 @@
         0,
         1
       ],
+      "use_query_cache": [
+        0,
+        1
+      ],
       "sql_type": [
         "normal",
         "cast",
@@ -556,6 +557,8 @@
         "raw_bytes",
         "raw_bytes_x"
       ],
+      "string_to_vector_parallel_mode": [0, 1, 2],
+      "string_to_vector_parallel_threads": 8,
       "search_number": 1
     },
     "search_params": {
@@ -596,6 +599,10 @@
         0,
         1
       ],
+      "use_query_cache": [
+        0,
+        1
+      ],
       "sql_type": [
         "normal",
         "cast",
@@ -603,6 +610,8 @@
         "raw_bytes",
         "raw_bytes_x"
       ],
+      "string_to_vector_parallel_mode": [0, 1, 2],
+      "string_to_vector_parallel_threads": 8,
       "search_number": 1
     },
     "search_params": {
@@ -654,6 +663,8 @@
         "raw_bytes",
         "raw_bytes_x"
       ],
+      "string_to_vector_parallel_mode": [0, 1, 2],
+      "string_to_vector_parallel_threads": 8,
       "search_number": 1
     },
     "search_params": {
@@ -697,6 +708,8 @@
         0,
         1
       ],
+      "string_to_vector_parallel_mode": [0, 1, 2],
+      "string_to_vector_parallel_threads": 8,
       "search_number": 1
     },
     "search_params": {
@@ -741,6 +754,8 @@
         0,
         1
       ],
+      "string_to_vector_parallel_mode": [0, 1, 2],
+      "string_to_vector_parallel_threads": 8,
       "search_number": 1
     },
     "search_params": {
@@ -768,7 +783,8 @@
       "enable_query_plan_cache": [
         0,
         1,
-        2
+        2,
+        3
       ],
       "use_query_cache": [
         0,
@@ -777,24 +793,16 @@
       "vector_in_parse_mode": ["strtof", "inline", "fast_float"],
       "sql_type": [
         "text_literal",
-        "text_cast",
-        "vector_fn",
         "array_int_cast",
         "array_real_cast",
-        "array_cast",
-        "array_to_vector_fn",
-        "halfvec_literal",
-        "with_text_literal",
-        "with_array_cast",
-        "with_vector_fn",
-        "prepared"
+        "halfvec_literal"
       ],
       "search_number": 5
     },
     "search_params": {
       "parallel": 16,
       "top": 10,
-      "test_duration": 10,
+      "test_duration": 60,
       "params": {
         "ef_s": [
           100
@@ -819,7 +827,8 @@
       "enable_query_plan_cache": [
         0,
         1,
-        2
+        2,
+        3
       ],
       "use_query_cache": [
         0,
@@ -828,23 +837,16 @@
       "vector_in_parse_mode": ["strtof", "inline", "fast_float"],
       "sql_type": [
         "text_literal",
-        "text_cast",
-        "vector_fn",
         "array_int_cast",
         "array_real_cast",
-        "array_cast",
-        "array_to_vector_fn",
-        "halfvec_literal",
-        "with_text_literal",
-        "with_array_cast",
-        "with_vector_fn"
+        "halfvec_literal"
       ],
-      "search_number": 1
+      "search_number": 5
     },
     "search_params": {
-      "parallel": 1,
+      "parallel": 8,
       "top": 10,
-      "test_duration": 1,
+      "test_duration": 60,
       "params": {
         "ef_s": [
           100
@@ -869,7 +871,8 @@
       "enable_query_plan_cache": [
         0,
         1,
-        2
+        2,
+        3
       ],
       "use_query_cache": [
         0,
@@ -878,16 +881,9 @@
       "vector_in_parse_mode": ["strtof", "inline", "fast_float"],
       "sql_type": [
         "text_literal",
-        "text_cast",
-        "vector_fn",
         "array_int_cast",
         "array_real_cast",
-        "array_cast",
-        "array_to_vector_fn",
-        "halfvec_literal",
-        "with_text_literal",
-        "with_array_cast",
-        "with_vector_fn"
+        "halfvec_literal"
       ],
       "upload_limit": 2000000,
       "search_number": 3
@@ -917,7 +913,8 @@
       "enable_query_plan_cache": [
         0,
         1,
-        2
+        2,
+        3
       ],
       "use_query_cache": [
         0,
@@ -964,7 +961,8 @@
       "enable_query_plan_cache": [
         0,
         1,
-        2
+        2,
+        3
       ],
       "use_query_cache": [
         0,
@@ -973,21 +971,14 @@
       "vector_in_parse_mode": ["strtof", "inline", "fast_float"],
       "sql_type": [
         "text_literal",
-        "text_cast",
-        "vector_fn",
         "array_int_cast",
         "array_real_cast",
-        "array_cast",
-        "array_to_vector_fn",
-        "halfvec_literal",
-        "with_text_literal",
-        "with_array_cast",
-        "with_vector_fn"
+        "halfvec_literal"
       ],
       "search_number": 5
     },
     "search_params": {
-      "parallel": 1,
+      "parallel": 8,
       "top": 10,
       "test_duration": 60,
       "params": {
@@ -1011,7 +1002,8 @@
       "enable_query_plan_cache": [
         0,
         1,
-        2
+        2,
+        3
       ],
       "use_query_cache": [
         0,
@@ -1020,23 +1012,16 @@
       "vector_in_parse_mode": ["strtof", "inline", "fast_float"],
       "sql_type": [
         "text_literal",
-        "text_cast",
-        "vector_fn",
         "array_int_cast",
         "array_real_cast",
-        "array_cast",
-        "array_to_vector_fn",
-        "halfvec_literal",
-        "with_text_literal",
-        "with_array_cast",
-        "with_vector_fn"
+        "halfvec_literal"
       ],
-      "search_number": 1
+      "search_number": 5
     },
     "search_params": {
-      "parallel": 1,
+      "parallel": 8,
       "top": 10,
-      "test_duration": 1,
+      "test_duration": 60,
       "params": {
         "ef_s": [
           100
@@ -1058,7 +1043,8 @@
       "enable_query_plan_cache": [
         0,
         1,
-        2
+        2,
+        3
       ],
       "use_query_cache": [
         0,
@@ -1066,12 +1052,15 @@
       ],
       "vector_in_parse_mode": ["strtof", "inline", "fast_float"],
       "sql_type": [
-        "text_literal"
+        "text_literal",
+        "array_int_cast",
+        "array_real_cast",
+        "halfvec_literal"
       ],
-      "search_number": 1
+      "search_number": 5
     },
     "search_params": {
-      "parallel": 1,
+      "parallel": 8,
       "top": 10,
       "test_duration": 60,
       "params": {
@@ -1096,6 +1085,7 @@
         0,
         1
       ],
+      "vector_in_parse_mode": ["strtof", "inline", "fast_float"],
       "sql_type": [
         "text_pase_op",
         "pase_fn_text",
@@ -1105,6 +1095,10 @@
         "with_pase_fn_array",
         "with_pase_fn_text",
         "prepared"
+      ],
+      "use_query_cache": [
+        0,
+        1
       ],
       "search_number": 5
     },
@@ -1138,6 +1132,7 @@
         0,
         1
       ],
+      "vector_in_parse_mode": ["strtof", "inline", "fast_float"],
       "sql_type": [
         "text_pase_op",
         "pase_fn_text",
@@ -1180,6 +1175,7 @@
         0,
         1
       ],
+      "vector_in_parse_mode": ["strtof", "inline", "fast_float"],
       "sql_type": [
         "text_pase_op",
         "pase_fn_text",
@@ -1218,8 +1214,15 @@
       "index_type": "HNSWFLAT",
       "enable_query_plan_cache": [
         0,
+        1,
+        2,
+        3
+      ],
+      "use_query_cache": [
+        0,
         1
       ],
+      "vector_in_parse_mode": ["strtof", "inline", "fast_float"],
       "sql_type": [
         "text_pase_op",
         "pase_fn_text",
@@ -1227,8 +1230,7 @@
         "pase_fn_array_extra",
         "order_by_op",
         "with_pase_fn_array",
-        "with_pase_fn_text",
-        "prepared"
+        "with_pase_fn_text"
       ],
       "search_number": 1
     },

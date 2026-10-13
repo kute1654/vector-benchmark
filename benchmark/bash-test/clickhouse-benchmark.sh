@@ -23,7 +23,39 @@
 #   关闭 --randomize 保证 SET 行先于查询在同一条会话上执行。
 #   服务器支持 enable_vector_performance_test 时另写一行该会话开关 (不支持自动省略)。
 #
-# 测试维度: engine × table × settings_profile × precise_float_parsing × sql_type(normal/cast/cast_array/type_hint/raw_bytes/raw_bytes_x/with/with_cast/with_cast_array/with_type_hint/with_raw_bytes/with_raw_bytes_x/subquery_id/with_subquery_id) × row_count × concurrency
+# 并行字符串→向量转换测试 (MyScale 计划缓存命中时回填查询向量的新增功能):
+#   并行模式 (mode) 是 SETTINGS_GROUPS 每行的第 7 个字段, 格式:
+#       "profile名|use_query_cache|enable_query_plan_cache|enable_cast_vector|query_plan_cache_only_vector|only_cache_query_plan|mode"
+#   第 7 字段可省略 (等价于 0)。0=原串行; 1=块式并行 (连续等分); 2=轮转式并行 (按偏移跨步)。
+#   因为 mode 属于 profile, 结果 CSV 里就直接按 profile 区分 (另有 string_to_vector_mode 列)。
+#   例: "plan_cache_blocked|0|1|0|0|0|1" —— 同一组缓存开关下的 mode=1 变体。
+#
+#   STRING_TO_VECTOR_THREADS           并行线程数, 一个固定值, 对所有 profile 生效 (默认 8; 0=自动=硬件并发)。
+#                                      只在 mode=1/2 且批大小 >=2 时才会真正开线程。
+#   VERIFY_PARALLEL_MODES              1=基准测试前先做「各 mode 变体结果一致性」校验, 默认 0
+#                                      (同一组缓存开关下的每个 mode 变体跑两遍取第二遍输出做 cmp; 同时用
+#                                       system.events.QueryPlanCacheHits 断言第二遍确实命中了计划缓存 ——
+#                                       0 命中说明没走到被测代码, 会明确标为假通过)
+#   VERIFY_SAMPLE_QUERIES              校验时每表取前 N 条查询比对, 默认 20
+#
+#   例: VERIFY_PARALLEL_MODES=1 STRING_TO_VECTOR_THREADS=8 ./clickhouse-benchmark.sh 表名
+#
+#   默认 profile 列表里, 只有 plan_cache 这一组派生了 mode=1/2 两个变体
+#   (plan_cache_blocked / plan_cache_cyclic), 其余 profile 都是 mode=0 —— 对比 mode
+#   只需要一组缓存开关, 所以没必要把整张表乘三倍。想换别的开关组合, 照着上面格式
+#   加一行即可 (SETTINGS_GROUPS_OVERRIDE 也能整体替换)。
+#   mode / threads 只写进运行副本头部的会话级 SET 行 (与其它缓存开关一致), 不写进
+#   sql-bench 下的生成文件: 生成文件在运行时本来就会被剥掉行尾 SETTINGS 子句, 且同一组
+#   开关下各 mode 变体共用同一份查询文本, 没必要重复生成。
+#   注意 (两处会把 mode 记成 0, 均为如实处理, 不是静默降级):
+#     - 服务器没有这两个 setting (未打补丁的 MyScale / 上游 clickhouse): 若同一组开关下
+#       已有 mode=0 的 profile, 这些空转的 mode 变体会被直接移除;
+#     - 该 profile 没开计划缓存: 转换函数根本不会被调用, mode 归零后照常测量。
+#   注意 (解读结果时): 若 mode=1/2 的 QPS 与 mode=0 完全相同, 常见原因是该查询只带
+#   一个向量字面量, 批大小为 1 时会按设计退回串行 (thread_count<2), 并不代表转换
+#   逻辑出错; 要看出并行差异需要一条含多个向量字面量的查询。
+#
+# 测试维度: engine × table × settings_profile(含 string_to_vector 并行 mode) × precise_float_parsing × sql_type(normal/cast/cast_array/type_hint/raw_bytes/raw_bytes_x/with/with_cast/with_cast_array/with_type_hint/with_raw_bytes/with_raw_bytes_x/subquery_id/with_subquery_id) × row_count × concurrency (线程数 STRING_TO_VECTOR_THREADS 为固定值, 不是维度)
 #
 
 
@@ -40,7 +72,7 @@ HOST="127.0.0.1"
 PORT="9000"
 MYS_SCALE_EF="${MYS_SCALE_EF:-100}"
 MYS_SEARCH_PARAMS="${MYS_SEARCH_PARAMS:-}"
-TIMELIMIT="${TIMELIMIT:-1}"
+TIMELIMIT="${TIMELIMIT:-60}"
 WARMUP_TIMELIMIT="${WARMUP_TIMELIMIT:-1}"
 REPEAT="${REPEAT:-1}"
 if [ "$ENGINE" = "myscale" ]; then
@@ -59,46 +91,58 @@ SQL_TYPES=(
     raw_bytes_x
 )
 ROW_COUNTS=(1000)
-CONCURRENCIES=(8)
+CONCURRENCIES=(1)
 PRECISE_FLOAT_PARSING_VALUES=(1)
 
+# 并行字符串→向量转换 (MyScale 新增功能) 的测试维度, 详见文件头说明。
+# 模式 (mode) 是 SETTINGS_GROUPS 的第 7 个字段 —— 每个 profile 自带模式, 展开后
+# 以 profile 的形式出现在结果里; 线程数则是一个固定值, 对所有 profile 生效。
+STRING_TO_VECTOR_THREADS="${STRING_TO_VECTOR_THREADS:-1}"
+VERIFY_PARALLEL_MODES="${VERIFY_PARALLEL_MODES:-0}"
+
 if [ "$ENGINE" = "myscale" ]; then
-    # MyScale profile 字段(f1..f5):
+    # MyScale profile 字段(f1..f5, 可选 f6):
     #   f1=use_query_cache, f2=enable_query_plan_cache, f3=enable_cast_vector,
-    #   f4=query_plan_cache_only_vector, f5=only_cache_query_plan
+    #   f4=query_plan_cache_only_vector, f5=only_cache_query_plan,
+    #   f6=string_to_vector_parallel_mode (0/1/2, 省略即 0)
+    # plan_cache 这一组额外派生出 mode=1 (块式) / mode=2 (轮转式) 两个 profile, 使
+    # 并行字符串→向量转换可以在同一组缓存开关下与 mode=0 直接对比; 其余 profile 只跑 mode=0。
     SETTINGS_GROUPS=(
-        "off|0|0|0|0|0"
         "plan_cache|0|1|0|0|0"
-        "plan_cast|0|1|1|0|0"
-        "plan_only_vector|0|1|0|1|0"
+        "off|0|0|0|0|0"
+        # "plan_cache_blocked|0|1|0|0|0|1"
+        # "plan_cache_cyclic|0|1|0|0|0|2"
+        # "plan_cast|0|1|1|0|0"
+        # "plan_only_vector|0|1|0|1|0"
         "only_plan_cache|0|1|0|0|1"
-        "only_plan_cast|0|1|1|0|1"
-        "only_plan_only_vector|0|1|0|1|1"
+        # "only_plan_cast|0|1|1|0|1"
+        # "only_plan_only_vector|0|1|0|1|1"
         "query_off|1|0|0|0|0"
         "query_plan_cache|1|1|0|0|0"
-        "query_plan_cast|1|1|1|0|0"
-        "query_plan_only_vector|1|1|0|1|0"
+        # "query_plan_cast|1|1|1|0|0"
+        # "query_plan_only_vector|1|1|0|1|0"
         "query_only_plan_cache|1|1|0|0|1"
-        "query_only_plan_cast|1|1|1|0|1"
-        "query_only_plan_only_vector|1|1|0|1|1"
+        # "query_only_plan_cast|1|1|1|0|1"
+        # "query_only_plan_only_vector|1|1|0|1|1"
     )
 else
     # clickhouse profile 字段:
     #   f1=use_query_cache, f2=vector_query_plan_cache, f3=vector_only_cache_query_plan,
     #   f4=vector_query_plan_cache_only_vector, f5=vector_use_cast
+    # (f6=string_to_vector_parallel_mode 是 MyScale 分支的字段, 上游 clickhouse 没有)
     # use_query_cache 与 vector_query_plan_cache 可同时开启;
     # f3/f4=1 仅在 f2=1 时有效。
     SETTINGS_GROUPS=(
-        "ck_off|0|0|0|0|0"
         "ck_plan_cache|0|1|0|0|0"
+        "ck_off|0|0|0|0|0"
         "ck_only_plan_cache|0|1|1|0|0"
-        "ck_plan_cast|0|1|0|0|1"
-        "ck_only_plan_cast|0|1|1|0|1"
+        # "ck_plan_cast|0|1|0|0|1"
+        # "ck_only_plan_cast|0|1|1|0|1"
         "result_off|1|0|0|0|0"
         "result_plan_cache|1|1|0|0|0"
         "result_only_plan_cache|1|1|1|0|0"
-        "result_plan_cast|1|1|0|0|1"
-        "result_only_plan_cast|1|1|1|0|1"
+        # "result_plan_cast|1|1|0|0|1"
+        # "result_only_plan_cast|1|1|1|0|1"
     )
 fi
 
@@ -123,6 +167,71 @@ apply_list_override ROW_COUNTS ROW_COUNTS_OVERRIDE
 apply_list_override CONCURRENCIES CONCURRENCIES_OVERRIDE
 apply_list_override PRECISE_FLOAT_PARSING_VALUES PRECISE_FLOAT_PARSING_OVERRIDE
 apply_list_override SETTINGS_GROUPS SETTINGS_GROUPS_OVERRIDE
+
+validate_string_to_vector_threads() {
+    if ! [[ "$STRING_TO_VECTOR_THREADS" =~ ^[0-9]+$ ]]; then
+        echo "错误: STRING_TO_VECTOR_THREADS 应为非负整数 (当前: '$STRING_TO_VECTOR_THREADS')" >&2
+        exit 1
+    fi
+}
+
+# 并行转换只在计划缓存命中、需要把参数文本还原成 Field 时才被调用, 所以在
+# 「服务器不支持该 setting」或「profile 没开计划缓存」时, profile 里写的 mode 是空转。
+# 这种 profile 会污染对比结果 (CSV 上写着 mode=1 其实走的是串行路径), 因此在测量前处理掉:
+#   - 服务器不支持: 若同一组缓存开关下已有 mode=0 的 profile, 直接删掉这些空转 profile,
+#     免得白跑一遍完全相同的配置 (拿未打补丁的 MyScale 当对照时就会走到这里);
+#   - 支持但该 profile 没开计划缓存: 把 mode 归零, 保留这个 profile 但如实记录为 0。
+normalize_string_to_vector_modes() {
+    local group name f1 f2 f3 f4 f5 f6 tuple
+    local -a kept=()
+    local -a seen_zero_tuples=()
+
+    if [ "$STRING_TO_VECTOR_FLAG" != "1" ]; then
+        # 先收集所有 mode=0 profile 的缓存开关组合, 作为「已有等价基线」的依据
+        for group in "${SETTINGS_GROUPS[@]}"; do
+            IFS='|' read -r name f1 f2 f3 f4 f5 f6 <<< "$group"
+            [ "${f6:-0}" = "0" ] && seen_zero_tuples+=("${f1}|${f2}|${f3}|${f4}|${f5}")
+        done
+    fi
+
+    local dropped=""
+    local zeroed=""
+    for group in "${SETTINGS_GROUPS[@]}"; do
+        IFS='|' read -r name f1 f2 f3 f4 f5 f6 <<< "$group"
+        f6="${f6:-0}"
+        if [ "$f6" = "0" ]; then
+            kept+=("$group")
+            continue
+        fi
+        tuple="${f1}|${f2}|${f3}|${f4}|${f5}"
+        if [ "$STRING_TO_VECTOR_FLAG" != "1" ]; then
+            # 服务器没有这个 setting: 有等价基线就删 (基线自己一定在 kept 里, 不会删空),
+            # 否则退化成 mode=0 照常测
+            if printf '%s\n' "${seen_zero_tuples[@]}" | grep -qxF "$tuple"; then
+                dropped="$dropped $name"
+                continue
+            fi
+            kept+=("${name}|${f1}|${f2}|${f3}|${f4}|${f5}|0")
+            zeroed="$zeroed $name"
+        elif [ "$f2" != "1" ]; then
+            # 没开计划缓存: mode 不会生效, 如实记为 0
+            kept+=("${name}|${f1}|${f2}|${f3}|${f4}|${f5}|0")
+            zeroed="$zeroed $name"
+        else
+            kept+=("$group")
+        fi
+    done
+
+    SETTINGS_GROUPS=("${kept[@]}")
+    if [ -n "$dropped" ]; then
+        echo "  提示: 服务器不支持 string_to_vector_parallel_mode, 已移除等价的并行 profile:${dropped}"
+    fi
+    if [ -n "$zeroed" ]; then
+        echo "  提示: 这些 profile 的 mode 不会生效 (缺少计划缓存或服务器不支持该 setting), 已按 mode=0 记录:${zeroed}"
+    fi
+}
+
+validate_string_to_vector_threads
 
 case "$ENGINE" in
     clickhouse|myscale) ;;
@@ -196,6 +305,27 @@ detect_perf_test_flag() {
         echo "  ✓ 服务器支持 enable_vector_performance_test, 将在 SQL 文件头部写入 SET 行"
     else
         echo "  提示: 服务器不支持 enable_vector_performance_test (per-query SETTINGS 将不会进入计划缓存探测)"
+    fi
+}
+
+# 服务器是否支持并行字符串→向量转换的两个 setting
+# (string_to_vector_parallel_mode / string_to_vector_parallel_threads)。
+# 不支持时收敛为基线组合 0:0, 使本脚本仍可直接跑在未含该功能的服务器上。
+# 0/1/未检测三种状态; 检测失败时视为不支持。
+STRING_TO_VECTOR_FLAG=""
+detect_string_to_vector_support() {
+    if [ -n "$STRING_TO_VECTOR_FLAG" ]; then
+        return
+    fi
+    local cnt
+    cnt=$("$CLICKHOUSE" client --host "$HOST" --port "$PORT" \
+        --query "SELECT count() FROM system.settings WHERE name='string_to_vector_parallel_mode'" 2>/dev/null) || true
+    STRING_TO_VECTOR_FLAG="$(echo "${cnt:-0}" | tr -dc '0-9')"
+
+    if [ "$STRING_TO_VECTOR_FLAG" = "1" ]; then
+        echo "  ✓ 服务器支持 string_to_vector_parallel_mode/threads, profile 里配的并行模式会真正生效"
+    else
+        echo "  提示: 服务器不支持 string_to_vector_parallel_mode/threads, profile 里的并行模式会退化为 mode=0"
     fi
 }
 
@@ -463,24 +593,39 @@ build_settings_clause() {
 # 的装配方式一致)。计划缓存等开关必须在会话级设置: 内联 SETTINGS 子句会为每条查询
 # 增加一次解析开销, 实测使 plan_cache QPS 反而低于 off; 会话级 SET 只在连接建立时付一次,
 # plan_cache 相对 off 有 ~+20% 的真实收益。
+# 第 6/7 个参数是并行字符串→向量转换的 mode/threads; 服务器不支持时不会写进 SET 行。
 session_set_line_for_profile() {
     local f1="$1"
     local f2="$2"
     local f3="$3"
     local f4="$4"
     local f5="$5"
+    local sv_mode="${6:-0}"
+    local sv_threads="${7:-0}"
+
+    local sv_suffix=""
+    if [ "$STRING_TO_VECTOR_FLAG" = "1" ]; then
+        sv_suffix=", string_to_vector_parallel_mode = ${sv_mode}, string_to_vector_parallel_threads = ${sv_threads}"
+    fi
 
     if [ "$ENGINE" = "myscale" ]; then
-        echo "SET use_query_cache = ${f1}, enable_query_plan_cache = ${f2}, enable_cast_vector = ${f3}, query_plan_cache_only_vector = ${f4}, only_cache_query_plan = ${f5}"
+        echo "SET use_query_cache = ${f1}, enable_query_plan_cache = ${f2}, enable_cast_vector = ${f3}, query_plan_cache_only_vector = ${f4}, only_cache_query_plan = ${f5}${sv_suffix}"
     else
-        echo "SET use_query_cache = ${f1}, vector_query_plan_cache = ${f2}, vector_only_cache_query_plan = ${f3}, vector_query_plan_cache_only_vector = ${f4}, vector_use_cast = ${f5}"
+        echo "SET use_query_cache = ${f1}, vector_query_plan_cache = ${f2}, vector_only_cache_query_plan = ${f3}, vector_query_plan_cache_only_vector = ${f4}, vector_use_cast = ${f5}${sv_suffix}"
     fi
 }
 
 validate_settings_groups() {
-    local group profile_name f1 f2 f3 f4 f5
+    local group profile_name f1 f2 f3 f4 f5 f6
     for group in "${SETTINGS_GROUPS[@]}"; do
-        IFS='|' read -r profile_name f1 f2 f3 f4 f5 <<< "$group"
+        IFS='|' read -r profile_name f1 f2 f3 f4 f5 f6 <<< "$group"
+        # 可选第 7 字段: 字符串→向量转换的并行模式 (0=串行, 1=块式, 2=轮转式)
+        if [ -n "$f6" ]; then
+            case "$f6" in
+                0|1|2) ;;
+                *) echo "错误: settings profile '$profile_name' 非法: 第7个字段(并行模式)只支持 0/1/2 (当前: '$f6')" >&2; exit 1 ;;
+            esac
+        fi
         # 通用约束: 面向向量的开关 (f4=vector_query_plan_cache_only_vector / query_plan_cache_only_vector)
         # 依赖总开关 f2 已开启
         if [ "$f4" = "1" ] && [ "$f2" != "1" ]; then
@@ -666,6 +811,7 @@ echo "并发:   ${CONCURRENCIES[*]}"
 echo "类型:   ${SQL_TYPES[*]}"
 echo "行数:   ${ROW_COUNTS[*]}"
 echo "浮点解析 precise_float_parsing: ${PRECISE_FLOAT_PARSING_VALUES[*]}"
+echo "并行转换: 模式随 profile 配置 (SETTINGS_GROUPS 第7字段), threads=${STRING_TO_VECTOR_THREADS}"
 echo "输出:   $OUTPUT_CSV"
 echo "=============================================="
 echo ""
@@ -834,6 +980,48 @@ TMPDIR=$(mktemp -d)
 trap "rm -rf $TMPDIR" EXIT
 
 detect_perf_test_flag
+detect_string_to_vector_support
+
+# profile 里写的 mode 在「服务器不支持」或「没开计划缓存」时不会生效, 测量前先如实处理
+normalize_string_to_vector_modes
+
+# 生效的 mode: 只有既支持该 setting、又开了计划缓存的 profile 才能真正走到并行路径
+string_to_vector_effective_modes=""
+string_to_vector_sv0_profiles=""
+for settings_group in "${SETTINGS_GROUPS[@]}"; do
+    IFS='|' read -r _ep_name _ep_f1 _ep_f2 _ep_f3 _ep_f4 _ep_f5 _ep_f6 <<< "$settings_group"
+    if [ "${_ep_f6:-0}" != "0" ]; then
+        string_to_vector_effective_modes="${string_to_vector_effective_modes:+${string_to_vector_effective_modes} }${_ep_name}=${_ep_f6}"
+    else
+        string_to_vector_sv0_profiles="${string_to_vector_sv0_profiles:+${string_to_vector_sv0_profiles} }${_ep_name}"
+    fi
+done
+if [ -n "$string_to_vector_effective_modes" ]; then
+    echo "  并行转换 mode (计划缓存开启的 profile): ${string_to_vector_effective_modes}, threads=${STRING_TO_VECTOR_THREADS}"
+    echo "  其余 profile 为 mode=0:${string_to_vector_sv0_profiles:-(无)}"
+else
+    echo "  并行转换: 所有 profile 都是 mode=0 (未启用并行字符串→向量转换)"
+fi
+if [ "$VERIFY_PARALLEL_MODES" = "1" ]; then
+    if [ "$STRING_TO_VECTOR_FLAG" = "1" ]; then
+        echo "  并行转换一致性校验: 开启 (基准测试前先比对各模式查询结果)"
+    else
+        echo "  并行转换一致性校验: 已请求但服务器不支持该 setting, 跳过"
+    fi
+fi
+if [ -n "$string_to_vector_effective_modes" ]; then
+    echo "  注意: 若 mode=1/2 的 QPS 与 mode=0 完全相同, 先确认该查询是否只带一个向量字面量 ——"
+    echo "        批大小为 1 时会按设计退回串行 (thread_count<2), 并行模式不生效属于预期, 不是 bug。"
+    max_concurrency=0
+    for c in "${CONCURRENCIES[@]}"; do
+        [ "$c" -gt "$max_concurrency" ] && max_concurrency="$c"
+    done
+    if [ "$STRING_TO_VECTOR_THREADS" -gt 0 ] && [ $((STRING_TO_VECTOR_THREADS * max_concurrency)) -gt 32 ]; then
+        echo "  注意: threads(${STRING_TO_VECTOR_THREADS}) × concurrency(${max_concurrency}) = $((STRING_TO_VECTOR_THREADS * max_concurrency)) 个转换线程, 可能超出本机核数造成超订,"
+        echo "        观察到的 QPS 差异里会混入调度开销; 建议把 threads 控制在并发数以内做对比。"
+    fi
+fi
+echo ""
 
 # ---- Step 5: 预热服务端 ----
 echo ">>> Step 5: 预热服务端 (${WARMUP_TIMELIMIT}秒)"
@@ -841,9 +1029,9 @@ echo ""
 
 warmup_sql_file=""
 for table in "${TABLES[@]}"; do
-    for settings_group in "${SETTINGS_GROUPS[@]}"; do
-        IFS='|' read -r profile_name _ <<< "$settings_group"
-        for sql_type in "${SQL_TYPES[@]}"; do
+    for sql_type in "${SQL_TYPES[@]}"; do
+        for settings_group in "${SETTINGS_GROUPS[@]}"; do
+            IFS='|' read -r profile_name _ <<< "$settings_group"
             for row_count in "${ROW_COUNTS[@]}"; do
                 candidate="$SQL_DIR/${table}_${profile_name}_${sql_type}_${row_count}.sql"
                 if [ -f "$candidate" ]; then
@@ -887,6 +1075,152 @@ else
 fi
 echo ""
 
+# ---- Step 5.5: 并行转换结果一致性校验 (可选, VERIFY_PARALLEL_MODES=1) ----
+# 并行转换只在「计划缓存命中、把参数文本还原成 Field」时才被调用, 所以校验必须让
+# 每条查询跑两遍: 第一遍写缓存, 第二遍命中并走被测代码。各组合的会话 SET 行不同,
+# 因此各自是独立的缓存 key, 互不干扰。
+#
+# 一致 ≠ 校验有效: 若计划缓存一次都没命中 (例如会话级 SET 没在缓存探测前生效),
+# 第二遍走的还是普通路径, 此时各组合「结果一致」是废话。所以下面用 system.events
+# 的 QueryPlanCacheHits 累计计数器量出第二遍的真实命中数, 命中为 0 直接报错。
+read_plan_cache_hits() {
+    local value
+    value=$("$CLICKHOUSE" client --host "$HOST" --port "$PORT" \
+        --query "SELECT value FROM system.events WHERE name = 'QueryPlanCacheHits'" 2>/dev/null)
+    echo "${value:-0}"
+}
+if [ "$VERIFY_PARALLEL_MODES" = "1" ] && [ "$STRING_TO_VECTOR_FLAG" = "1" ]; then
+    echo ">>> Step 5.5: 并行转换结果一致性校验"
+    echo ""
+    verify_sample="${VERIFY_SAMPLE_QUERIES:-20}"
+
+    # 比对的对象是「同一组缓存开关、只有 mode 不同」的 profile (即同一 profile 的 mode 变体),
+    # 所以先取第一个开了计划缓存的 profile, 用它前 5 个字段作为比对键, 把同键的 profile 都找出来。
+    verify_key=""
+    verify_base_spec=""
+    for settings_group in "${SETTINGS_GROUPS[@]}"; do
+        IFS='|' read -r vp_name vp_f1 vp_f2 vp_f3 vp_f4 vp_f5 _vp_f6 <<< "$settings_group"
+        if [ "$vp_f2" = "1" ]; then
+            verify_key="${vp_f1}|${vp_f2}|${vp_f3}|${vp_f4}|${vp_f5}"
+            verify_base_spec="$settings_group"
+            break
+        fi
+    done
+
+    verify_variants=()
+    if [ -n "$verify_key" ]; then
+        for settings_group in "${SETTINGS_GROUPS[@]}"; do
+            IFS='|' read -r vp_name vp_f1 vp_f2 vp_f3 vp_f4 vp_f5 _vp_f6 <<< "$settings_group"
+            [ "${vp_f1}|${vp_f2}|${vp_f3}|${vp_f4}|${vp_f5}" = "$verify_key" ] && verify_variants+=("$settings_group")
+        done
+    fi
+
+    if [ -z "$verify_key" ]; then
+        echo "  警告: SETTINGS_GROUPS 里没有打开计划缓存的 profile, 无法校验 (并行转换只在缓存命中时生效)"
+    elif [ ${#verify_variants[@]} -lt 2 ]; then
+        echo "  提示: 同一组缓存开关下只有 1 个 profile, 没有可比的 mode 变体, 跳过;"
+        echo "        在 SETTINGS_GROUPS 里给同一组开关再加几行、只在第 7 字段写 1/2 即可对比, 例如:"
+        echo "          \"plan_cache_blocked|0|1|0|0|0|1\""
+        echo "          \"plan_cache_cyclic|0|1|0|0|0|2\""
+    else
+        echo "  校验: 同一组缓存开关下的 ${#verify_variants[@]} 个 mode 变体, 每个取前 ${verify_sample} 条查询, 跑两遍取第二遍输出"
+        echo ""
+
+        for table in "${TABLES[@]}"; do
+            # 只用基准 profile 的 SQL 文件: mode 只写进会话级 SET 行, 不写进生成的 SQL,
+            # 所以同一组缓存开关下各 mode 变体的查询文本完全一致。
+            IFS='|' read -r vp_name vp_f1 vp_f2 vp_f3 vp_f4 vp_f5 _vp_f6 <<< "$verify_base_spec"
+            verify_sql_file="$SQL_DIR/${table}_${vp_name}_normal_${ROW_COUNTS[0]}.sql"
+            if [ ! -f "$verify_sql_file" ]; then
+                echo "  ⚠ 表 $table: 找不到校验用 SQL 文件, 跳过: $verify_sql_file"
+                continue
+            fi
+
+            reference_out=""
+            reference_combo=""
+            verify_mismatch=0
+            verify_total_hits=0
+
+            for settings_group in "${verify_variants[@]}"; do
+                IFS='|' read -r vp_name vp_f1 vp_f2 vp_f3 vp_f4 vp_f5 vp_f6 <<< "$settings_group"
+                vc_mode="${vp_f6:-0}"
+                svc="${vp_name}(mode=${vc_mode})"
+                verify_run_file="$TMPDIR/verify_${table}_${vp_name}_mode${vc_mode}.sql"
+                {
+                    # 这里用 clickhouse client --multiquery, 它按分号切分语句, 所以每条 SET
+                    # 都必须带 ';'; 查询行的 ';' 排在行尾内联 SETTINGS 之后, 被剥掉时会一并
+                    # 吃掉, 因此 sed 的替换结果直接补一个 ';' 而不是留空。
+                    if [ "$PERF_TEST_FLAG" = "1" ]; then
+                        echo "SET enable_vector_performance_test = 1;"
+                    fi
+                    # 计划缓存探测在 AST 解析之前: 只有开启轻量预扫 (上面这行 SET) 的会话,
+                    # 会话级 SET 才会在探测前生效, 从而让第二遍真的命中缓存。
+                    printf '%s;\n' "$(session_set_line_for_profile \
+                        "$vp_f1" "$vp_f2" "$vp_f3" "$vp_f4" "$vp_f5" "$vc_mode" "$STRING_TO_VECTOR_THREADS")"
+                    sed 's/ SETTINGS .*$/;/' "$verify_sql_file" | head -n "$verify_sample"
+                } > "$verify_run_file"
+
+                verify_out_file="$TMPDIR/verify_${table}_${vp_name}_mode${vc_mode}.out"
+                verify_err_file="$TMPDIR/verify_${table}_${vp_name}_mode${vc_mode}.err"
+                verify_probe_err="$TMPDIR/verify_${table}_${vp_name}_mode${vc_mode}.probe.err"
+
+                # 第一遍: 写缓存 (结果丢弃)。同时用它的报错探测本 fork 的既有问题 ——
+                # 会话级 enable_query_plan_cache=1 会让普通查询报
+                # "ReadFromStorage cannot be cloned without pipe_builder"; 真要撞上说明
+                # 这个环境上该校验不适用, 明确跳过, 而不是把失败当成「结果不一致」。
+                "$CLICKHOUSE" client --host "$HOST" --port "$PORT" --multiquery \
+                    < "$verify_run_file" > /dev/null 2>"$verify_probe_err" || true
+                if grep -q "cannot be cloned without pipe_builder" "$verify_probe_err" 2>/dev/null; then
+                    echo "  ⚠ 表 $table: 本 fork 上会话级 enable_query_plan_cache=1 会使普通查询报 pipe_builder 错误, 校验不适用, 跳过"
+                    verify_mismatch=2
+                    break
+                fi
+
+                # 第二遍: 命中缓存 -> 走字符串转向量/参数还原。
+                # 用 system.events 的 QueryPlanCacheHits 累计计数器量出这一遍的真实命中数:
+                # 一致但 0 命中 = 没走到被测代码, 是假通过。
+                verify_hits_before=$(read_plan_cache_hits)
+                if ! "$CLICKHOUSE" client --host "$HOST" --port "$PORT" --multiquery \
+                    < "$verify_run_file" > "$verify_out_file" 2>"$verify_err_file"; then
+                    echo "  ✗ 表 $table 变体 ${svc}: 查询执行失败"
+                    tail -3 "$verify_err_file" 2>/dev/null | sed 's/^/      /'
+                    verify_mismatch=1
+                    continue
+                fi
+                verify_hits=$(( $(read_plan_cache_hits) - verify_hits_before ))
+                verify_total_hits=$((verify_total_hits + verify_hits))
+                if [ "$verify_hits" -le 0 ]; then
+                    echo "  ⚠ 表 $table 变体 ${svc}: 本遍计划缓存 0 命中, 结果比对未覆盖参数还原路径"
+                fi
+
+                if [ -z "$reference_out" ]; then
+                    reference_out="$verify_out_file"
+                    reference_combo="$svc"
+                    echo "  表 $table 变体 ${svc}: 记录为基准 ($(wc -l < "$verify_out_file") 行输出, 命中 ${verify_hits})"
+                elif cmp -s "$reference_out" "$verify_out_file"; then
+                    echo "  ✓ 表 $table 变体 ${svc}: 与基准 ${reference_combo} 结果一致 (命中 ${verify_hits})"
+                else
+                    echo "  ✗ 表 $table 变体 ${svc}: 与基准 ${reference_combo} 结果不一致!"
+                    (diff "$reference_out" "$verify_out_file" 2>/dev/null || true) | head -10 | sed 's/^/      /'
+                    verify_mismatch=1
+                fi
+            done
+
+            if [ "$verify_mismatch" = "2" ]; then
+                : # 已在上面提示不适用
+            elif [ "$verify_mismatch" != "0" ]; then
+                echo "  ✗ 表 $table: 各 mode 变体结果存在差异, 请先排查转换逻辑再采信 QPS 数据"
+            elif [ -n "$reference_out" ] && [ "$verify_total_hits" -le 0 ]; then
+                echo "  ⚠ 表 $table: 各变体结果一致, 但全程计划缓存 0 命中 —— 未覆盖参数还原路径, 不能据此判定实现正确"
+            elif [ -n "$reference_out" ]; then
+                echo "  ✓ 表 $table: 各 mode 变体结果一致 (第二遍共计划缓存命中 ${verify_total_hits} 次, 已覆盖参数还原路径)"
+            fi
+            echo ""
+        done
+    fi
+    echo ""
+fi
+
 # ---- Step 6: 运行基准测试 ----
 echo ">>> Step 6: 运行基准测试"
 echo ""
@@ -898,7 +1232,7 @@ if [ "$ENGINE" = "myscale" ]; then
 else
     NEW_HEADER="${NEW_HEADER},use_query_cache,vector_query_plan_cache,vector_only_cache_query_plan,vector_query_plan_cache_only_vector,vector_use_cast"
 fi
-NEW_HEADER="${NEW_HEADER},precise_float_parsing,sql_type,row_count,concurrency"
+NEW_HEADER="${NEW_HEADER},precise_float_parsing,string_to_vector_mode,string_to_vector_threads,sql_type,row_count,concurrency"
 for i in $(seq 1 $REPEAT); do
     NEW_HEADER="${NEW_HEADER},run_${i}"
 done
@@ -916,7 +1250,15 @@ else
         backup_file="${OUTPUT_CSV}.$(date '+%Y%m%d%H%M%S').bak"
         cp "$OUTPUT_CSV" "$backup_file"
         echo "CSV 表头不匹配，已备份旧文件到: $backup_file"
-        if echo "$existing_header" | grep -q '^engine,'; then
+        if echo "$existing_header" | grep -q ',precise_float_parsing,sql_type,row_count,concurrency'; then
+            # 本次改动前的结构: 在 precise_float_parsing 之后补两列并行转换维度
+            echo "迁移旧数据: 为每行插入 string_to_vector_mode/threads=not_recorded 列..."
+            tmp_csv=$(mktemp)
+            echo "$NEW_HEADER" > "$tmp_csv"
+            tail -n +2 "$OUTPUT_CSV" | awk -F',' 'BEGIN {OFS=","} {for (i=1; i<=11; ++i) printf "%s%s", $i, OFS; printf "not_recorded,not_recorded"; for (i=12; i<=NF; ++i) printf "%s%s", OFS, $i; printf "\n"}' >> "$tmp_csv"
+            mv "$tmp_csv" "$OUTPUT_CSV"
+            echo "迁移完成"
+        elif echo "$existing_header" | grep -q '^engine,'; then
             # engine 已在首列但列结构不同 (通常是混用了另一个引擎的结果文件), 无法对齐
             echo "$NEW_HEADER" > "$OUTPUT_CSV"
             echo "无法自动迁移 (引擎/列结构不匹配)，已创建新表头"
@@ -959,40 +1301,55 @@ echo ""
 echo "开始测试 ($(date '+%Y-%m-%d %H:%M:%S'))"
 echo ""
 
-for settings_group in "${SETTINGS_GROUPS[@]}"; do
-    IFS='|' read -r profile_name val_use_query_cache val_query_plan_cache val_cast_or_only_plan val_only_vector val_fifth <<< "$settings_group"
+# mode / threads 只写进运行副本头部的会话级 SET 行, 不写进生成的 SQL。因此每个
+# profile (含 plan_cache 的 mode=1/2 变体) 各自是独立的计划缓存 key, 互不命中;
+# 每个 profile 开始前清缓存, 首行 QPS 口径一致。
+for sql_type in "${SQL_TYPES[@]}"; do
+    echo "############################################################"
+    echo "# SQL 类型: $sql_type  (外层循环: 先跑完该类型下的所有 profile)"
+    echo "############################################################"
+    echo ""
+    for settings_group in "${SETTINGS_GROUPS[@]}"; do
+        IFS='|' read -r profile_name val_use_query_cache val_query_plan_cache val_cast_or_only_plan val_only_vector val_fifth val_sv_mode <<< "$settings_group"
+        val_sv_mode="${val_sv_mode:-0}"
 
-    # 每个 profile 从空缓存开始, 保证首行 QPS 口径一致
-    drop_caches_for_profile "$val_query_plan_cache"
-
-    for table in "${TABLES[@]}"; do
-        echo "╔══════════════════════════════════════════════════════════════╗"
-        echo "║ 引擎: $ENGINE"
-        echo "║ 表: $table"
-        echo "║   向量列: ${TABLE_VEC_COL[$table]}"
-        echo "║   维度: ${TABLE_DIM[$table]}"
-        echo "║   距离函数: $DISTANCE_FUNC"
-        echo "║   配置 Profile: $profile_name"
-        if [ "$ENGINE" = "myscale" ]; then
-            echo "║   use_query_cache=$val_use_query_cache"
-            echo "║   enable_query_plan_cache=$val_query_plan_cache"
-            echo "║   enable_cast_vector=$val_cast_or_only_plan"
-            echo "║   query_plan_cache_only_vector=$val_only_vector"
-            echo "║   only_cache_query_plan=$val_fifth"
-        else
-            echo "║   use_query_cache=$val_use_query_cache"
-            echo "║   vector_query_plan_cache=$val_query_plan_cache"
-            echo "║   vector_only_cache_query_plan=$val_cast_or_only_plan"
-            echo "║   vector_query_plan_cache_only_vector=$val_only_vector"
-            echo "║   vector_use_cast=$val_fifth"
+        if [ "$val_sv_mode" != "0" ]; then
+            echo "############################################################"
+            echo "# profile: ${profile_name}  string_to_vector_parallel_mode=${val_sv_mode}, threads=${STRING_TO_VECTOR_THREADS}"
+            echo "############################################################"
+            echo ""
         fi
-        echo "╚══════════════════════════════════════════════════════════════╝"
-        echo ""
 
-        for precise_float_parsing in "${PRECISE_FLOAT_PARSING_VALUES[@]}"; do
-            echo "  precise_float_parsing=$precise_float_parsing"
-            for sql_type in "${SQL_TYPES[@]}"; do
+
+        for table in "${TABLES[@]}"; do
+            echo "╔══════════════════════════════════════════════════════════════╗"
+            echo "║ 引擎: $ENGINE"
+            echo "║ 表: $table"
+            echo "║   向量列: ${TABLE_VEC_COL[$table]}"
+            echo "║   维度: ${TABLE_DIM[$table]}"
+            echo "║   距离函数: $DISTANCE_FUNC"
+            echo "║   配置 Profile: $profile_name"
+            if [ "$ENGINE" = "myscale" ]; then
+                echo "║   use_query_cache=$val_use_query_cache"
+                echo "║   enable_query_plan_cache=$val_query_plan_cache"
+                echo "║   enable_cast_vector=$val_cast_or_only_plan"
+                echo "║   query_plan_cache_only_vector=$val_only_vector"
+                echo "║   only_cache_query_plan=$val_fifth"
+            else
+                echo "║   use_query_cache=$val_use_query_cache"
+                echo "║   vector_query_plan_cache=$val_query_plan_cache"
+                echo "║   vector_only_cache_query_plan=$val_cast_or_only_plan"
+                echo "║   vector_query_plan_cache_only_vector=$val_only_vector"
+                echo "║   vector_use_cast=$val_fifth"
+            fi
+            echo "╚══════════════════════════════════════════════════════════════╝"
+            echo ""
+
+            for precise_float_parsing in "${PRECISE_FLOAT_PARSING_VALUES[@]}"; do
+                echo "  precise_float_parsing=$precise_float_parsing"
                 for row_count in "${ROW_COUNTS[@]}"; do
+                    # 每个批量查询从空缓存开始, 保证首行 QPS 口径一致
+                    drop_caches_for_profile "$val_query_plan_cache"
                     sql_file="$SQL_DIR/${table}_${profile_name}_${sql_type}_${row_count}.sql"
 
                     if [ ! -f "$sql_file" ]; then
@@ -1010,11 +1367,11 @@ for settings_group in "${SETTINGS_GROUPS[@]}"; do
                     # 头部写本 profile 的 SET 行, 并用 sed 剥掉每条查询行尾内联的
                     # SETTINGS 子句, 使发到服务端的 SQL 是纯查询文本 (缓存按同一文本命中)。
                     # 关闭 --randomize: 保证 SET 行与该文件后续查询在同一条会话上按序执行。
-                    run_file="$TMPDIR/run_${table}_${profile_name}_${sql_type}_${row_count}.sql"
+                    run_file="$TMPDIR/run_${table}_${profile_name}_${sql_type}_${row_count}_sv${val_sv_mode}.sql"
                     profile_set_line=$(session_set_line_for_profile \
                         "$val_use_query_cache" "$val_query_plan_cache" \
                         "$val_cast_or_only_plan" "$val_only_vector" \
-                        "$val_fifth")
+                        "$val_fifth" "$val_sv_mode" "$STRING_TO_VECTOR_THREADS")
                     {
                         if [ "$PERF_TEST_FLAG" = "1" ]; then
                             echo "SET enable_vector_performance_test = 1"
@@ -1025,7 +1382,7 @@ for settings_group in "${SETTINGS_GROUPS[@]}"; do
                     randomize_opts=()
 
                     echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-                    echo " 表: $table  Profile: $profile_name  precise_float_parsing=$precise_float_parsing  SQL: ${sql_type}_${row_count}.sql ($actual_queries 条查询)"
+                    echo " 表: $table  Profile: $profile_name  precise_float_parsing=$precise_float_parsing  string_to_vector=mode${val_sv_mode}/threads${STRING_TO_VECTOR_THREADS}  SQL: ${sql_type}_${row_count}.sql ($actual_queries 条查询)"
                     echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 
                     for concurrency in "${CONCURRENCIES[@]}"; do
@@ -1094,10 +1451,10 @@ for settings_group in "${SETTINGS_GROUPS[@]}"; do
                         echo ""
 
                         if [ "$ENGINE" = "myscale" ]; then
-                        csv_line="${ENGINE},${table},${DISTANCE_FUNC},${TABLE_INDEX_STATUS[$table]},${profile_name},${val_use_query_cache},${val_query_plan_cache},${val_cast_or_only_plan},${val_only_vector},${val_fifth},${precise_float_parsing},${sql_type},${row_count},${concurrency}"
-                    else
-                        csv_line="${ENGINE},${table},${DISTANCE_FUNC},${TABLE_INDEX_STATUS[$table]},${profile_name},${val_use_query_cache},${val_query_plan_cache},${val_cast_or_only_plan},${val_only_vector},${val_fifth},${precise_float_parsing},${sql_type},${row_count},${concurrency}"
-                    fi
+                        csv_line="${ENGINE},${table},${DISTANCE_FUNC},${TABLE_INDEX_STATUS[$table]},${profile_name},${val_use_query_cache},${val_query_plan_cache},${val_cast_or_only_plan},${val_only_vector},${val_fifth},${precise_float_parsing},${val_sv_mode},${STRING_TO_VECTOR_THREADS},${sql_type},${row_count},${concurrency}"
+                        else
+                            csv_line="${ENGINE},${table},${DISTANCE_FUNC},${TABLE_INDEX_STATUS[$table]},${profile_name},${val_use_query_cache},${val_query_plan_cache},${val_cast_or_only_plan},${val_only_vector},${val_fifth},${precise_float_parsing},${val_sv_mode},${STRING_TO_VECTOR_THREADS},${sql_type},${row_count},${concurrency}"
+                        fi
                         for v in "${qps_values[@]}"; do
                             csv_line="${csv_line},${v}"
                         done
@@ -1106,14 +1463,14 @@ for settings_group in "${SETTINGS_GROUPS[@]}"; do
                         done
                         csv_line="${csv_line},${qps_avg},${qps_min},${qps_max}"
                         echo "$csv_line" >> "$OUTPUT_CSV"
-                    done
+                    done    # for concurrency
 
                     echo ""
-                done
-            done
-        done
-    done
-done
+                done    # for row_count
+            done    # for precise_float_parsing
+        done    # for table
+    done    # for settings_group in SETTINGS_GROUPS
+done    # for sql_type in SQL_TYPES
 
 echo "=============================================="
 echo " 测试完成! ($(date '+%Y-%m-%d %H:%M:%S'))"

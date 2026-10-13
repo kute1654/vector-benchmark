@@ -20,6 +20,105 @@ CSV_RESULTS_FILE = RESULTS_DIR / "benchmark_results.csv"
 # PGvector / PolarDB write to their own CSV (different column schema than MyScale/ClickHouse)
 PGVECTOR_CSV_FILE = RESULTS_DIR / "pgvector_benchmark_results.csv"
 
+# Column order for PGVECTOR_CSV_FILE.  vector_in_parse_mode (pgvector:
+# vector.in_parse_mode / polardb: pase_in_parse_mode) is a swept dimension of
+# the text->vector parser comparison, so it must be recorded per row.
+PGVECTOR_CSV_FIELDS = [
+    'timestamp', 'experiment_name', 'dataset', 'vector_size', 'rows', 'distance',
+    'sql_type', 'vector_in_parse_mode', 'use_cache', 'use_query_cache', 'parallel',
+    'test_duration', 'ef_s', 'rps', 'recall', 'mean_precisions', 'mrr',
+    'mean_time', 'p95_time', 'p99_time',
+]
+
+# Column order for CSV_RESULTS_FILE (MyScale).  string_to_vector_mode /
+# string_to_vector_threads (setting string_to_vector_parallel_mode: 0=serial,
+# 1=blocked, 2=cyclic; threads fixed) are the swept dimension of the MyScale
+# fork's parallel string->vector conversion, so they sit next to sql_type.
+# Same column names as bash-test/clickhouse-benchmark.sh writes, so both CSVs
+# can be analysed together.
+MYSCALE_CSV_FIELDS = [
+    'timestamp', 'experiment_name', 'dataset', 'vector_size', 'distance',
+    'use_query_plan_cache', 'query_plan_cache_enable_CAST',
+    'query_plan_cache_only_vector', 'vector_only_cache_query_plan',
+    'use_query_cache', 'string_to_vector_mode', 'string_to_vector_threads',
+    'sql_type', 'parallel', 'test_duration', 'ef_s',
+    'rps', 'recall', 'mean_precisions', 'mrr',
+]
+
+# string_to_vector_parallel_threads used when a config turns on the parallel
+# string->vector dimension but does not name a thread count.  Same default as
+# STRING_TO_VECTOR_THREADS in bash-test/clickhouse-benchmark.sh.
+SV_DEFAULT_THREADS = 8
+
+
+def string_to_vector_combos(upload_params: dict):
+    """Expand upload_params into the (mode, threads) pairs to benchmark.
+
+    Returns (configured, combos).  configured=False means the config does not
+    mention the parallel string->vector dimension at all, in which case we leave
+    the server setting alone (and record 0/0 in the CSV).
+    """
+    upload_params = upload_params or {}
+    modes = upload_params.get("string_to_vector_parallel_mode", None)
+    threads = upload_params.get("string_to_vector_parallel_threads", None)
+    if modes is None and threads is None:
+        return False, [(0, 0)]
+    if modes is None:
+        modes = [0]
+    elif not isinstance(modes, list):
+        modes = [modes]
+    if threads is None:
+        threads = [SV_DEFAULT_THREADS]
+    elif not isinstance(threads, list):
+        threads = [threads]
+    return True, [(m, t) for m in modes for t in threads]
+
+
+def string_to_vector_combos_for_row(cache_mode, configured: bool, combos):
+    """Narrow sv combos to what can actually take effect for one plan-cache mode.
+
+    The conversion only happens when a query plan (or its AST) is restored from
+    the plan cache, so with enable_query_plan_cache=0 every parallel mode is
+    unreachable: run one mode=0 row instead of N identical ones.  Mirrors
+    normalize_string_to_vector_modes in bash-test/clickhouse-benchmark.sh.
+    """
+    if configured and int(cache_mode) != 0:
+        return combos
+    return [(0, combos[0][1] if configured else 0)]
+
+
+def _ensure_csv_schema(path, fieldnames):
+    """Migrate an existing results CSV to the current header, if needed.
+
+    Older runs wrote the CSV without the newest columns.  Appending a wider row
+    to a narrower file would silently shift every value one column left, so
+    rewrite the file in place with the new header and pad the old rows with
+    empty values.
+    """
+    path = str(path)
+    if not os.path.exists(path):
+        return
+    with open(path, newline='') as f:
+        reader = csv.reader(f)
+        old_header = next(reader, None)
+        if old_header == fieldnames:
+            return
+        rows = list(reader)
+    tmp = path + ".migrating"
+    with open(tmp, 'w', newline='') as f:
+        writer = csv.writer(f)
+        writer.writerow(fieldnames)
+        for row in rows:
+            record = dict(zip(old_header or [], row))
+            writer.writerow([record.get(name, '') for name in fieldnames])
+    os.replace(tmp, path)
+    warn(f"migrated {path} header: added missing columns {set(fieldnames) - set(old_header or [])}")
+
+
+def _ensure_pgvector_csv_schema(fieldnames):
+    """Migration for PGVECTOR_CSV_FILE (see _ensure_csv_schema)."""
+    _ensure_csv_schema(PGVECTOR_CSV_FILE, fieldnames)
+
 
 class BaseClient:
     def __init__(
@@ -87,7 +186,9 @@ class BaseClient:
         parallel = (search_params or {}).get("parallel", 1)
         top = (search_params or {}).get("top", None)
         top_label = top if top is not None else "default"
-        experiments_file = (f"{self.name}-search-{search_id}-cache-{cache_mode}-CAST-{CAST_mode}-only_vector-{only_vector}-only_cache_query_plan-{only_cache_query_plan}-result_cache-{result_cache}-parallel-{parallel}"
+        sv_mode = (search_params or {}).get("string_to_vector_parallel_mode")
+        sv_label = "default" if sv_mode is None else str(sv_mode)
+        experiments_file = (f"{self.name}-search-{search_id}-cache-{cache_mode}-CAST-{CAST_mode}-only_vector-{only_vector}-only_cache_query_plan-{only_cache_query_plan}-result_cache-{result_cache}-sv_mode-{sv_label}-parallel-{parallel}"
                             f"-top-{top_label}-{timestamp}.json")
         step(f"saved search results: results/{experiments_file}")
         with open(RESULTS_DIR / experiments_file, "w") as out:
@@ -118,6 +219,11 @@ class BaseClient:
             search_results["only_vector"] = only_vector
             search_results["only_cache_query_plan"] = only_cache_query_plan
             search_results["use_result_cache"] = int(result_cache)
+            if sv_mode is not None:
+                search_results["string_to_vector_mode"] = int(sv_mode)
+                search_results["string_to_vector_threads"] = int(
+                    (search_params or {}).get("string_to_vector_parallel_threads", 0) or 0
+                )
             payload = {
                 "result_group": result_group,  # single search or hybrid search
                 "meta": meta,
@@ -256,9 +362,12 @@ class BaseClient:
                 "If that happens, reduce search_params.parallel in the config and the dataset queries_pool_size field in datasets.json (see README.md)."
             )
 
-    def save_to_csv(self, search_results, search_params, dataset_config, cache_mode, CAST_mode, only_vector, only_cache_query_plan, query_cache, sql_type="cast_array"):
+    def save_to_csv(self, search_results, search_params, dataset_config, cache_mode, CAST_mode, only_vector, only_cache_query_plan, query_cache, sql_type="cast_array", sv_mode=0, sv_threads=0):
         """
         Save benchmark results to CSV file with all required parameters for comparison.
+
+        sv_mode / sv_threads: the string->vector parallel conversion settings this
+        row ran with (MyScale fork); 0/0 when the dimension is not configured.
         """
         try:
             parallel = search_params.get("parallel", 0)
@@ -278,6 +387,8 @@ class BaseClient:
                 'query_plan_cache_only_vector': int(only_vector),
                 'vector_only_cache_query_plan': int(only_cache_query_plan),
                 'use_query_cache': int(query_cache),
+                'string_to_vector_mode': int(sv_mode),
+                'string_to_vector_threads': int(sv_threads),
                 'sql_type': sql_type,
                 'parallel': int(parallel),
                 'test_duration': int(test_duration),
@@ -289,16 +400,12 @@ class BaseClient:
             }
             
             file_exists = os.path.exists(CSV_RESULTS_FILE)
-            
+
+            _ensure_csv_schema(CSV_RESULTS_FILE, MYSCALE_CSV_FIELDS)
+
             with open(CSV_RESULTS_FILE, 'a', newline='') as csvfile:
-                fieldnames = [
-                    'timestamp', 'experiment_name', 'dataset', 'vector_size', 'distance',
-                    'use_query_plan_cache', 'query_plan_cache_enable_CAST', 
-                    'query_plan_cache_only_vector', 'vector_only_cache_query_plan', 
-                    'use_query_cache', 'sql_type', 'parallel', 'test_duration', 'ef_s',
-                    'rps', 'recall', 'mean_precisions', 'mrr'
-                ]
-                
+                fieldnames = MYSCALE_CSV_FIELDS
+
                 writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
                 
                 if not file_exists:
@@ -321,6 +428,10 @@ class BaseClient:
         vector_only_cache_query_plan = self.uploader.upload_params.get("vector_only_cache_query_plan", [0])
         use_query_cache = self.uploader.upload_params.get("use_query_cache", [0])
         sql_type_values = self.uploader.upload_params.get("sql_type", ["cast_array"])
+        # Parallel string->vector conversion (MyScale fork).  mode is the swept
+        # dimension; threads is a fixed value (like STRING_TO_VECTOR_THREADS in
+        # bash-test/clickhouse-benchmark.sh), but a list is accepted as an axis too.
+        sv_configured, sv_combos = string_to_vector_combos(self.uploader.upload_params)
         if not isinstance(use_query_plan_cache, list):
             use_query_plan_cache = [use_query_plan_cache]
         if not isinstance(query_plan_cache_enable_CAST, list):
@@ -334,11 +445,13 @@ class BaseClient:
         if not isinstance(sql_type_values, list):
             sql_type_values = [sql_type_values]
         for cache_mode in use_query_plan_cache:
+            row_sv_combos = string_to_vector_combos_for_row(cache_mode, sv_configured, sv_combos)
             for CAST_mode in query_plan_cache_enable_CAST:
                 for only_vector in query_plan_cache_only_vector:
                     for only_cache_query_plan in vector_only_cache_query_plan:
                         for query_cache in use_query_cache:
                             for sql_type in sql_type_values:
+                              for sv_mode, sv_threads in row_sv_combos:
                                 def with_cache_modes(search_params):
                                     params = dict(search_params or {})
                                     params["use_query_plan_cache"] = int(cache_mode)
@@ -347,6 +460,9 @@ class BaseClient:
                                     params["vector_only_cache_query_plan"] = int(only_cache_query_plan)
                                     params["use_query_cache"] = int(query_cache)
                                     params["sql_type"] = sql_type
+                                    if sv_configured:
+                                        params["string_to_vector_parallel_mode"] = int(sv_mode)
+                                        params["string_to_vector_parallel_threads"] = int(sv_threads)
                                     return params
 
                                 if self.searchers:
@@ -432,6 +548,8 @@ class BaseClient:
                                                 query_plan_cache_only_vector=effective_search_params.get("query_plan_cache_only_vector"),
                                                 vector_only_cache_query_plan=effective_search_params.get("vector_only_cache_query_plan"),
                                                 use_query_cache=effective_search_params.get("use_query_cache"),
+                                                string_to_vector_mode=effective_search_params.get("string_to_vector_parallel_mode"),
+                                                string_to_vector_threads=effective_search_params.get("string_to_vector_parallel_threads"),
                                                 sql_type=effective_search_params.get("sql_type"),
                                                 **params,
                                             )
@@ -517,6 +635,8 @@ class BaseClient:
                                             only_cache_query_plan=only_cache_query_plan,
                                             query_cache=query_cache,
                                             sql_type=sql_type,
+                                            sv_mode=sv_mode,
+                                            sv_threads=effective_search_params.get("string_to_vector_parallel_threads", 0),
                                         )
                                 if recall_only and recall_only_results:
                                     self.save_recall_only_results(recall_only_results)
@@ -1057,6 +1177,9 @@ class BaseClient:
                 'rows': vector_count,
                 'distance': getattr(dataset_config, 'distance', ''),
                 'sql_type': str(sql_type),
+                # engine-specific text->vector parser swept for this row
+                # (pgvector: vector.in_parse_mode; polardb: pase_in_parse_mode)
+                'vector_in_parse_mode': search_params.get('vector_in_parse_mode') or '',
                 'use_cache': int(use_cache),
                 'use_query_cache': int(result_cache),
                 'parallel': int(parallel),
@@ -1071,16 +1194,14 @@ class BaseClient:
                 'p99_time': search_results.get("p99_time", 0),
             }
 
-            # Write to CSV file
+            fieldnames = PGVECTOR_CSV_FIELDS
+            # Add the vector_in_parse_mode column to files written by older
+            # versions (pad existing rows with '') before appending, otherwise
+            # the new column would misalign every previously written row.
+            _ensure_pgvector_csv_schema(fieldnames)
             file_exists = os.path.exists(PGVECTOR_CSV_FILE)
 
             with open(PGVECTOR_CSV_FILE, 'a', newline='') as csvfile:
-                fieldnames = [
-                    'timestamp', 'experiment_name', 'dataset', 'vector_size', 'rows', 'distance',
-                    'sql_type', 'use_cache', 'use_query_cache', 'parallel', 'test_duration', 'ef_s',
-                    'rps', 'recall', 'mean_precisions', 'mrr', 'mean_time', 'p95_time', 'p99_time'
-                ]
-
                 writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
 
                 if not file_exists:

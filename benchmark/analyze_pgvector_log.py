@@ -1,39 +1,34 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-分析PGVECTOR时序日志，按 backend PID 汇总不同SQL语句的 parse/analyze/plan/exec/vector_in
-平均时间(去除每次执行单元内的第一次,即去掉缓存初始化/首次热路径)与执行次数，
-并结合 pgvector 结果CSV/JSON 的 RPS(QPS) 做验证，最终生成一张综合表格。
+汇总 pgvector 的 PGVECTOR_TIMING 时序日志, 按固定测试网格分组:
+循环序 vector_in_parse_mode -> sql_type -> enable_query_plan_cache -> use_query_cache
+(见 engine/base_client/client.py 与 configurations/config.json)。每个
+(cache, use_query_cache) 组合 = 1 预热 + 1 查询 PID(search_number=1), 输出
+parse/analyze/plan/exec/eval/gcp/vi/hv 耗时与次数(均去掉首次热路径), 并用结果
+CSV(experiment_name/sql_type/vector_in_parse_mode/use_cache/use_query_cache/rps/
+test_duration)交叉校验 est_QPS。
 
-设计依据
---------
-- 日志在 `/usr/local/pgsql/data/log/postgresql.log` 中，由 vector 模块输出：
-      simple_query parse=..ms analyze=..ms plan=..ms exec=..ms
-      vector_in     mode=.. dim=.. len=.. ms=.. at character ..
-  PID 即后端进程号，每个测试执行单元(warmup 或 search)都会新建连接 => 独立 PID，
-  因此不同 PID 之间无共用标识，只能按时间先后与客户端脚本的执行顺序比对。
-- 客户端 client.py 中对每个参数组合:
-      1) 预热(warmup): 新连接 ~1s
-      2) 实际查询(search): 新连接，时长=test_duration(=1s)，产生结果 JSON/CSV，含 RPS
-  故每个组合值对应 (warmup PID, search PID) 两个 PID，且两者 PID 不同。
-- 每个组合会写一个 pgvector-hnsw-laion-768-1m-ip-search-*.json 结果文件(run_date 升序
-  即为客户端执行顺序)，其 RPS 来自实际查询, 可用来验证日志中 exec 次数≈RPS。
+要点:
+- PID 即后端进程号, 每个测试执行单元新建连接 => 独立 PID; 仅含 PGVECTOR_TIMING 的行记账。
+- 每次连接会先跑若干 setup(SET...)非向量 simple_query, 按 cache 档位剔除
+  (cache 0 -> 5 条, 1/2/3 -> 7 条, 见 sq_drop_count), 再对余下向量查询统计。
+- 数组类 SQL 类型在 cache=0/2 走 array_to_vector, 耗时计入 vi 列。
+
+用法: python analyze_pgvector_log.py [--log ..] [--csv ..] [--out ..] [--dataset ..]
 """
 import re
 import os
 import sys
-import glob
 import json
 import csv
 import argparse
-from collections import defaultdict, OrderedDict
+from collections import OrderedDict
 
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 LOG_PATH = "/usr/local/pgsql/data/log/postgresql.log"
-CACHE_PATH = "/tmp/pgvector_timing_cache.json"
-RESULTS_DIR = "/home/vector-benchmark/benchmark/results"
-JSON_GLOB = os.path.join(RESULTS_DIR, "pgvector-hnsw-laion-768-1m-ip-search-*.json")
-CSV_PGVECTOR = os.path.join(RESULTS_DIR, "pgvector_benchmark_results.csv")
-OUT_TSV = os.path.join(RESULTS_DIR, "pgvector_log_analysis.tsv")
+RESULTS_DIR = os.path.join(BASE_DIR, "results")
+CONFIG_PATH = os.path.join(BASE_DIR, "configurations", "config.json")
 
 # 精确的日志行正则
 RE_TS = re.compile(r"^(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})\.\d+\s+(\S+)\s+\[(\d+)\]")
@@ -41,57 +36,154 @@ RE_SQ = re.compile(
     r"PGVECTOR_TIMING\] simple_query parse=([\d.]+)ms analyze=([\d.]+)ms "
     r"plan=([\d.]+)ms exec=([\d.]+)ms"
 )
+RE_EQ = re.compile(
+    r"PGVECTOR_TIMING\] execute_query eval_params=([\d.]+)ms "
+    r"get_cached_plan=([\d.]+)ms name=(\S+)"
+)
 RE_VI = re.compile(r"PGVECTOR_TIMING\] vector_in .*?ms=([\d.]+)")
+RE_HV = re.compile(r"PGVECTOR_TIMING\] halfvec_in .*?ms=([\d.]+)")
+# array_int_cast / array_real_cast / array_cast / array_to_vector_fn / with_array_cast
+# 这些 SQL 类型把实参经 ARRAY[...] / real[] 数组转换语义走 array_to_vector(源码
+# pgvector/src/vector.c 的 array_to_vector 已输出 PGVECTOR_TIMING), 而非 vector_in,
+# 因此 cache=0/2 时应作为“向量转换耗时”计入 vi, 与 vector_in 列口径一致。
+RE_ATV = re.compile(r"PGVECTOR_TIMING\] array_to_vector .*?ms=([\d.]+)")
 
 
-def parse_log(log_path=LOG_PATH):
-    """解析整份日志，返回 {pid: {'ts_first':.., 'ts_last':.., 'sq': [(p,a,pl,e),...], 'vi':[ms,...]}}"""
-    data = OrderedDict()
-    for line in open(log_path, "r", encoding="utf-8", errors="replace"):
-        if "PGVECTOR_TIMING] simple_query" not in line and "PGVECTOR_TIMING] vector_in" not in line:
-            continue
-        m = RE_TS.match(line)
-        if not m:
-            continue
-        ts, _, pid = m.group(1), m.group(2), m.group(3)
-        rec = data.setdefault(pid, {"ts_first": ts, "ts_last": ts, "sq": [], "vi": []})
-        rec["ts_last"] = ts
-        if "simple_query" in line:
-            sm = RE_SQ.search(line)
-            if sm:
-                rec["sq"].append(tuple(float(x) for x in sm.groups()))
-        else:
-            vm = RE_VI.search(line)
-            if vm:
-                rec["vi"].append(float(vm.group(1)))
-    return data
-
-
-def parse_log_cached(log_path=LOG_PATH, force=False):
-    """解析日志并缓存到 /tmp, 二次运行快速读取。缓存含 sq 元组列表，序列化为列表。"""
-    if not force and os.path.exists(CACHE_PATH):
-        try:
-            raw = json.load(open(CACHE_PATH, "r", encoding="utf-8"))
-            data = OrderedDict()
-            for pid, v in raw.items():
-                data[pid] = {
-                    "ts_first": v["ts_first"],
-                    "ts_last": v["ts_last"],
-                    "sq": [tuple(x) for x in v["sq"]],
-                    "vi": [float(x) for x in v["vi"]],
-                }
-            return data
-        except Exception:
-            pass
-    data = parse_log(log_path)
+# --------------------------------------------------------------------------- #
+# 结果 CSV / 配置读取
+# --------------------------------------------------------------------------- #
+def load_config(path=CONFIG_PATH):
+    """读取 configurations/config.json, 返回条目列表(容错)。"""
     try:
-        raw = {pid: {"ts_first": v["ts_first"], "ts_last": v["ts_last"],
-                     "sq": [list(x) for x in v["sq"]], "vi": v["vi"]}
-               for pid, v in data.items()}
-        with open(CACHE_PATH, "w", encoding="utf-8") as f:
-            json.dump(raw, f)
+        with open(path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        return data if isinstance(data, list) else []
     except Exception as e:
-        print(f"  (warn) 缓存写出失败: {e}", file=sys.stderr)
+        print(f"  (warn) 无法读取配置 {path}: {e}", file=sys.stderr)
+        return []
+
+
+def read_combos(csv_path):
+    """读取 pgvector 结果 CSV, 返回可按 (parse_mode, sql_type, cache, rc) 匹配的列表。"""
+    combos = []
+    if not os.path.exists(csv_path):
+        print(f"  (warn) 结果 CSV 不存在: {csv_path}", file=sys.stderr)
+        return combos
+    with open(csv_path, "r", encoding="utf-8", errors="replace") as f:
+        for r in csv.DictReader(f):
+            sql = (r.get("sql_type") or "").strip()
+            if not sql:
+                continue
+            try:
+                cache = int((r.get("use_cache") or "").strip())
+                rc = int((r.get("use_query_cache") or "").strip())
+            except (TypeError, ValueError):
+                continue
+            if cache < 0 or cache > 3 or rc not in (0, 1):
+                continue
+            combos.append({
+                "table": (r.get("experiment_name") or "").strip() or "pgvector",
+                "sql_type": sql, "cache": cache, "rc": rc,
+                "parse_mode": (r.get("vector_in_parse_mode") or "").strip(),
+                "qps": (r.get("rps") or "").strip(),
+                "test_duration": (r.get("test_duration") or "").strip(),
+                "ts": (r.get("timestamp") or "").strip(),
+            })
+    return combos
+
+
+def _num(v):
+    try:
+        return float(v)
+    except (TypeError, ValueError):
+        return None
+
+
+def config_cell_counts(cfg, table):
+    """折出 config.json 中某表一轮完整网格的预期组数; 未知返回 None。"""
+    for item in cfg:
+        if item.get("name") != table or str(item.get("engine")) != "pgvector":
+            continue
+        up = item.get("upload_params") or {}
+        return (len(up.get("vector_in_parse_mode", []) or [])
+                * len(up.get("sql_type", []) or [])
+                * len(up.get("enable_query_plan_cache", []) or [])
+                * len(up.get("use_query_cache", []) or [])
+                * int(up.get("search_number", 1) or 1))
+    return None
+
+
+def config_test_duration(cfg, table):
+    """取 config.json 中 pgvector 条目 table 的 search test_duration(秒); 未知 None。"""
+    for item in cfg:
+        if str(item.get("engine")) != "pgvector" or item.get("name") != table:
+            continue
+        v = (item.get("search_params") or {}).get("test_duration")
+        try:
+            return float(v)
+        except (TypeError, ValueError):
+            return None
+    return None
+
+
+def resolve_table(cfg, n_pids, target=None):
+    """推断被测 pgvector 表: target 优先, 否则取 config 中网格(组数×2 PID)与日志 PID 数一致者。"""
+    if target:
+        return target
+    for item in cfg:
+        if str(item.get("engine")) != "pgvector":
+            continue
+        n = config_cell_counts(cfg, item.get("name"))
+        if n and n * len(LAYOUT["pid_roles"]) == n_pids:
+            return item.get("name")
+    return None
+
+
+# --------------------------------------------------------------------------- #
+# 日志解析(每次直接解析日志文件)
+# --------------------------------------------------------------------------- #
+def parse_log(log_path=LOG_PATH):
+    """解析整份日志,返回 {pid: rec}。
+
+    rec = {ts_first, ts_last, sq:[(p,a,pl,e)...], eq:[(eval,gcp,name)...],
+           vi:[ms...], hv:[ms...], stmt_name}
+    仅保留含 PGVECTOR_TIMING 的行,先做子串快速过滤再正则匹配。
+    """
+    data = OrderedDict()
+    with open(log_path, "r", encoding="utf-8", errors="replace") as f:
+        for line in f:
+            if "PGVECTOR_TIMING]" not in line:
+                continue
+            m = RE_TS.match(line)
+            if not m:
+                continue
+            ts, pid = m.group(1), m.group(3)
+            rec = data.get(pid)
+            if rec is None:
+                rec = data[pid] = {"ts_first": ts, "ts_last": ts, "sq": [], "eq": [],
+                                   "vi": [], "hv": [], "stmt_name": None}
+            rec["ts_last"] = ts
+            if "simple_query" in line:
+                sm = RE_SQ.search(line)
+                if sm:
+                    rec["sq"].append(tuple(float(x) for x in sm.groups()))
+            elif "execute_query" in line:
+                em = RE_EQ.search(line)
+                if em:
+                    rec["eq"].append((float(em.group(1)), float(em.group(2)), em.group(3)))
+                    rec["stmt_name"] = em.group(3)
+            elif "halfvec_in" in line:
+                hm = RE_HV.search(line)
+                if hm:
+                    rec["hv"].append(float(hm.group(1)))
+            elif "vector_in" in line:
+                vm = RE_VI.search(line)
+                if vm:
+                    rec["vi"].append(float(vm.group(1)))
+            elif "array_to_vector" in line:
+                am = RE_ATV.search(line)
+                if am:
+                    rec["vi"].append(float(am.group(1)))
     return data
 
 
@@ -103,89 +195,127 @@ def avg(values):
     return sum(rest) / float(len(rest))
 
 
-def build_result_meta(t_min=None, t_max=None):
-    """读取结果 JSON(按 run_date 升序 -> 客户端执行顺序), 及 CSV 中 RPS 回退。
+# --------------------------------------------------------------------------- #
+# 固定测试网格(参数化布局)
+# --------------------------------------------------------------------------- #
+# 客户端 engine/base_client/client.py::_run_pgvector_experiment 按
+# parse_mode -> sql_type -> cache -> use_query_cache 的顺序展开; 每个内层
+# (cache, use_query_cache) 组合新建 len(pid_roles) 个后端 PID(warmup+search),
+# cache=0 不 PREPARE(无名, simple 协议), cache=1/2/3 走命名 PREPARE(有名)。
+# 块长 = len(caches) * len(use_query_caches) * len(pid_roles)。
+#
+# 该布局来自实测日志: 每 (mode, sql_type) 块 = 4 cache × 2 use_query_cache × 2 PID
+# (warmup+search) = 16 PID, 依序为 [cache0 无名 4][cache1 有名 4][cache2 有名 4]
+# [cache3 有名 4]。测试配置固定, 故网格可直接定死; 若配置变化, 只改下面 LAYOUT
+# (或 CLI 覆盖)即可, 无需改动配对逻辑。
+LAYOUT = {
+    "parse_modes": ["strtof", "inline", "fast_float"],
+    "sql_types": [
+        "text_literal", "text_cast", "vector_fn",
+        "array_int_cast", "array_real_cast", "array_cast",
+        "array_to_vector_fn", "halfvec_literal",
+        "with_text_literal", "with_array_cast", "with_vector_fn",
+    ],
+    # 计划缓存档位(对应 GUC enable_query_plan_cache, 写入结果 JSON 的 use_query_plan_cache):
+    # 0=不 PREPARE(无名, simple 协议), 1/2/3=命名 PREPARE(prep 协议)。
+    "caches": [0, 1, 2, 3],
+    # 查询结果缓存(对应 use_query_cache); 与 cache 构成内层两维。
+    "use_query_caches": [0, 1],
+    # search_number=1 => 每个 (cache, use_query_cache) 组合 = warmup + search 两个 PID
+    "pid_roles": ["warmup", "search"],
+}
 
-    仅保留 run_date 落在日志时间段 [t_min, t_max] 内的文件(即与本次被测日志同一批运行)，
-    避免混入历史其它批次的结果文件导致错位。
+
+def layout_cells(pids, pid_data):
+    """按 LAYOUT 网格把有序 PID 切成 cell。
+
+    循环序 = vector_in_parse_mode -> sql_type -> enable_query_plan_cache -> use_query_cache
+    (见 engine/base_client/client.py 的 pgvector 实验展开)。每个
+    (mode, sql_type, cache, use_query_cache) 得到 len(pid_roles) 个 PID(warmup+search),
+    构成一个 cell。
+    返回 { (mode, sql_type, cache, uqc): {"warmup": [...], "search": [...]} }。
+    块内 PID 序号 == cell 序, 直接按索引切片(比原 run_date 近邻配对更稳);
+    日志在某处截断时停止, 剩余 PID 不再消费。
     """
-    metas = []
-    for f in glob.glob(JSON_GLOB):
-        # 先按文件名里的时间戳预筛(格式 ...-2026-10-01-21-31-02.json), 跳过明显在窗口外的文件
-        if t_min and t_max:
-            m = re.search(r"-(\d{4}-\d{2}-\d{2})-(\d{2})-(\d{2})-(\d{2})\.json$", f)
-            if m:
-                ymd, hh, mm, ss = m.group(1), m.group(2), m.group(3), m.group(4)
-                fs = f"{ymd} {hh}:{mm}:{ss}"
-                if fs < t_min or fs > t_max:
-                    continue
-        try:
-            d = json.load(open(f, "r", encoding="utf-8"))
-        except Exception:
-            continue
-        rd = (d.get("meta") or {}).get("run_date")
-        if not rd:
-            continue
-        if t_min and rd < t_min:
-            continue
-        if t_max and rd > t_max:
-            continue
-        sp = d.get("index_search_parameter") or {}
-        sr = d.get("search_results") or {}
-        metas.append({
-            "run_date": rd,
-            "sql_type": sp.get("sql_type"),
-            "use_cache": sp.get("use_query_plan_cache"),
-            "result_cache": sp.get("use_result_cache"),
-            "parse_mode": sp.get("vector_in_parse_mode"),
-            "dims": sp.get("dims"),
-            "test_duration": sp.get("test_duration"),
-            "rps": sr.get("average_rps", sr.get("rps", 0)),
-            "mean_time": sr.get("mean_time", 0),
-        })
-    metas.sort(key=lambda x: x["run_date"] or "")
-    return metas
+    cells = {}
+    n_pid = len(LAYOUT["pid_roles"])
+    idx = 0
+    for mode in LAYOUT["parse_modes"]:
+        for st in LAYOUT["sql_types"]:
+            for cache in LAYOUT["caches"]:
+                for uqc in LAYOUT["use_query_caches"]:
+                    group = pids[idx: idx + n_pid]
+                    if len(group) < n_pid:
+                        print(f"  (info) 网格耗尽: mode={mode} sql={st} cache={cache} "
+                              f"uqc={uqc} 缺 {n_pid - len(group)} 个 PID, 停止切片。",
+                              file=sys.stderr)
+                        return cells
+                    idx += n_pid
+                    roles = {"warmup": [], "search": []}
+                    for pid, role in zip(group, LAYOUT["pid_roles"]):
+                        roles[role].append(pid)
+                    cells[(mode, st, cache, uqc)] = roles
+    return cells
 
 
-def build_csv_rps_lookup(t_min=None, t_max=None):
-    """从 pgvector_benchmark_results.csv 读取 RPS 供回退/校验, 按 (sql_type,cache,res) 聚合。
+def combo_lookup(mode, sql, cache, uqc, combos, table=None):
+    """在结果 CSV 中按 (table?, parse_mode, sql_type, use_cache, use_query_cache) 匹配, 取最新时间戳一行。"""
+    best, best_ts = None, ""
+    for c in combos:
+        if table and c.get("table") != table:
+            continue
+        if c.get("parse_mode") != mode or c.get("sql_type") != sql:
+            continue
+        if c.get("cache") != cache or c.get("rc") != uqc:
+            continue
+        ts = c.get("ts") or ""
+        if best is None or ts > best_ts:
+            best, best_ts = c, ts
+    return best
 
-    仅聚合 timestamp 落在日志时间窗 [t_min, t_max] 内的行(即本次被测同批运行)，
-    避免混入 09-22 以来历史批次的同键行导致 csv_RPS 失真(看起来像"用了缓存")。
+
+# --------------------------------------------------------------------------- #
+# 汇总
+# --------------------------------------------------------------------------- #
+def sq_drop_count(cache):
+    """当前 use_query_plan_cache 档位下, 剔除的【前端非向量】simple_query 条数。
+
+    每个后端连接建立后都会先跑若干 setup(SET...等)语句, 它们是 simple_query 但
+    并非向量查询; 前两档(cache=0 direct )固定 5 条, 后两档
+    (cache=2/3 generic / cache=1 custom)比前两档多一条 prepare/setup, 为 7 条。cache 未知
+    (如 --no-pair 模式无对应结果元数据)时回退到旧口径 1(仅去掉首次), 保持兼容。
     """
-    lookup = defaultdict(list)
-    if not os.path.exists(CSV_PGVECTOR):
-        return lookup
-    with open(CSV_PGVECTOR, "r", encoding="utf-8", errors="replace") as f:
-        r = csv.DictReader(f)
-        for row in r:
-            ts = (row.get("timestamp") or "").strip()
-            if t_min and t_max:
-                # CSV timestamp 形如 "2026-10-02 11:54:16.123", 截取到秒比较
-                ts_s = ts[:19]
-                if ts_s < t_min or ts_s > t_max:
-                    continue
-            key = (row.get("sql_type"), row.get("use_cache"), row.get("use_query_cache"))
-            try:
-                lookup[key].append(float(row.get("rps", 0) or 0))
-            except (TypeError, ValueError):
-                pass
-    return lookup
+    if cache is None:
+        return 1
+    return 7 if int(cache) in (1, 2, 3) else 5
 
 
-def summarize(pid_rec):
-    """对单个 PID 的执行单元汇总(已去除该单元首次执行)"""
-    sq = pid_rec["sq"]
+def summarize(pid_rec, cache=None):
+    """对单个 PID 的执行单元汇总。
+
+    先按 use_query_plan_cache 档位剔除前端非向量 simple_query(cache 0 -> 5 条,
+    cache 1/2/3 -> 7 条, 见 sq_drop_count), 再对余下的向量查询做耗时/次数统计;
+    各耗时均值沿用 avg() 的"去掉第一条"口径(去除首次热路径)。
+    """
+    sq = pid_rec["sq"][sq_drop_count(cache):]
     vi = pid_rec["vi"]
+    hv = pid_rec["hv"]
+    eq = pid_rec["eq"]
     return {
-        "exec_count": len(sq),                    # simple_query 执行条数
-        "exec_count_excl_first": max(0, len(sq) - 1),
+        "exec_count": len(sq),                    # 剔除前端非向量语句后的向量查询条数
+        "exec_count_excl_first": len(sq),
         "parse_avg": avg([x[0] for x in sq]),
         "analyze_avg": avg([x[1] for x in sq]),
         "plan_avg": avg([x[2] for x in sq]),
         "exec_avg": avg([x[3] for x in sq]),
+        "eq_count": len(eq),                      # PREPARE(EXECUTE) 执行条数
+        "eval_avg": avg([x[0] for x in eq]),
+        "gcp_avg": avg([x[1] for x in eq]),
         "vi_count": len(vi),
         "vi_avg": avg(vi),
+        "hv_count": len(hv),
+        "hv_avg": avg(hv),
+        "stmt_name": pid_rec.get("stmt_name"),
     }
 
 
@@ -195,107 +325,124 @@ def fmt(v, nd=3):
     return f"{v:.{nd}f}"
 
 
+def wslash(a, b):
+    """把 warmup/search 两个值格式化为 'a|b'。"""
+    return f"{a}|{b}"
+
+
 def main():
-    ap = argparse.ArgumentParser()
-    ap.add_argument("--log", default=LOG_PATH)
-    ap.add_argument("--no-pair", action="store_true",
-                    help="不自动两两配对(warmup/search), 每个PID独立成行")
-    ap.add_argument("--out", default=OUT_TSV)
-    ap.add_argument("--refresh-cache", action="store_true",
-                    help="强制重新解析日志并刷新缓存")
+    ap = argparse.ArgumentParser(description="汇总 pgvector 时序日志并与结果 CSV 交叉验证。")
+    ap.add_argument("--log", default=LOG_PATH, help="PostgreSQL 日志路径")
+    ap.add_argument("--csv", default=None,
+                    help="pgvector 结果 CSV 路径(默认 results/pgvector_benchmark_results.csv)")
+    ap.add_argument("--out", default=None, help="输出 CSV 路径")
+    ap.add_argument("--config", default=CONFIG_PATH, help="configurations/config.json 路径")
+    ap.add_argument("--engine", default=None,
+                    help="被测 pgvector 引擎名(默认按 PID 数与 config 网格自动推断)")
+    ap.add_argument("--test-duration", type=float, default=None,
+                    help="search 时长(秒), 用于 est_QPS; 默认取 config search_params.test_duration")
     args = ap.parse_args()
 
-    print("parsing log ...", file=sys.stderr)
-    pid_data = parse_log_cached(args.log, force=args.refresh_cache)
-    # 按首次出现时间排序
-    pids = sorted(pid_data.keys(), key=lambda p: pid_data[p]["ts_first"])
-    print(f"  + {len(pids)} backends(PID) with timing records", file=sys.stderr)
+    if not os.path.exists(args.log):
+        print(f"[ERR] 日志不存在: {args.log}", file=sys.stderr)
+        return 1
 
-    # 日志时间窗(精确到秒), 用于过滤结果 JSON 到同批运行
-    t_min = min(pid_data[p]["ts_first"][:19] for p in pids)
-    t_max = max(pid_data[p]["ts_last"][:19] for p in pids)
+    csv_path = args.csv or os.path.join(RESULTS_DIR, "pgvector_benchmark_results.csv")
+    pid_data = parse_log(args.log)
+    combos = read_combos(csv_path)
+    print(f"log: {args.log}  pids={len(pid_data)}  combos(csv)={len(combos)}",
+          file=sys.stderr)
 
-    metas = build_result_meta(t_min, t_max)
-    csv_rps = build_csv_rps_lookup(t_min, t_max)
-    print(f"  + {len(metas)} result JSON files (run_date 升序 = 执行顺序) "
-          f"in [{t_min}, {t_max}]", file=sys.stderr)
+    # 日志内全部含计时记录的 PID 视为当前批次(pgvector 按 PID 区分批次, 非时间)。
+    pids = sorted(
+        [p for p, v in pid_data.items() if (v["sq"] or v["eq"] or v["vi"] or v["hv"])],
+        key=lambda p: pid_data[p]["ts_first"])
+    if not pids:
+        print("[ERR] 日志中未发现 PGVECTOR_TIMING 记录(日志可能已轮转/截断)。",
+              file=sys.stderr)
+        return 1
 
-    rows = []
-    if args.no_pair:
-        for pid in pids:
-            s = summarize(pid_data[pid])
-            tap = s["exec_count_excl_first"]
-            est_qps = (tap / 1.0) if tap else 0.0
-            rows.append([pid, "-", s["exec_count"], fmt(s["parse_avg"]), fmt(s["analyze_avg"]),
-                         fmt(s["plan_avg"]), fmt(s["exec_avg"]), s["vi_count"], fmt(s["vi_avg"]),
-                         f"{est_qps:.0f}", "", "", "", "", ""])
-    else:
-        n_pairs = min(len(pids) // 2, len(metas))
-        for i in range(n_pairs):
-            pid_w, pid_s = pids[2 * i], pids[2 * i + 1]
-            sw = summarize(pid_data[pid_w])
-            ss = summarize(pid_data[pid_s])
-            meta = metas[i]
-            # 验证: 实际查询 PID 的 exec 次数(去首次) / test_duration 应≈ RPS(每秒执行SQL条数)
-            tap = ss["exec_count_excl_first"]
-            td = meta.get("test_duration") or 1.0
-            est_qps = (tap / td) if tap else 0.0
-            rps = meta["rps"] or None
-            match = "-"
-            if rps and est_qps:
-                match = f"{100 * abs(est_qps - rps) / rps:.1f}%"
-            sql = meta.get("sql_type") or "?"
-            cache = meta.get("use_cache")
-            res = meta.get("result_cache")
-            pmod = meta.get("parse_mode")
-            # 从 CSV 回退校验 RPS(同 sql_type+cache+res 的均值)
-            csv_r = csv_rps.get((sql, str(cache), str(res)))
-            csv_avg = (sum(csv_r) / len(csv_r)) if csv_r else None
-            rows.append([
-                i + 1,                    # 序号
-                f"{pid_w}/{pid_s}",       # warmup/search PID
-                sql, cache, res, pmod,
-                f"w={sw['exec_count']} / s={ss['exec_count']}",  # exec 次数
-                f"{fmt(sw['parse_avg'])}|{fmt(ss['parse_avg'])}",
-                f"{fmt(sw['analyze_avg'])}|{fmt(ss['analyze_avg'])}",
-                f"{fmt(sw['plan_avg'])}|{fmt(ss['plan_avg'])}",
-                f"{fmt(sw['exec_avg'])}|{fmt(ss['exec_avg'])}",
-                f"{sw['vi_count']}|{ss['vi_count']}",
-                f"{fmt(sw['vi_avg'])}|{fmt(ss['vi_avg'])}",
-                f"{est_qps:.0f}",
-                f"{rps:.0f}" if rps else "-",
-                fmt(csv_avg, 1) if csv_avg else "-",
-                meta.get("run_date", ""),
-            ])
-
-    header = (["#", "PID(warm/s)", "sql_type", "cache", "res_cache", "parse_mode",
-               "exec#(w/s)", "parse_ms(w/s)", "analyze_ms(w/s)", "plan_ms(w/s)",
-               "exec_ms(w/s)", "vector_in#(w/s)", "vector_in_ms(w/s)",
-               "est_QPS", "JSON_RPS[csv_RPS]", "", "run_date"])
-    # 重构表头使最后一列对齐
-    header = ["#", "PID(warm/s)", "sql_type", "cache", "res_cache", "parse_mode",
+    header = ["#", "PID(warm/s)", "sql_type", "cache", "res_cache", "parse_mode", "proto",
               "exec#(w/s)", "parse_ms(w/s)", "analyze_ms(w/s)", "plan_ms(w/s)",
-              "exec_ms(w/s)", "vi#(w/s)", "vi_ms(w/s)",
-              "est_QPS", "JSON_RPS", "csv_RPS", "run_date"]
-    width = [len(h) for h in header]
-    for row in rows:
-        for c, h in enumerate(header):
-            width[c] = max(width[c], len(str(row[c])))
-    def fmtline(vals):
-        return " | ".join(str(v).ljust(width[i]) for i, v in enumerate(vals))
+              "exec_ms(w/s)", "eval_ms(w/s)", "gcp_ms(w/s)", "vi#(w/s)", "vi_ms(w/s)",
+              "hv#(w/s)", "hv_ms(w/s)", "est_QPS", "CSV_RPS", "run_date"]
+    cells = layout_cells(pids, pid_data)
+    block_len = (len(LAYOUT["caches"]) * len(LAYOUT["use_query_caches"])
+                 * len(LAYOUT["pid_roles"]))
+    if cells and len(pids) % block_len != 0:
+        print(f"  (warn) PID 数 {len(pids)} 不是块长 {block_len} 的整数倍, 末尾可能残留",
+              file=sys.stderr)
 
-    lines = [fmtline(header)]
-    lines.append("-+-".join("-" * w for w in width))
-    for row in rows:
-        lines.append(fmtline(row))
-    text = "\n".join(lines)
-    print(text)
-    with open(args.out, "w", encoding="utf-8") as f:
-        f.write("\t".join(header) + "\n")
+    rows, i = [], 0
+
+    # 被测表: config 网格(组数×2 PID)与日志 PID 数一致者; 未命中则取 CSV 首表, 数据源均来自 config。
+    cfg = load_config(args.config)
+    table = resolve_table(cfg, len(pids), args.engine)
+    if not table:
+        table = next((c["table"] for c in combos if c["table"]), "pgvector")
+        print(f"  (warn) 未推断出与 PID 数匹配的 pgvector 表, 复用 CSV 首表: {table}",
+              file=sys.stderr)
+    dataset = next((i_.get("dataset") or i_.get("name") for i_ in cfg
+                    if i_.get("name") == table), table)
+    td = args.test_duration or config_test_duration(cfg, table)
+    print(f"  table={table} dataset={dataset} search_td={td}s", file=sys.stderr)
+
+    for mode in LAYOUT["parse_modes"]:
+        for sql in LAYOUT["sql_types"]:
+            for cache in LAYOUT["caches"]:
+                for uqc in LAYOUT["use_query_caches"]:
+                    roles = cells.get((mode, sql, cache, uqc))
+                    if not roles:
+                        continue
+                    info = combo_lookup(mode, sql, cache, uqc, combos, table)
+                    w_pid, s_pid = roles["warmup"][0], roles["search"][0]
+                    sw = summarize(pid_data[w_pid], cache)
+                    ss = summarize(pid_data[s_pid], cache)
+                    dur = td or _num((info or {}).get("test_duration"))
+                    rps = _num((info or {}).get("qps")) if ((info or {}).get("qps") or "").strip() else None
+                    est_qps = (ss.get("exec_count") or 0) / dur if dur else None
+                    i += 1
+                    if rps and est_qps and abs(est_qps - rps) / rps > 0.20:
+                        print(f"  (warn) #{i} {sql} cache={cache} uqc={uqc}: "
+                              f"est_QPS={est_qps:.0f} 与 CSV_RPS={rps:.0f} 偏差 >20%",
+                              file=sys.stderr)
+                    proto = "prep" if cache else "simple"
+                    rows.append([
+                        i, f"{w_pid}/{s_pid}", sql, cache, uqc, mode, proto,
+                        f"w={sw.get('exec_count')} / s={ss.get('exec_count')}",
+                        wslash(fmt(sw.get("parse_avg")), fmt(ss.get("parse_avg"))),
+                        wslash(fmt(sw.get("analyze_avg")), fmt(ss.get("analyze_avg"))),
+                        wslash(fmt(sw.get("plan_avg")), fmt(ss.get("plan_avg"))),
+                        wslash(fmt(sw.get("exec_avg")), fmt(ss.get("exec_avg"))),
+                        wslash(fmt(sw.get("eval_avg"), 4), fmt(ss.get("eval_avg"), 4)),
+                        wslash(fmt(sw.get("gcp_avg"), 4), fmt(ss.get("gcp_avg"), 4)),
+                        wslash(sw.get("vi_count"), ss.get("vi_count")),
+                        wslash(fmt(sw.get("vi_avg")), fmt(ss.get("vi_avg"))),
+                        wslash(sw.get("hv_count"), ss.get("hv_count")),
+                        wslash(fmt(sw.get("hv_avg")), fmt(ss.get("hv_avg"))),
+                        f"{est_qps:.0f}" if est_qps else "-",
+                        f"{rps:.0f}" if rps else "-",
+                        pid_data[w_pid]["ts_first"][:10],
+                    ])
+
+    if not rows:
+        print("[WARN] 无有效格子, 未生成 CSV。", file=sys.stderr)
+        return 1
+
+    out_path = args.out or os.path.join(RESULTS_DIR, f"pgvector_log_analysis-{dataset}.csv")
+    with open(out_path, "w", encoding="utf-8", newline="") as f:
+        w = csv.writer(f)
+        w.writerow(header)
         for row in rows:
-            f.write("\t".join(str(x) for x in row) + "\n")
-    print(f"\n[OK] 表格已保存: {args.out}")
+            w.writerow([str(x) for x in row])
+
+    _exp = config_cell_counts(cfg, table)
+    msg = f"[OK] 已保存: {out_path}  表={table}  {len(rows)} 行"
+    if _exp is not None and len(rows) != _exp:
+        msg += f"  (config 预期 {_exp} 组, 前缀/截断所致)"
+    print(msg)
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

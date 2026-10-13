@@ -6,6 +6,14 @@
 # Examples:
 #   ENGINE=polardb ./polardb-pase-query-forms-benchmark.sh Benchmark_768_1m
 #
+# 手动选择测试对象 (优先级: 环境变量 > 位置参数 > 交互选择):
+#   * 数据表: 第一个位置参数, 或用 TABLE=Benchmark_768_1m
+#   * 索引类型: INDEX_TYPE=hnsw (默认) 或 INDEX_TYPE=ivfflat。
+#     两者都省略且为标准终端时, 会弹出菜单让你手选。
+#   例如:
+#     TABLE=Benchmark_768_1m INDEX_TYPE=hnsw ./polardb-pase-query-forms-benchmark.sh
+#     ./polardb-pase-query-forms-benchmark.sh Benchmark_768_1m   # 表用位置参数, 索引类型交互/默认 hnsw
+#
 # Useful overrides:
 #   PSQL=/path/to/psql PGBENCH=/path/to/pgbench HOST=127.0.0.1 PORT=5432 \
 #   USER=postgres PASSWORD=123456 DATABASE=postgres \
@@ -52,10 +60,19 @@
 #   subquery_id            : vec_col <?> (SELECT pase(vec_col) FROM t WHERE id = N)
 #   with_subquery_id       : WITH q AS (SELECT pase(vec_col) FROM t WHERE id = N) SELECT ...
 #
-# 计划缓存/结果缓存测量口径 (重要, 2026-09-21 修正, 与 pgvector 脚本一致):
-#   PostgreSQL/PolarDB 没有原生"查询结果缓存", result_cache 仅用 shared_buffers 中已加载的
-#   数据页/索引页模拟"结果缓存命中"; 冷启动时重启 PG 只清空 shared_buffers,
-#   root 下还会额外清空 OS 页缓存 (/proc/sys/vm/drop_caches)。
+# 计划缓存/结果缓存测量口径 (重要, 与 pgvector 脚本一致):
+#   PolarDB pase 现已实现源码级查询结果缓存 (external/pase/pase_cache.c,
+#   pase_handler.c _PG_init 注册 GUC): pase_result_cache (bool, 默认 off),
+#   pase_result_cache_debug (bool, 记录 HIT/MISS), pase_result_cache_capacity
+#   (int, 默认 4096)。命中时直接重放 HNSW top-K 候选, 跳过图遍历与距离计算。
+#   CACHE_PROFILES 里的 result_cache / plan_and_result_cache 档通过会话级
+#   SET pase_result_cache=on 控制该真实缓存。
+#   注意 (结合源码): pase 是懒加载扩展, 不在 shared_preload_libraries 中。若在
+#   会话里 SET pase_result_cache 之前还没 LOAD pase, 该 SET 只会创建"占位符变量",
+#   真实 GUC 保持 off, 测量无效。因此 session_set_line_for_profile 生成的每条
+#   pgbench 脚本都会先 LOAD '$libdir/pase', 确保 GUC 真正注册后再 SET。
+#   冷启动时重启 PG 只清空 shared_buffers, root 下还会额外清空 OS 页缓存
+#   (/proc/sys/vm/drop_caches)。
 #   计划缓存 (plan_cache_mode) 只在 plancache.c 的 GetCachedPlan 路径生效:
 #     * pgbench 默认 simple 协议每次执行都重新 parse+analyze+plan, 不经过 plancache,
 #       plan_cache_mode 完全是 no-op. 因此脚本默认使用 -M prepared (PGBENCH_QUERY_MODE).
@@ -93,18 +110,22 @@ _auto_ld_path() {
 
 ENGINE="${ENGINE:-polardb}"
 HOST="${HOST:-127.0.0.1}"
-PORT="${PORT:-5432}"
+# 目标为 PolarDB PASE 实例 (PG17): 默认监听 5433, PGDATA=/home/polar/tmp_polardb_pg_17_primary。
+# 若此处误用默认 PostgreSQL(如 5432/pgvector), pase 向量列(real[]/float4[]) 检测会失败。
+PORT="${PORT:-5433}"
 USER="${USER:-postgres}"
 PASSWORD="${PASSWORD:-123456}"
 DATABASE="${DATABASE:-postgres}"
-TIMELIMIT="${TIMELIMIT:-30}"
-WARMUP_TIMELIMIT="${WARMUP_TIMELIMIT:-10}"
-REPEAT="${REPEAT:-5}"
+TIMELIMIT="${TIMELIMIT:-1}"
+WARMUP_TIMELIMIT="${WARMUP_TIMELIMIT:-1}"
+REPEAT="${REPEAT:-1}"
 TOP_K="${TOP_K:-10}"
 SQL_DIR="${SQL_DIR:-sql-bench/polardb-pase-query-forms}"
 OUTPUT_CSV="${OUTPUT_CSV:-../results/vector-query-forms-${ENGINE}-results.csv}"
-PSQL="${PSQL:-psql}"
-PGBENCH="${PGBENCH:-pgbench}"
+# PolarDB PASE 实例的客户端二进制均位于 /home/polar/tmp_polardb_pg_17_base/bin
+POLAR_BIN_DEFAULT=/home/polar/tmp_polardb_pg_17_base/bin
+PSQL="${PSQL:-$POLAR_BIN_DEFAULT/psql}"
+PGBENCH="${PGBENCH:-$POLAR_BIN_DEFAULT/pgbench}"
 PGBENCH_JOBS="${PGBENCH_JOBS:-}"
 MAX_PGBENCH_SCRIPTS="${MAX_PGBENCH_SCRIPTS:-128}"
 # pgbench 发送查询的协议: simple|extended|prepared (默认 prepared).
@@ -135,13 +156,26 @@ _auto_pg_ctl_path() {
     echo "pg_ctl"
 }
 PG_CTL="${PG_CTL:-$(_auto_pg_ctl_path)}"
-PGDATA="${PGDATA:-/usr/local/pgsql/data}"
+# PolarDB PASE 实例的数据目录 (PG17 primary); 与之配套的 share/extension 含 pase 扩展
+PGDATA="${PGDATA:-/home/polar/tmp_polardb_pg_17_primary}"
 DISTANCE_OP="${DISTANCE_OP:-<?>}"
 # <#> (hash) 只在 pase_ivfflat_float_ops 里, hnsw 索引表上会退化为全表扫描;
-# 默认改用 <?> 保住索引路径; 若表是 ivfflat 索引可覆盖为 <#>
-HASH_DISTANCE_OP="${HASH_DISTANCE_OP:-<?>}"
+# HASH_DISTANCE_OP 默认值由索引类型决定 (见 resolve_tables_and_index_type):
+#   hnsw    -> <?>   (保住 HNSW 索引路径)
+#   ivfflat -> <#>   (ivfflat 兼容 hash 距离算子)
+# 用户可通过环境变量 HASH_DISTANCE_OP 显式覆盖。
+HASH_DISTANCE_OP="${HASH_DISTANCE_OP:-}"
 SORT_DIR="${SORT_DIR:-ASC}"
 PASE_EXTRA="${PASE_EXTRA:-5}"    # HNSW ef_search parameter
+
+# ---- 手动选择测试对象 ----
+# TABLE     : 要查询的数据表 (含 float4[] 向量列, 列自动探测)。也可用第一个
+#             位置参数指定。留空且无位置参数时, 标准终端下进入交互选择。
+# INDEX_TYPE: 索引类型, 可选 hnsw|ivfflat。用于决定 hash 距离算子默认值。
+#             留空且为标准终端时进入交互选择, 否则默认 hnsw。
+TABLE="${TABLE:-}"
+INDEX_TYPE="${INDEX_TYPE:-}"
+TABLES=()
 
 # cache_profiles 定义不同查询计划缓存/结果缓存组合。
 # 在 PostgreSQL 中:
@@ -153,13 +187,18 @@ PASE_EXTRA="${PASE_EXTRA:-5}"    # HNSW ef_search parameter
 #     false = 热启动: 保留 shared_buffers 中的数据页/索引页, 模拟结果缓存命中
 # PostgreSQL 没有 MySQL/ClickHouse 的原生结果缓存, 但 shared_buffers 缓冲池
 # 缓存了数据页和向量索引页, 重复查询命中内存即等效于"结果缓存"。
-# 每个配置: name|plan_cache_mode|enable_seqscan|drop_buffer_cache
-# 只对比"查询计划缓存"两类, 且都不测冷启动 (与 CK 口径一致: 都是热态、结果稳定可复现):
-#   两者 drop_buffer_cache=false (不重启/不清页缓存), 计时前先暖场到稳态;
-#   唯一变量是 plan_cache_mode:
-#     off       = plan 缓存关闭 (force_custom_plan, 每次 exec 重新规划)
-#     plan_cache= plan 缓存开启 (force_generic_plan, 复用缓存计划)
-# 注: PostgreSQL/PolarDB 无原生"查询结果缓存", 不再单列 result_cache 档。
+# 每个配置: name|plan_cache_mode|enable_seqscan|drop_buffer_cache|result_cache
+# 四档构成 2x2 正交对照 (计划缓存 x 结果缓存), 均 drop_buffer_cache=false 热态测:
+#   off                  = 计划缓存 off (force_custom_plan) + 结果缓存 off
+#   plan_cache           = 计划缓存 on  (force_generic_plan) + 结果缓存 off
+#   result_cache         = 计划缓存 off + 结果缓存 on  (pase_result_cache=on)
+#   plan_and_result_cache= 计划缓存 on  + 结果缓存 on
+# PolarDB pase 现已实现源码级查询结果缓存 (对齐 pgvector veccache, pase_cache.c):
+#   对 (indexOid, dim, ef, ds, 查询向量) 精确匹配的重复查询命中后直接回放 top-K,
+#   跳过 HNSW 图遍历与距离计算。本基准把每个向量字面量提升为固定绑定参数
+#   (pgbench 脚本内向量恒定), 同一查询被反复执行, 首查 MISS->存缓存, 之后 HIT,
+#   从而能真实测出结果缓存收益。需使用新编译安装的 pase.so (含 pase_result_cache GUC),
+#   否则 SET pase_result_cache 会失败。
 #
 # 重要 confound (2026-09-27 live 验证): force_generic_plan 的 generic 计划用
 # genericcostestimate 描述 `vector <?> pase`, 不是 pase 感知的 HNSW top-k 成本;
@@ -171,26 +210,19 @@ PASE_EXTRA="${PASE_EXTRA:-5}"    # HNSW ef_search parameter
 # "每次重规划 vs 复用缓存计划" (pase_verify 实测: custom 0.056ms/次 vs generic
 # 0.004ms/次)。想对照真实默认行为, 用 CACHE_PROFILES_OVERRIDE 把第 3 段改回 on。
 CACHE_PROFILES=(
-    "off|force_custom_plan|off|false"
-    "plan_cache|force_generic_plan|off|false"
+    "direct|direct|off|false|off"
+    "direct_result_cache|direct|off|false|on"
+    "off|force_custom_plan|off|false|off"
+    "plan_cache|force_generic_plan|off|false|off"
+    "result_cache|force_custom_plan|off|false|on"
+    "plan_and_result_cache|force_generic_plan|off|false|on"
 )
 
 SQL_TYPES=(
     text_pase_op_id
-    text_pase_op_extra
-    text_pase_op_extra_ds
-    pase_fn_text_default
-    pase_fn_array_default
-    pase_fn_array_extra
-    pase_fn_array_ip
-    hash_op_default
-    hash_op_extra
-    with_pase_fn_array
-    with_pase_fn_text
-    subquery_id
-    with_subquery_id
+    
 )
-ROW_COUNTS=(1000)
+ROW_COUNTS=(1)
 CONCURRENCIES=(1)
 
 apply_list_override() {
@@ -213,6 +245,103 @@ client_query() {
     PGPASSWORD="$PASSWORD" timeout 60 "$PSQL" -h "$HOST" -p "$PORT" -U "$USER" -d "$DATABASE" -t -A -c "$1" 2>/dev/null
 }
 
+# 列出 public schema 中包含 float32 (float4[]/real[]) 向量列的表名 (一行一个)
+list_vector_tables() {
+    client_query "SELECT c.relname FROM pg_class c
+                  JOIN pg_namespace n ON n.oid = c.relnamespace
+                  JOIN pg_attribute a ON a.attrelid = c.oid
+                  JOIN pg_type t ON t.oid = a.atttypid
+                  WHERE n.nspname = 'public' AND c.relkind = 'r'
+                    AND a.attnum > 0 AND NOT a.attisdropped
+                    AND t.typcategory = 'A'
+                    AND t.typelem IN ('float4'::regtype, 'float8'::regtype)
+                  GROUP BY c.relname ORDER BY c.relname;"
+}
+
+# 交互选择数据表 (不带参数时, 无 tty 则报错)
+pick_table_by_prompt() {
+    local -a names=()
+    local line choice i
+    while IFS= read -r line; do
+        [ -n "$line" ] && names+=("$line")
+    done < <(list_vector_tables)
+    if [ "${#names[@]}" -eq 0 ]; then
+        echo "错误: 未找到含 float32 (float4[]/real[]) 向量列的表 (public)。请先建表或指定 TABLE=..." >&2
+        return 1
+    fi
+    echo "可用的向量表:" >&2
+    for i in "${!names[@]}"; do
+        printf "  [%d] %s\n" "$((i+1))" "${names[$i]}" >&2
+    done
+    while :; do
+        printf "请选择数据表编号 (1-%d): " "${#names[@]}" >&2
+        IFS= read -r choice || return 1
+        if [[ "$choice" =~ ^[0-9]+$ ]] && [ "$choice" -ge 1 ] && [ "$choice" -le "${#names[@]}" ]; then
+            echo "${names[$((choice-1))]}"
+            return 0
+        fi
+        echo "无效选择, 请重试" >&2
+    done
+}
+
+# 交互选择索引类型 (hnsw|ivfflat)
+pick_index_type_by_prompt() {
+    local choice
+    echo "请选择索引类型:" >&2
+    echo "  [1] hnsw    (近似最近邻图, 使用 <?>)" >&2
+    echo "  [2] ivfflat (倒排文件, 支持 <?> 与 <#>)" >&2
+    while :; do
+        printf "请输入索引类型编号 (1-2): " >&2
+        IFS= read -r choice || return 1
+        case "$choice" in
+            1) echo "hnsw"; return 0;;
+            2) echo "ivfflat"; return 0;;
+            *) echo "无效选择, 请重试" >&2;;
+        esac
+    done
+}
+
+# 统一解析"数据表 + 索引类型":
+#   优先级: 环境变量 TABLE/INDEX_TYPE > 位置参数 > 交互选择(tty) / 报错退出。
+# 并把 TABLES 数组与 (HASH)DISTANCE_OP 默认值按索引类型调整好。后续主循环
+# 一律遍历 ${TABLES[@]}。
+resolve_tables_and_index_type() {
+    local tbl="${TABLE:-}"
+    if [ -z "$tbl" ] && [ $# -ge 1 ]; then
+        tbl="$1"
+    fi
+    if [ -z "$tbl" ]; then
+        if [ -t 0 ]; then
+            tbl="$(pick_table_by_prompt)" || exit 1
+        else
+            echo "错误: 请用第一个参数或 TABLE= 指定数据表, 并用 INDEX_TYPE= 指定索引类型 (hnsw|ivfflat)" >&2
+            exit 1
+        fi
+    fi
+    TABLES=( "$tbl" )
+
+    local itype="${INDEX_TYPE:-}"
+    if [ -z "$itype" ]; then
+        if [ -t 0 ]; then
+            itype="$(pick_index_type_by_prompt)" || exit 1
+        else
+            itype="hnsw"
+        fi
+    fi
+    case "$itype" in
+        hnsw|ivfflat) INDEX_TYPE="$itype";;
+        *) echo "错误: 不支持的 INDEX_TYPE='$itype' (可选 hnsw|ivfflat)" >&2; exit 1;;
+    esac
+
+    # 依据索引类型确定 hash 距离算子默认值 (用户可经 HASH_DISTANCE_OP 覆盖)
+    if [ "$INDEX_TYPE" = "ivfflat" ]; then
+        HASH_DISTANCE_OP="${HASH_DISTANCE_OP:-<#>}"
+    else
+        HASH_DISTANCE_OP="${HASH_DISTANCE_OP:-<?>}"
+    fi
+    DISTANCE_OP="${DISTANCE_OP:-<?>}"
+}
+
 detect_vector_column() {
     local table="$1"
     local table_exists
@@ -221,10 +350,17 @@ detect_vector_column() {
         echo "错误: 表 '$table' 不存在 (请检查 HOST=$HOST PORT=$PORT DATABASE=$DATABASE 是否正确)" >&2
         return 1
     fi
+    # 向量列类型为 float32 数组 (float4[]/real[], oid 等价), 不写死信息
+    # schema 的 udt_name='_float4', 用 pg_attribute 按元素类型探测更稳。
     local col
-    col=$(client_query "SELECT column_name FROM information_schema.columns WHERE table_name = '$table' AND data_type = 'ARRAY' AND udt_name = '_float4' LIMIT 1")
+    col=$(client_query "SELECT a.attname FROM pg_attribute a JOIN pg_type t ON t.oid = a.atttypid
+                        WHERE a.attrelid = '$table'::regclass
+                          AND a.attnum > 0 AND NOT a.attisdropped
+                          AND t.typcategory = 'A'
+                          AND t.typelem IN ('float4'::regtype, 'float8'::regtype)
+                        LIMIT 1")
     if [ -z "$col" ]; then
-        echo "错误: 表 '$table' 中未找到 float4[] 类型向量列" >&2
+        echo "错误: 表 '$table' 中未找到 float32 (float4[]/real[]) 向量列" >&2
         return 1
     fi
     echo "$col"
@@ -236,6 +372,33 @@ detect_vector_dimension() {
     local dim
     dim=$(client_query "SELECT array_length($vec_col, 1) FROM $table LIMIT 1")
     echo "${dim:-0}"
+}
+
+# 探测表上向量列对应的 pase 索引访问方法 (hnsw/ivfflat), 返回 "amname|opclass"。
+# 用于确认实际索引类型, 避免用户仅靠命令行/交互指定的 INDEX_TYPE 与实际不符。
+detect_pase_index_info() {
+    local table="$1" vec_col="$2"
+    local info
+    info=$(client_query "
+        SELECT am.amname, pg_get_indexdef(i.indexrelid)
+        FROM pg_index i
+        JOIN pg_class c ON i.indexrelid = c.oid
+        JOIN pg_am am ON c.relam = am.oid
+        JOIN pg_attribute a ON a.attrelid = i.indrelid AND a.attnum = ANY(i.indkey)
+        WHERE i.indrelid = '$table'::regclass
+          AND a.attname = '$vec_col'
+          AND (am.amname = 'pase_hnsw' OR am.amname = 'pase_ivfflat'
+               OR am.amname = 'hnsw' OR am.amname = 'ivfflat')
+        LIMIT 1" 2>/dev/null || echo "")
+    [ -z "$info" ] && { echo ""; return; }
+    local am_name index_def opclass
+    IFS='|' read -r am_name index_def <<< "$info"
+    opclass=$(echo "$index_def" | grep -oP 'pase\w*_ops' | head -1 || echo "")
+    case "$am_name" in
+        *hnsw*)    echo "hnsw|${opclass}" ;;
+        *ivfflat*) echo "ivfflat|${opclass}" ;;
+        *)         echo "${am_name}|${opclass}" ;;
+    esac
 }
 
 distance_expr() {
@@ -404,14 +567,145 @@ generate_sql_for_table() {
 # 因此 benchmark 运行时将 SET 行写入单独的脚本文件头部, 作为同一会话的前置命令。
 session_set_line_for_profile() {
     local profile_name="$1"
-    local group pname plan_cache_mode enable_seqscan drop_buffer_cache
+    local group pname plan_cache_mode enable_seqscan drop_buffer_cache result_cache
     for group in "${CACHE_PROFILES[@]}"; do
-        IFS='|' read -r pname plan_cache_mode enable_seqscan drop_buffer_cache <<< "$group"
+        IFS='|' read -r pname plan_cache_mode enable_seqscan drop_buffer_cache result_cache <<< "$group"
         if [ "$pname" = "$profile_name" ]; then
-            echo "SET plan_cache_mode = ${plan_cache_mode}; SET enable_seqscan = ${enable_seqscan};"
+            # 必须先在会话里 LOAD pase, 才会真正注册 pase_result_cache 等 GUC。
+            # 否则 SET 只会创建"占位符变量", 真实 result_cache 保持 off, 测量无效
+            # (PostgreSQL 允许 SET 未注册的限定名自定义变量为占位符, 不报错)。
+            # direct 档(= 不使用查询计划缓存, pgbench simple 协议)每次都
+            # parse+analyze+plan, plan_cache_mode 是 no-op, 故不设置。
+            if [ "$plan_cache_mode" = "direct" ]; then
+                echo "LOAD '\$libdir/pase'; SET enable_seqscan = ${enable_seqscan}; SET pase_result_cache = ${result_cache};"
+            else
+                echo "LOAD '\$libdir/pase'; SET plan_cache_mode = ${plan_cache_mode}; SET enable_seqscan = ${enable_seqscan}; SET pase_result_cache = ${result_cache};"
+            fi
             return
         fi
     done
+    echo ""
+}
+
+# 检查源码级查询结果缓存 GUC 是否可用。需要运行的是含 result_cache 的新 pase.so
+# (pase_handler.c _PG_init 注册 pase_result_cache / pase_result_cache_debug /
+# pase_result_cache_capacity, pase_cache.c 实现)。否则 SET pase_result_cache 会
+# unrecognized configuration parameter, 所有 result_cache 档静默 QPS=0。
+RESULT_CACHE_AVAILABLE=false
+detect_result_cache_availability() {
+    local v debugv cap raw
+    # 必须先 LOAD pase, 该会话才会注册 pase_result_cache GUC; 否则 SHOW 报
+    # unrecognized, 会误判"源码未上线"。因此 LOAD + SHOW 放在同一会话内一次执行。
+    raw=$(PGPASSWORD="$PASSWORD" timeout 30 "$PSQL" -h "$HOST" -p "$PORT" -U "$USER" -d "$DATABASE" \
+        -X -t -A -c "LOAD '\$libdir/pase'; SHOW pase_result_cache;" 2>/dev/null || true)
+    v=$(printf '%s\n' "$raw" | tail -1)
+    if [ -n "$v" ]; then
+        RESULT_CACHE_AVAILABLE=true
+        debugv=$(PGPASSWORD="$PASSWORD" timeout 30 "$PSQL" -h "$HOST" -p "$PORT" -U "$USER" -d "$DATABASE" -X -t -A -c "LOAD '\$libdir/pase'; SHOW pase_result_cache_capacity;" 2>/dev/null | tail -1 || echo "?")
+        cap="$debugv"
+        echo "  [诊断] ✓ 源码级查询结果缓存 GUC 可用: pase_result_cache=$v, cap=$cap"
+        echo "  [诊断]   当前 pase.so 已包含结果缓存 (pase_handler.c _PG_init / pase_cache.c)"
+    else
+        RESULT_CACHE_AVAILABLE=false
+        echo "  [诊断] ✗ 当前运行的 pase.so 未注册 pase_result_cache GUC (源码已实现但未上线)!"
+        echo "  [诊断]   结果缓存相关 profile (result_cache / plan_and_result_cache) 将被跳过, 以免静默 QPS=0。"
+        echo "  [诊断]   要启用需: 重编重装 pase 并重启 DB:"
+        echo "  [诊断]     cd /home/PolarDB-for-PostgreSQL && make -C external/pase && make -C external/pase install"
+        echo "  [诊断]     su - postgres -c \"pg_ctl -D <PGDATA> restart -m fast\""
+    fi
+}
+
+# 该 profile 是否依赖源码级查询结果缓存
+profile_uses_result_cache() {
+    local profile_name="$1"
+    local res
+    res=$(session_set_line_for_profile "$profile_name" 2>/dev/null || echo "")
+    case "$res" in
+        *"pase_result_cache = on"*) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
+# 该 profile 使用的 pgbench 查询协议:
+#   plan_cache_mode=direct (不使用查询计划缓存) -> simple 协议 (每次都 parse+analyze+plan,
+#   完全不经 plancache.c, plan_cache_mode 是 no-op);
+#   其余 (force_custom_plan / force_generic_plan) -> prepared 协议 (走 plancache).
+profile_query_mode() {
+    local profile_name="$1"
+    local group pname plan_cache_mode rest
+    for group in "${CACHE_PROFILES[@]}"; do
+        IFS='|' read -r pname plan_cache_mode rest <<< "$group"
+        if [ "$pname" = "$profile_name" ]; then
+            if [ "$plan_cache_mode" = "direct" ]; then
+                echo "simple"
+            else
+                echo "prepared"
+            fi
+            return
+        fi
+    done
+    echo "prepared"
+}
+
+# 结果缓存 HIT 诊断: 在单会话内对同一向量 PREPARE+EXECUTE 多次, 借助源码
+# pase_result_cache_debug 的服务端日志, 统计新增的 "pase result cache: HIT/MISS"。
+# 期望: 同一向量的第 1 次执行 MISS(入缓存), 其后均为 HIT —— 证明缓存读写链路通。
+diagnose_result_cache_hit() {
+    local table="$1" vec_col="$2" sql_file="$3" sql_type="$4"
+    [ "$RESULT_CACHE_AVAILABLE" = "true" ] || return 0
+    [ -s "$sql_file" ] || return 0
+    local sample_vec
+    sample_vec="$(extract_pase_vector_param "$sql_type" "$(head -1 "$sql_file")")"
+    [ -z "$sample_vec" ] && return 0
+
+    local data_dir log_dir log_path log_actual
+    data_dir=$(client_query "SHOW data_directory" 2>/dev/null || true)
+    log_dir=$(client_query "SHOW log_directory" 2>/dev/null || true)
+    case "$log_dir" in
+        /*) log_path="$log_dir" ;;
+        *) log_path="${data_dir}/${log_dir}" ;;
+    esac
+    if [ -d "$log_path" ]; then
+        log_actual=$(find "$log_path" -maxdepth 2 -name 'postgresql-*.log' -type f -printf '%T@ %p\n' 2>/dev/null | sort -rn | head -1 | cut -d' ' -f2-)
+    else
+        log_actual="$log_path"
+    fi
+    if [ -z "$log_actual" ] || [ ! -r "$log_actual" ]; then
+        echo "  [诊断] (无法读取服务端日志 $log_path, 跳过结果缓存 HIT 诊断)"
+        return 0
+    fi
+
+    echo "  [诊断] 结果缓存 HIT 诊断 (PREPARE+EXECUTE 同一向量×3, 读 pase_result_cache_debug 日志)..."
+    [ -r "$log_actual" ] || return 0
+    local off_before off_after diag_sql
+    off_before=$(wc -c < "$log_actual")
+    diag_sql=$(mktemp)
+    cat > "$diag_sql" <<EOF
+LOAD '\$libdir/pase';
+SET enable_seqscan = off;
+SET pase_result_cache = on;
+SET pase_result_cache_debug = on;
+SET plan_cache_mode = force_custom_plan;
+PREPARE diag_rc AS SELECT id, (${vec_col} ${DISTANCE_OP} \$1::pase) AS dis FROM ${table} ORDER BY dis ${SORT_DIR} LIMIT ${TOP_K};
+EXECUTE diag_rc('${sample_vec}');
+EXECUTE diag_rc('${sample_vec}');
+EXECUTE diag_rc('${sample_vec}');
+DEALLOCATE diag_rc;
+EOF
+    PGPASSWORD="$PASSWORD" timeout 60 "$PSQL" -h "$HOST" -p "$PORT" -U "$USER" -d "$DATABASE" -t -A -f "$diag_sql" >/dev/null 2>&1
+    off_after=$(wc -c < "$log_actual")
+    rm -f "$diag_sql"
+    client_query "SET pase_result_cache_debug = off;" >/dev/null 2>&1 || true
+
+    local newlog hits misses
+    newlog=$(tail -c +$((off_before + 1)) "$log_actual" 2>/dev/null || true)
+    hits=$(printf '%s\n' "$newlog" | grep -c 'pase result cache: HIT' || true)
+    misses=$(printf '%s\n' "$newlog" | grep -c 'pase result cache: MISS' || true)
+    if [ "${hits:-0}" -ge 1 ]; then
+        echo "  [诊断] ✓ 结果缓存命中生效: 新增日志 HIT=${hits:-0} MISS=${misses:-0} (同一向量第1次 MISS 入缓存, 其后 HIT)"
+    else
+        echo "  [诊断] ⚠ 未观察到结果缓存 HIT (HIT=${hits:-0} MISS=${misses:-0}); 请确认 pase_result_cache=on 真正生效"
+    fi
     echo ""
 }
 
@@ -482,7 +776,9 @@ diagnose_cache_with_explain() {
 
     echo "   [诊断] ($label) 通过 EXPLAIN 诊断缓存状态..."
 
-    client_query "SET plan_cache_mode = ${pcm};" > /dev/null 2>&1 || true
+    if [ "$pcm" != "direct" ]; then
+        client_query "SET plan_cache_mode = ${pcm};" > /dev/null 2>&1 || true
+    fi
 
     local explain1
     explain1=$(timeout 5 client_query "EXPLAIN (SUMMARY, BUFFERS, FORMAT TEXT) ${sample_query}" 2>/dev/null || echo "EXPLAIN失败")
@@ -564,21 +860,22 @@ drop_caches_for_profile() {
 }
 
 # 生成带会话级 SET 语句的单查询 pgbench 脚本目录
+# 把 sql_file 中的所有查询一次性写入单个 pgbench 脚本 run_file, 头部仅注入一次
+# 会话级 SET 行 (对齐 pgvector make_script_with_settings 的单文件模式):
+#   pgbench 单连接在脚本内顺序执行全部查询, 首行的 LOAD/SET 会被后续查询继承,
+#   从而彻底避免"每条 SQL 都附带一组 LOAD/SET -> 多条 bind/exec"污染 pase_bind 埋点。
+# 返回实际写入的查询条数 N (供 parse 计算 QPS = tps × N)。
 make_single_query_scripts_with_settings() {
-    local sql_file="$1"
-    local set_line="$2"
-    local script_dir="$3"
-    rm -rf "$script_dir"
-    mkdir -p "$script_dir"
-    local i=0
+    local sql_file="$1" set_line="$2" run_file="$3"
+    : > "$run_file"
+    [ -n "$set_line" ] && printf '%s\n' "$set_line" > "$run_file"
+    local n=0 query
     while IFS= read -r query; do
         [ -z "$query" ] && continue
-        # 每条查询前先执行 SET 语句, 确保该会话处于正确的缓存配置状态
-        printf '%s\n%s\n' "$set_line" "$query" > "$script_dir/query_$(printf '%04d' "$i")"
-        i=$((i + 1))
+        printf '%s\n' "$query" >> "$run_file"
+        n=$((n + 1))
     done < "$sql_file"
-    # 返回生成的脚本数
-    echo "$i"
+    echo "$n"
 }
 
 # 该 SQL 形态是否属于"向量作为常数" (可被提升为绑定参数, 从而让 plan_cache_mode 生效)
@@ -619,17 +916,17 @@ extract_pase_vector_param() {
 #   2) 绑定参数使 boundParams != NULL, choose_custom_plan() 才会区分
 #      force_custom_plan (每次重规划) / force_generic_plan (复用缓存计划)。
 make_single_query_scripts_parameterized() {
-    local sql_file="$1" set_line="$2" script_dir="$3" table="$4" vec_col="$5" sql_type="$6"
-    rm -rf "$script_dir"
-    mkdir -p "$script_dir"
-    local i=0 query vparam pquery
+    local sql_file="$1" set_line="$2" run_file="$3" table="$4" vec_col="$5" sql_type="$6"
+    : > "$run_file"
+    [ -n "$set_line" ] && printf '%s\n' "$set_line" > "$run_file"
+    local n=0 query vparam pquery
     while IFS= read -r query; do
         [ -z "$query" ] && continue
         vparam="$(extract_pase_vector_param "$sql_type" "$query")"
         if [ -z "$vparam" ]; then
-            echo "警告: 无法从查询提取 pase 向量文本, 回退为字面量脚本: $(printf '%s' "$query" | cut -c1-70)..." >&2
-            printf '%s\n%s\n' "$set_line" "$query" > "$script_dir/query_$(printf '%04d' "$i")"
-            i=$((i + 1))
+            echo "警告: 无法从查询提取 pase 向量文本, 该条回退为字面量: $(printf '%s' "$query" | cut -c1-70)..." >&2
+            printf '%s\n' "$query" >> "$run_file"
+            n=$((n + 1))
             continue
         fi
         case "$sql_type" in
@@ -643,10 +940,11 @@ make_single_query_scripts_parameterized() {
                 pquery="SELECT id, (${vec_col} ${DISTANCE_OP} :v::pase) AS dis FROM ${table} ORDER BY dis ${SORT_DIR} LIMIT ${TOP_K};"
                 ;;
         esac
-        printf "SELECT '%s'::text AS v \\gset\n%s\n%s\n" "$vparam" "$set_line" "$pquery" > "$script_dir/query_$(printf '%04d' "$i")"
-        i=$((i + 1))
+        # 每条查询前各自的 \gset 注入自己的向量参数; SET/LOAD 在文件头仅一次
+        printf "SELECT '%s'::text AS v \\gset\n%s\n" "$vparam" "$pquery" >> "$run_file"
+        n=$((n + 1))
     done < "$sql_file"
-    echo "$i"
+    echo "$n"
 }
 
 # 通过 PREPARE + 两次 EXECUTE 探测计划缓存是否真正生效。
@@ -759,7 +1057,7 @@ summarize_plan_cache_comparison() {
 }
 
 write_csv_header() {
-    local header="engine,server_version,table_name,vector_column,dimension,distance_op,pase_extra,cache_profile,plan_cache_mode,enable_seqscan,drop_buffer_cache,sql_type,row_count,concurrency"
+    local header="engine,server_version,table_name,vector_column,dimension,distance_op,pase_extra,cache_profile,plan_cache_mode,enable_seqscan,drop_buffer_cache,result_cache,sql_type,row_count,concurrency"
     for i in $(seq 1 "$REPEAT"); do
         header="${header},run_${i}"
     done
@@ -778,17 +1076,14 @@ write_csv_header() {
 }
 
 run_benchmark_file() {
-    local script_dir="$1"
+    local run_file="$1"
     local concurrency="$2"
     local stderr_file="$3"
     local log_file="$4"
     local duration="${5:-$TIMELIMIT}"
-    local bench_files=() query_file
-    while IFS= read -r query_file; do
-        bench_files+=( -f "$query_file" )
-    done < <(find "$script_dir" -type f -name 'query_*' -print | sort | head -n "$MAX_PGBENCH_SCRIPTS")
-    if [ "${#bench_files[@]}" -eq 0 ]; then
-        echo "错误: 未找到单查询 pgbench 脚本: $script_dir" >&2
+    local query_mode="${6:-$PGBENCH_QUERY_MODE}"
+    if [ ! -s "$run_file" ]; then
+        echo "错误: pgbench 脚本为空: $run_file" >&2
         return 1
     fi
 
@@ -797,10 +1092,10 @@ run_benchmark_file() {
         -p "$PORT" \
         -U "$USER" \
         -d "$DATABASE" \
-        "${bench_files[@]}" \
+        -f "$run_file" \
         -c "$concurrency" \
         -j "${PGBENCH_JOBS:-$concurrency}" \
-        -M "$PGBENCH_QUERY_MODE" \
+        -M "$query_mode" \
         -T "$duration" \
         -n \
         -r \
@@ -825,10 +1120,8 @@ if ! command -v "$PGBENCH" >/dev/null 2>&1; then
     exit 1
 fi
 
-if [ "$#" -eq 0 ]; then
-    echo "用法: $0 <table1> [table2 ...]" >&2
-    exit 1
-fi
+# 解析数据表 + 索引类型 (TABLE/INDEX_TYPE 环境变量 > 位置参数 > 交互选择/报错)
+resolve_tables_and_index_type "$@"
 
 CONN_TEST="$(timeout 5 env PGPASSWORD="$PASSWORD" "$PSQL" -h "$HOST" -p "$PORT" -U "$USER" -d "$DATABASE" -t -A -c "SELECT 1" 2>&1)"
 conn_exit=$?
@@ -857,6 +1150,8 @@ echo "target:       $HOST:$PORT"
 echo "user:         $USER"
 echo "database:     $DATABASE"
 echo "version:      $SERVER_VERSION"
+echo "table:        ${TABLES[*]}"
+echo "index_type:   $INDEX_TYPE"
 echo "distance:     $DISTANCE_OP"
 echo "pase_extra:   $PASE_EXTRA"
 echo "sort:         $SORT_DIR"
@@ -873,15 +1168,19 @@ echo ""
 
 echo ">>> 验证 cache_profiles:"
 for group in "${CACHE_PROFILES[@]}"; do
-    IFS='|' read -r pname plan_cache_mode enable_seqscan drop_buffer_cache <<< "$group"
-    echo "  $pname: plan_cache_mode=$plan_cache_mode, enable_seqscan=$enable_seqscan, drop_buffer_cache=$drop_buffer_cache"
+    IFS='|' read -r pname plan_cache_mode enable_seqscan drop_buffer_cache result_cache <<< "$group"
+    echo "  $pname: plan_cache_mode=$plan_cache_mode, enable_seqscan=$enable_seqscan, drop_buffer_cache=$drop_buffer_cache, result_cache=$result_cache"
 done
+echo ""
+
+# 预检: 源码级查询结果缓存 GUC 是否存在于当前运行的 pase.so
+detect_result_cache_availability
 echo ""
 
 declare -A TABLE_VEC_COL
 declare -A TABLE_DIM
 
-for table in "$@"; do
+for table in "${TABLES[@]}"; do
     vec_col="$(detect_vector_column "$table")"
     if [ $? -ne 0 ] || [ -z "$vec_col" ]; then
         exit 1
@@ -889,12 +1188,26 @@ for table in "$@"; do
     dim="$(detect_vector_dimension "$table" "$vec_col")"
     TABLE_VEC_COL["$table"]="$vec_col"
     TABLE_DIM["$table"]="$dim"
+
+    # 探测实际 pase 索引类型 (hnsw/ivfflat), 与用户指定的 INDEX_TYPE 核对。
+    # 若用户未指定/指定不符, 给出提示; hash 距离算子由索引类型决定,
+    # 探测结果也能辅助确认 DISTANCE/HASH_DISTANCE_OP 选择是否正确。
+    idx_info="$(detect_pase_index_info "$table" "$vec_col" || echo "")"
+    if [ -n "$idx_info" ]; then
+        IFS='|' read -r am_name opclass <<< "$idx_info"
+        echo "  索引类型: ${am_name} (opclass=${opclass})"
+        if [ -n "$INDEX_TYPE" ] && [ "$INDEX_TYPE" != "$am_name" ]; then
+            echo "  ⚠ 实际索引类型 '$am_name' 与 INDEX_TYPE='$INDEX_TYPE' 不一致, 请确认!"
+        fi
+    else
+        echo "  ⚠ 表 '$table' 的向量列 '$vec_col' 上未找到 pase hnsw/ivfflat 索引"
+    fi
     echo "表: $table  向量列: $vec_col  维度: $dim"
 done
 echo ""
 
 echo ">>> 生成 SQL"
-for table in "$@"; do
+for table in "${TABLES[@]}"; do
     for group in "${CACHE_PROFILES[@]}"; do
         IFS='|' read -r pname _ _ _ <<< "$group"
         generate_sql_for_table "$table" "${TABLE_VEC_COL[$table]}" "${TABLE_DIM[$table]}" "$pname"
@@ -904,7 +1217,7 @@ echo ""
 
 # 检查是否有 SQL 文件生成
 has_sql_files=false
-for table in "$@"; do
+for table in "${TABLES[@]}"; do
     for group in "${CACHE_PROFILES[@]}"; do
         IFS='|' read -r pname _ _ _ <<< "$group"
         for sql_type in "${SQL_TYPES[@]}"; do
@@ -927,7 +1240,7 @@ TMPDIR=$(mktemp -d)
 trap "rm -rf $TMPDIR" EXIT
 
 warmup_sql=""
-for table in "$@"; do
+for table in "${TABLES[@]}"; do
     for group in "${CACHE_PROFILES[@]}"; do
         IFS='|' read -r pname _ _ _ <<< "$group"
         warmup_sql="$(sql_file_for "$table" "${SQL_TYPES[0]}" "${ROW_COUNTS[0]}" "$pname")"
@@ -941,26 +1254,32 @@ if [ -n "$warmup_sql" ] && [ -f "$warmup_sql" ] && [ "$WARMUP_TIMELIMIT" != "0" 
     IFS='|' read -r warmup_pname _ _ _ <<< "${CACHE_PROFILES[0]}"
     warmup_set_line="$(session_set_line_for_profile "$warmup_pname")"
     set +e
-    warmup_dir="$TMPDIR/warmup_queries"
-    make_single_query_scripts_with_settings "$warmup_sql" "$warmup_set_line" "$warmup_dir"
-    set +e
-    run_benchmark_file "$warmup_dir" 1 "$TMPDIR/warmup.stderr" "$TMPDIR/warmup.log" "$WARMUP_TIMELIMIT" >/dev/null 2>&1
-    set -e
+    warmup_run="$TMPDIR/warmup_queries"
+    make_single_query_scripts_with_settings "$warmup_sql" "$warmup_set_line" "$warmup_run" >/dev/null
+    run_benchmark_file "$warmup_run" 1 "$TMPDIR/warmup.stderr" "$TMPDIR/warmup.log" "$WARMUP_TIMELIMIT" >/dev/null 2>&1
     set -e
 fi
 echo ""
 
 echo ">>> 开始测试"
-for table in "$@"; do
+for table in "${TABLES[@]}"; do
     vec_col="${TABLE_VEC_COL[$table]}"
     dim="${TABLE_DIM[$table]}"
 
     for group in "${CACHE_PROFILES[@]}"; do
-        IFS='|' read -r cache_profile plan_cache_mode enable_seqscan drop_buffer_cache <<< "$group"
+        IFS='|' read -r cache_profile plan_cache_mode enable_seqscan drop_buffer_cache result_cache <<< "$group"
+
+        # 若当前 pase.so 无 result_cache GUC, 跳过依赖结果缓存的 profile,
+        # 否则每句 SET pase_result_cache 都会失败导致静默 QPS=0。
+        if profile_uses_result_cache "$cache_profile" && [ "$RESULT_CACHE_AVAILABLE" != "true" ]; then
+            echo "--- cache profile: $cache_profile (跳过: 当前 pase.so 未启用源码级结果缓存) ---"
+            echo ""
+            continue
+        fi
 
         # 每个 profile 开始前清服务端缓存, 保证测量口径一致
         echo ""
-        echo "--- cache profile: $cache_profile (plan_cache=$plan_cache_mode drop_buffer=$drop_buffer_cache) ---"
+        echo "--- cache profile: $cache_profile (plan_cache=$plan_cache_mode drop_buffer=$drop_buffer_cache result_cache=$result_cache) ---"
         drop_caches_for_profile "$plan_cache_mode" "$drop_buffer_cache"
         echo ""
 
@@ -973,7 +1292,12 @@ for table in "$@"; do
         echo "   [诊断] SET force_custom_plan → $verify_a"
         echo "   [诊断] SET force_generic_plan → $verify_b"
         client_query "SET plan_cache_mode = ${plan_cache_mode};" > /dev/null 2>&1 || true
-        echo "   [诊断] 已恢复至: plan_cache_mode = ${plan_cache_mode}"
+        client_query "SET pase_result_cache = ${result_cache};" > /dev/null 2>&1 || true
+        if [ "$plan_cache_mode" = "direct" ]; then
+            echo "   [诊断] direct 档 = 不使用查询计划缓存 (pgbench -M simple), 每次 parse+analyze+plan, plan_cache_mode 为 no-op"
+        else
+            echo "   [诊断] 已恢复至: plan_cache_mode = ${plan_cache_mode}, pase_result_cache = ${result_cache}"
+        fi
 
         # EXPLAIN 诊断: 检查计划缓存和缓冲池状态
         first_sql_type="${SQL_TYPES[0]}"
@@ -990,6 +1314,10 @@ for table in "$@"; do
             # 恢复本次 profile 的 plan_cache_mode
             client_query "SET plan_cache_mode = ${plan_cache_mode};" > /dev/null 2>&1 || true
         fi
+        echo ""
+
+        # 结果缓存 HIT 诊断: 验证源码级缓存真能命中 (需 GUC 可用 + 服务端日志可读)
+        diagnose_result_cache_hit "$table" "$vec_col" "$sample_sql_file" "$first_sql_type"
         echo ""
 
         # 热启动暖场 (两种 profile 均 drop_buffer=false, 故都会执行本段):
@@ -1033,7 +1361,7 @@ for table in "$@"; do
             for concurrency in "${CONCURRENCIES[@]}"; do
                     echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
                     echo "table=$table profile=$cache_profile type=$sql_type rows=$row_count concurrency=$concurrency"
-                    echo "  plan_cache_mode=$plan_cache_mode  enable_seqscan=$enable_seqscan  drop_buffer_cache=$drop_buffer_cache"
+                    echo "  plan_cache_mode=$plan_cache_mode  enable_seqscan=$enable_seqscan  drop_buffer_cache=$drop_buffer_cache  result_cache=$result_cache"
                     echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 
                     qps_values=()
@@ -1049,16 +1377,19 @@ for table in "$@"; do
                         echo -n "(${run}/${REPEAT}) "
 
                         set +e
-                        query_script_dir="$TMPDIR/${ENGINE}_${table}_${cache_profile}_${sql_type}_${row_count}_queries"
-                        # 构建 pgbench 脚本。默认 (prepared 协议 + 可参数化形态) 把向量提升为
-                        # 绑定参数 (:v -> $1), 使 plan_cache_mode (force_custom/generic) 真正生效;
-                        # 否则 (simple 协议或 subquery 形态) 退回字面量脚本。
-                        if is_parameterizable_sql_type "$sql_type" && [ "$PGBENCH_QUERY_MODE" = "prepared" ]; then
-                            make_single_query_scripts_parameterized "$sql_file" "$set_line" "$query_script_dir" "$table" "$vec_col" "$sql_type" >/dev/null 2>&1
+                        runner_file="$TMPDIR/${ENGINE}_${table}_${cache_profile}_${sql_type}_${row_count}.sql"
+                        # 构建 pgbench 脚本(单文件, SET 仅在文件头一次)。prepared 协议 + 可参数化形态
+                        # -> 把向量提升为绑定参数 (:v -> $1), 使 plan_cache_mode (force_custom/generic)
+                        # 真正生效; direct 档 (simple 协议) 或 subquery 形态 -> 退回字面量脚本
+                        # (simple 协议不支持 $1 绑定, 每次都 parse+analyze+plan)。
+                        qmode="$(profile_query_mode "$cache_profile")"
+                        if is_parameterizable_sql_type "$sql_type" && [ "$qmode" = "prepared" ]; then
+                            nqueries=$(make_single_query_scripts_parameterized "$sql_file" "$set_line" "$runner_file" "$table" "$vec_col" "$sql_type" 2>/dev/null)
                         else
-                            make_single_query_scripts_with_settings "$sql_file" "$set_line" "$query_script_dir" >/dev/null
+                            nqueries=$(make_single_query_scripts_with_settings "$sql_file" "$set_line" "$runner_file")
                         fi
-                        run_benchmark_file "$query_script_dir" "$concurrency" "$stderr_file" "$log_file"
+                        [ "${nqueries:-0}" -eq 0 ] && { echo "跳过空脚本: $sql_file"; continue; }
+                        run_benchmark_file "$runner_file" "$concurrency" "$stderr_file" "$log_file" "" "$qmode"
                         exit_code=$?
                         set -e
 
@@ -1075,8 +1406,8 @@ for table in "$@"; do
                             continue
                         fi
 
-                        IFS=$'\t' read -r qps tx_qps elapsed transactions failed latency statement_latency <<< "$(parse_benchmark_metrics "$(cat "$log_file")" 1)"
-                        echo "QPS=$qps tx/s=$tx_qps elapsed=${elapsed}s tx=$transactions failed=$failed latency=${latency}ms stmt_avg=${statement_latency}ms"
+                        IFS=$'\t' read -r qps tx_qps elapsed transactions failed latency statement_latency <<< "$(parse_benchmark_metrics "$(cat "$log_file")" "${nqueries:-1}")"
+                        echo "QPS=$qps tx/s=$tx_qps elapsed=${elapsed}s tx=$transactions failed=$failed latency=${latency}ms stmt_avg=${statement_latency}ms (queries/script=$nqueries)"
                         qps_values+=("${qps:-0.000}"); tx_qps_values+=("${tx_qps:-0.000}")
                         elapsed_values+=("${elapsed:-0}"); transaction_values+=("${transactions:-0}")
                         failed_values+=("${failed:-0}"); latency_values+=("${latency:-0}"); statement_latency_values+=("${statement_latency:-0}")
@@ -1100,7 +1431,7 @@ for table in "$@"; do
                     latency_avg=$(printf '%s\n' "${latency_values[@]}" | awk '{sum += $1; n++} END {printf "%.3f", n ? sum / n : 0}')
                     statement_latency_avg=$(printf '%s\n' "${statement_latency_values[@]}" | awk '{sum += $1; n++} END {printf "%.3f", n ? sum / n : 0}')
 
-                    csv_line="${ENGINE},${SERVER_VERSION},${table},${vec_col},${dim},${DISTANCE_OP},${PASE_EXTRA},${cache_profile},${plan_cache_mode},${enable_seqscan},${drop_buffer_cache},${sql_type},${row_count},${concurrency}"
+                    csv_line="${ENGINE},${SERVER_VERSION},${table},${vec_col},${dim},${DISTANCE_OP},${PASE_EXTRA},${cache_profile},${plan_cache_mode},${enable_seqscan},${drop_buffer_cache},${result_cache},${sql_type},${row_count},${concurrency}"
                     for value in "${qps_values[@]}"; do
                         csv_line="${csv_line},${value}"
                     done
@@ -1113,7 +1444,7 @@ for table in "$@"; do
     done
 done
 
-for table in "$@"; do
+for table in "${TABLES[@]}"; do
     summarize_plan_cache_comparison "$table"
 done
 

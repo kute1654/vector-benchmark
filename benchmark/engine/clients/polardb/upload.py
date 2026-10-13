@@ -1,6 +1,7 @@
 import math
+import threading
 import time
-from typing import List, Optional
+from typing import Callable, List, Optional
 
 import psycopg2
 from psycopg2.extras import execute_values
@@ -106,9 +107,27 @@ class PolarDBUploader(BaseUploader):
         stage("POST UPLOAD")
         sql_log(sql)
         build_begin = time.perf_counter()
-        with cls.connection.cursor() as cursor:
-            cursor.execute(sql)
-        cls.connection.commit()
+        # pase HNSW 建索引是一个长时间阻塞的 DDL。把它放到后台线程执行，
+        # 主线程每隔 heartbeat_every 秒输出一次提示（与其它数据库索引阶段的
+        # 定期进度提示保持一致），让用户能实时看到建索引仍在进行而不是"卡死"。
+        _build_errors: List[Exception] = []
+
+        def _run_ddl() -> None:
+            try:
+                with cls.connection.cursor() as cursor:
+                    cursor.execute(sql)
+                cls.connection.commit()
+            except BaseException as exc:  # noqa: BLE001
+                _build_errors.append(exc)
+
+        build_thread = threading.Thread(target=_run_ddl, daemon=True)
+        build_thread.start()
+        while build_thread.is_alive():
+            build_thread.join(timeout=30)
+            if build_thread.is_alive():
+                step(f"⏳ index building in progress... elapsed {time.perf_counter() - build_begin:.1f}s")
+        if _build_errors:
+            raise _build_errors[0]
         build_time = time.perf_counter() - build_begin
         step(f"✓ Vector index built successfully in {build_time:.3f}s")
         # `optimize: true` (ck/myscale convention) -> ANALYZE so the planner has

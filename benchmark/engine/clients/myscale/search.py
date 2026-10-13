@@ -101,6 +101,8 @@ class MyScaleSearcher(BaseSearcher):
     host: str = None
     parser = MyScaleConditionParser()
     connection_params: dict = {}
+    # None = not probed yet; see _supports_string_to_vector_parallel.
+    _string_to_vector_supported: Optional[bool] = None
 
     @classmethod
     def _apply_session_settings(cls, connection, session_settings: dict):
@@ -264,8 +266,56 @@ class MyScaleSearcher(BaseSearcher):
         cls.apply_query_plan_cache_settings(search_params, protocol)
 
     @classmethod
+    def _string_to_vector_parallel_sql(cls, search_params: dict, protocol: str) -> Optional[str]:
+        """SQL for the fork's parallel string->vector conversion settings.
+
+        Returns None when the config does not pick a mode (leave the server
+        default alone, i.e. the pre-existing serial path) or when the server
+        has no such settings.
+        """
+        mode_raw = (search_params or {}).get("string_to_vector_parallel_mode", None)
+        if mode_raw is None:
+            return None
+        if not cls._supports_string_to_vector_parallel(protocol):
+            return None
+        mode = _to_int(mode_raw, 0)
+        threads = _to_int((search_params or {}).get("string_to_vector_parallel_threads", None), 0)
+        return (f"SET string_to_vector_parallel_mode = {mode}, "
+                f"string_to_vector_parallel_threads = {threads}")
+
+    @classmethod
+    def _supports_string_to_vector_parallel(cls, protocol: str) -> bool:
+        """Probe system.settings once per process (upstream ClickHouse lacks these)."""
+        if cls._string_to_vector_supported is None:
+            probe = (
+                "SELECT count() FROM system.settings WHERE name IN "
+                "('string_to_vector_parallel_mode', 'string_to_vector_parallel_threads')"
+            )
+            found = None
+            try:
+                client = cls.get_client()
+                if protocol == "tcp":
+                    rows = client.execute(probe)
+                    found = int(rows[0][0]) if rows else 0
+                else:
+                    found = int(client.command(probe))
+            except Exception as e:
+                warn(f"failed to probe string_to_vector_parallel_mode support: {e}")
+            if found is None:
+                # Transient failure (e.g. the connection just went away): do not
+                # cache it, so the next searcher retries instead of silently
+                # downgrading the rest of the run to the serial path.
+                return False
+            cls._string_to_vector_supported = found == 2
+            if not cls._string_to_vector_supported:
+                warn(
+                    "server does not support string_to_vector_parallel_mode/threads: "
+                    "string->vector conversion stays on the default (serial) path"
+                )
+        return cls._string_to_vector_supported
+
+    @classmethod
     def apply_query_plan_cache_settings(cls, search_params: dict, protocol: str):
-        print(search_params)
         cache_mode = _to_int((search_params or {}).get("use_query_plan_cache", search_params.get("use_query_plan_cache", 0)), 0)
         CAST_mode = _to_int((search_params or {}).get("query_plan_cache_enable_CAST", 0), 0)
         query_cache = _to_int((search_params or {}).get("use_query_cache", 0), 0)
@@ -287,6 +337,7 @@ class MyScaleSearcher(BaseSearcher):
         set_read_cache_sql = f"SET enable_reads_from_query_cache = {query_cache}"
         set_write_cache_sql = f"SET enable_writes_to_query_cache = {query_cache}"
         set_cache_min_query_sql = f"SET query_cache_min_query_runs = {query_cache}"
+        set_sv_sql = cls._string_to_vector_parallel_sql(search_params, protocol)
         try:
             client = cls.get_client()
             if protocol == "tcp":
@@ -300,6 +351,8 @@ class MyScaleSearcher(BaseSearcher):
                 client.execute(set_replace_sql)
                 client.execute(set_only_vector_sql)
                 client.execute(set_only_cache_query_plan_sql)
+                if set_sv_sql:
+                    client.execute(set_sv_sql)
             else:
                 client.command(drop_query_cache_sql)
                 client.command(drop_query_plan_cache_sql)
@@ -311,6 +364,8 @@ class MyScaleSearcher(BaseSearcher):
                 client.command(set_replace_sql)
                 client.command(set_only_vector_sql)
                 client.command(set_only_cache_query_plan_sql)
+                if set_sv_sql:
+                    client.command(set_sv_sql)
         except Exception as e:
             warn(f"failed to set query plan cache settings: {e}")
 

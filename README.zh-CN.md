@@ -1,6 +1,7 @@
 # vector-benchmark
 
 统一的向量数据库性能基准测试框架，支持 **pgvector**、**ClickHouse**、**MyScale** 和 **PolarDB-pg (PASE)**。
+架构与设计说明见 [设计文档](benchmark/docs/design.md)。
 
 语言：中文 | [English](README.md)
 
@@ -8,74 +9,61 @@
 
 ```
 vector-benchmark/
-├── benchmark/                          # Python 基准测试框架
-│   ├── run.py                          #   主入口（Nuitka 编译目标）
-│   ├── config_read.py                  #   配置文件读取
-│   ├── dataset.py                      #   数据集管理
-│   ├── dataset_config.py               #   数据集配置
+├── benchmark/                          # Python 基准测试框架（主包）
+│   ├── run.py                          #   主基准入口（MyscaleBench，Nuitka 编译目标）
+│   ├── query_forms.py                  #   SQL 形式 × 缓存档位 QPS 对比
+│   ├── generate_sql_files.py           #   生成 bash 测试用 SQL 文件
+│   ├── analyze_pgvector_log.py         #   pgvector 服务端日志分析
+│   ├── analyze_myscale_log.py          #   MyScale 服务端日志分析
+│   ├── analyze_polardb_log.py          #   PolarDB PASE 服务端日志分析
+│   ├── config_read.py                  #   配置读取（引擎/数据集）
+│   ├── dataset.py                      #   数据集管理（下载/读取器分派）
+│   ├── dataset_config.py               #   数据集配置模型
 │   ├── cli_output.py                   #   CLI 输出格式化
+│   ├── __init__.py                     #   包导出 + 目录解析
+│   ├── requirements.txt                #   Python 依赖
 │   ├── datasets/                       #   数据集
 │   │   ├── datasets.json               #     数据集注册表
-│   │   ├── downloads/                  #     下载的 HDF5 文件
-│   │   └── .gitignore
+│   │   └── downloads/                  #     下载的数据文件
+│   ├── configurations/                 #   实验配置（JSON 数组）
+│   │   ├── config.json                 #     默认实验配置
+│   │   └── templates/                  #     配置模板（复制到 configurations/ 使用）
 │   ├── engine/                         #   引擎抽象层
-│   │   ├── base_client/                #     基础客户端类
-│   │   │   ├── base.py                 #       BaseClient（上传/建索引/查询）
-│   │   │   ├── configure.py            #       BaseConfigure（建表/建索引）
+│   │   ├── base.py                     #     BaseEngine（QPS/召回率测量）
+│   │   ├── pgvector.py / polardb.py / clickhouse.py / myscale.py
+│   │   ├── base_client/                #     客户端基类
+│   │   │   ├── client.py               #       BaseClient（编排上传/建索引/查询）
+│   │   │   ├── configure.py            #       BaseConfigurator（建表/建索引）
 │   │   │   ├── search.py               #       BaseSearcher（查询 + session_settings）
-│   │   │   └── upload.py               #       BaseUploader（数据导入）
-│   │   ├── clients/                    #     各数据库客户端实现
-│   │   │   ├── pgvector/               #       pgvector
-│   │   │   │   ├── config.py           #         默认配置常量
-│   │   │   │   ├── configure.py        #         建表/建索引
-│   │   │   │   ├── search.py           #         向量查询（支持 SET）
-│   │   │   │   └── upload.py           #         数据导入
-│   │   │   ├── clickhouse/             #       ClickHouse
-│   │   │   │   ├── config.py
-│   │   │   │   ├── configure.py
-│   │   │   │   ├── search.py           #         向量查询（支持 SET）
-│   │   │   │   └── upload.py
-│   │   │   ├── myscale/                #       MyScale
-│   │   │   │   ├── config.py
-│   │   │   │   ├── configure.py
-│   │   │   │   ├── search.py           #         向量查询（支持 SET）
-│   │   │   │   └── upload.py
-│   │   │   └── polardb/                #       PolarDB-pg (PASE)
-│   │   │       ├── config.py
-│   │   │       ├── configure.py
-│   │   │       ├── search.py
-│   │   │       └── upload.py
-│   │   ├── client_factory.py           #     客户端工厂
-│   │   └── __init__.py
+│   │   │   ├── upload.py               #       BaseUploader（数据导入）
+│   │   │   ├── parser.py               #       BaseClientParser（结果解析）
+│   │   │   └── distances.py / utils.py
+│   │   └── clients/                    #     各数据库客户端实现
+│   │       ├── client_factory.py       #       客户端工厂（笛卡尔积展开）
+│   │       └── pgvector/ clickhouse/ myscale/ polardb/
 │   ├── dataset_reader/                 #   数据集读取器
-│   │   ├── base_reader.py              #     基础读取器
-│   │   ├── h5_reader.py                #     HDF5 格式读取器
+│   │   ├── base_reader.py              #     读取器基类
+│   │   ├── ann_h5_reader.py            #     ann-benchmarks HDF5（h5）
+│   │   ├── ann_compound_reader.py      #     复合归档（tar）
+│   │   ├── json_reader.py              #     JSONL（jsonl）
+│   │   ├── gz_tsv_reader.py            #     BeIR 文本检索（gz_tsv）
 │   │   └── utils.py
 │   ├── results/                        #   测试结果（CSV/JSON）
-│   └── __init__.py                     #   包导出
+│   ├── docs/                           #   框架文档
+│   │   ├── design.md                   #     设计文档
+│   │   └── dataset.md                  #     数据集格式说明
+│   └── bash-test/                      #   sh 类 QPS 测试（ClickHouse / MyScale）
+│       ├── clickhouse-benchmark.sh     #   ClickHouse/MyScale 原生 QPS 压测
+│       ├── pgvector-benchmark.sh       #   [可清除] pgvector（pgbench，见 design.md 附录 B）
+│       ├── polardb-pase-query-forms-benchmark.sh # [可清除] PolarDB PASE（pgbench，见 design.md 附录 B）
+│       ├── generate-sql-files.sh       #   采样生成测试 SQL
+│       ├── verify_string_to_vector_engine.py   #  MyScale string→vector 校验
+│       └── sql-bench/                  #   生成的 SQL 文件
 │
-├── bash-test/                          # Shell 级精确 QPS 测试
-│   ├── clickhouse-benchmark.sh         #   ClickHouse 测试（clickhouse-benchmark）
-│   ├── pgvector-query-forms-benchmark.sh # pgvector 测试（pgbench）
-│   ├── polardb-pase-query-forms-benchmark.sh # PolarDB 测试（pgbench）
-│   ├── setup-pgvector-from-h5.sh       #   pgvector HDF5 -> 建表
-│   ├── setup-polardb-pase-from-h5.sh   #   PolarDB HDF5 -> 建表
-│   ├── generate-sql-files.sh           #   生成测试 SQL
-│   └── sql-bench/                      #   生成的 SQL 文件
-│
-├── configurations/                     # 实验配置文件（JSON）
-│   ├── pgvector.json                   #   pgvector 测试配置
-│   ├── clickhouse.json                 #   ClickHouse 测试配置
-│   ├── myscale.json                    #   MyScale 测试配置
-│   └── polardb.json                    #   PolarDB 测试配置
-│
-├── docs/                               # 详细文档
-│   ├── README.md                       #   英文版
-│   └── README.zh-CN.md                 #   中文版
-│
+├── docs/                               # 查询形式 / 计划缓存分析文档
+├── results/                            # Shell 基准结果汇总 CSV
 ├── README.md                           # 英文版
 ├── README.zh-CN.md                     # 中文版
-├── requirements.txt                    # Python 依赖
 ├── build_nuitka.sh                     # Nuitka 构建脚本（x86_64）
 └── build_nuitka_arm.sh                 # Nuitka 构建脚本（ARM64）
 ```
@@ -85,7 +73,7 @@ vector-benchmark/
 ### 1. 安装依赖
 
 ```bash
-cd vector-benchmark
+cd vector-benchmark/benchmark
 pip install -r requirements.txt
 ```
 
@@ -159,7 +147,9 @@ python run.py --engines pgvector-sift-128-euclidean --recall-only
 
 ### 5. 比较全部 SQL 形式与缓存配置
 
-为四个目标表完成建表和建索引后，可以运行一个矩阵覆盖所有已注册的查询形式：
+为四个目标表完成建表和建索引后，可以运行一个矩阵覆盖所有已注册的查询形式。需要先准备一个
+JSON 目标配置文件（包含目标表的连接参数与表名；若包含多个引擎，建议一次只测一个，参考
+`query_forms.py` 的 `--config` 参数说明），例如：
 
 ```bash
 cd ..
@@ -285,7 +275,7 @@ python -m benchmark query_forms \
 | 距离函数 | `l2`、`ip`、`cosine` |
 | 默认端口 | 5432 |
 | 连接方式 | psycopg2 |
-| Shell 测试 | pgbench |
+| QPS 测量 | Python（run.py / query_forms.py） |
 
 ### ClickHouse
 
@@ -295,7 +285,7 @@ python -m benchmark query_forms \
 | 距离函数 | `l2`、`dot`、`cosine` |
 | 默认端口 | 9000 (tcp) / 8123 (http) |
 | 连接方式 | clickhouse-driver (tcp) / clickhouse-connect (http) |
-| Shell 测试 | clickhouse-benchmark |
+| QPS 测量 | clickhouse-benchmark.sh |
 
 ### MyScale
 
@@ -305,7 +295,7 @@ python -m benchmark query_forms \
 | 距离函数 | `l2`、`dot`、`cosine` |
 | 默认端口 | 9000 (tcp) / 8123 (http) |
 | 连接方式 | clickhouse-driver (tcp) / clickhouse-connect (http) |
-| Shell 测试 | clickhouse-benchmark |
+| QPS 测量 | clickhouse-benchmark.sh |
 
 ### PolarDB-pg (PASE)
 
@@ -315,66 +305,46 @@ python -m benchmark query_forms \
 | 距离函数 | `l2`、`ip`、`cosine` |
 | 默认端口 | 5433 |
 | 连接方式 | psycopg2 |
-| Shell 测试 | pgbench |
+| QPS 测量 | Python（run.py / query_forms.py） |
 
 ## 测试模式
 
-### Python 测试（粗 QPS + 召回率）
+框架只保留**两类**测试脚本：
+
+### Python 测试（建库 / 建索引 + QPS + 召回率）
+
+由 `run.py`（及 `query_forms.py`）驱动，负责创建数据库、建表、建索引、导入数据，
+并测量 QPS 与召回率：
 
 - **duration 模式**：在指定时间内持续发送查询，测量 QPS
 - **count 模式**：执行固定数量查询，测量延迟和召回率
 - **recall-only 模式**：单进程遍历所有测试查询，仅输出召回率指标
 
-### Shell 测试（精确 QPS）
+**pgvector、PolarDB-pg (PASE)** 的 QPS 以本路径（Python）为权威口径——因为 pgbench 无法测试
+查询计划缓存的真实 QPS，而 Python 客户端能精确装配会话级 SET 与 prepared statement。
 
-使用数据库原生测试工具（pgbench / clickhouse-benchmark）进行精确 QPS 测量，消除 Python 网络开销影响：
+### sh 测试（ClickHouse / MyScale 的向量检索 QPS）
+
+使用数据库原生工具 `clickhouse-benchmark` 直接测量向量检索 QPS。Python 驱动测量时会因脚本额外
+开销大而拉低 QPS 数值，因此 **ClickHouse / MyScale** 的 QPS 以本路径为权威口径：
 
 ```bash
-# pgvector
-cd bash-test
-PSQL=/usr/local/pgsql/bin/psql PGBENCH=/usr/local/pgsql/bin/pgbench \
-    REPEAT=5 TIMELIMIT=30 \
-    ./pgvector-query-forms-benchmark.sh benchmark_sift_128_1k
+cd benchmark/bash-test
 
 # ClickHouse
-cd bash-test
 ./clickhouse-benchmark.sh benchmark_sift_128
 
-# PolarDB
-cd bash-test
-PSQL=/usr/local/pgsql/bin/psql PGBENCH=/usr/local/pgsql/bin/pgbench \
-    REPEAT=5 TIMELIMIT=30 \
-    ./polardb-pase-query-forms-benchmark.sh benchmark_sift_128_1k
+# MyScale
+ENGINE=myscale ./clickhouse-benchmark.sh benchmark_sift_128
 ```
+
+> 先通过 `python run.py`（上传阶段）完成目标表的建表、建索引与数据导入，再执行上述 sh 脚本。
+> 脚本用法详见 `clickhouse-benchmark.sh` 头部注释。
 
 ## Shell 建表与索引操作
 
-### pgvector 建表并导入数据
-
-```bash
-cd bash-test
-PSQL=/usr/local/pgsql/bin/psql ./setup-pgvector-from-h5.sh \
-    ../benchmark/datasets/downloads/sift-128-euclidean.hdf5 \
-    benchmark_sift_128_1k 1000 10 l2
-
-# 参数说明：
-#   $1: HDF5 文件路径
-#   $2: 表名
-#   $3: 导入行数 (train_count)
-#   $4: top_k
-#   $5: 距离类型 (l2/ip/cosine)
-```
-
-### PolarDB 建表并导入数据
-
-```bash
-cd bash-test
-PSQL=/usr/local/pgsql/bin/psql ./setup-polardb-pase-from-h5.sh \
-    ../benchmark/datasets/downloads/sift-128-euclidean.hdf5 \
-    benchmark_sift_128_1k 1000 10 l2
-```
-
-### 手动创建索引
+建表、建索引与数据导入统一由 `python run.py` 的上传阶段完成（见 `upload_params` 配置）。
+也可按如下方式手动创建索引：
 
 ```sql
 -- pgvector HNSW 索引
