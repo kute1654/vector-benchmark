@@ -23,6 +23,7 @@ import sys
 import json
 import csv
 import argparse
+from datetime import datetime
 from collections import OrderedDict
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -47,6 +48,16 @@ RE_HV = re.compile(r"PGVECTOR_TIMING\] halfvec_in .*?ms=([\d.]+)")
 # pgvector/src/vector.c 的 array_to_vector 已输出 PGVECTOR_TIMING), 而非 vector_in,
 # 因此 cache=0/2 时应作为“向量转换耗时”计入 vi, 与 vector_in 列口径一致。
 RE_ATV = re.compile(r"PGVECTOR_TIMING\] array_to_vector .*?ms=([\d.]+)")
+
+# 单个 PID 至少应含的 PGVECTOR_TIMING 记录数。正常搜索 PID 具备持续的向量查询
+# (QPS 通常 >10), 记录数远大于 40; 记录过少的 PID 是连接建立后即中断/截断的残缺
+# 单元, 其耗时/次数统计无意义, 直接在解析阶段剔除。
+MIN_PID_RECORDS = 40
+
+# 相邻 PID 开始时间差超过该秒数视为一次新的独立测试批次(日志因未清空会累积多轮
+# 运行与 PG 重启碎片)。预热约 5s + 查询约 test_duration(60s), 故同一连续批次内
+# 相邻 PID 开始时间差 <= 61s; 大于该值即为批次边界。
+GAP_MAX = 61
 
 
 # --------------------------------------------------------------------------- #
@@ -142,12 +153,14 @@ def resolve_table(cfg, n_pids, target=None):
 # --------------------------------------------------------------------------- #
 # 日志解析(每次直接解析日志文件)
 # --------------------------------------------------------------------------- #
-def parse_log(log_path=LOG_PATH):
+def parse_log(log_path=LOG_PATH, min_records=MIN_PID_RECORDS):
     """解析整份日志,返回 {pid: rec}。
 
-    rec = {ts_first, ts_last, sq:[(p,a,pl,e)...], eq:[(eval,gcp,name)...],
+    rec = {ts_first, ts_last, n, sq:[(p,a,pl,e)...], eq:[(eval,gcp,name)...],
            vi:[ms...], hv:[ms...], stmt_name}
-    仅保留含 PGVECTOR_TIMING 的行,先做子串快速过滤再正则匹配。
+    仅保留含 PGVECTOR_TIMING 的行,先做子串快速过滤再正则匹配。统计每个 PID 的
+    计时记录条数 n, 记录数少于 min_records 的 PID(连接建立后即中断的残缺单元,
+    其次数/耗时统计不可靠)直接剔除。
     """
     data = OrderedDict()
     with open(log_path, "r", encoding="utf-8", errors="replace") as f:
@@ -160,9 +173,10 @@ def parse_log(log_path=LOG_PATH):
             ts, pid = m.group(1), m.group(3)
             rec = data.get(pid)
             if rec is None:
-                rec = data[pid] = {"ts_first": ts, "ts_last": ts, "sq": [], "eq": [],
-                                   "vi": [], "hv": [], "stmt_name": None}
+                rec = data[pid] = {"ts_first": ts, "ts_last": ts, "n": 0, "sq": [],
+                                   "eq": [], "vi": [], "hv": [], "stmt_name": None}
             rec["ts_last"] = ts
+            rec["n"] += 1
             if "simple_query" in line:
                 sm = RE_SQ.search(line)
                 if sm:
@@ -184,6 +198,13 @@ def parse_log(log_path=LOG_PATH):
                 am = RE_ATV.search(line)
                 if am:
                     rec["vi"].append(float(am.group(1)))
+    dropped = [(pid, rec["n"]) for pid, rec in data.items() if rec["n"] < min_records]
+    for pid, _ in dropped:
+        del data[pid]
+    if dropped:
+        sample = ", ".join(f"{p}({n})" for p, n in sorted(dropped)[:6])
+        print(f"  (warn) 剔除记录数 <{min_records} 的残缺 PID: 共 {len(dropped)} 个 "
+              f"[{sample}]", file=sys.stderr)
     return data
 
 
@@ -256,6 +277,28 @@ def layout_cells(pids, pid_data):
                         roles[role].append(pid)
                     cells[(mode, st, cache, uqc)] = roles
     return cells
+
+
+def split_contiguous(pids, pid_data, gap_max=GAP_MAX):
+    """按时间连续性把已按 ts_first 排序的 pids 切成段。
+
+    相邻 PID 开始时间差 > gap_max 秒即视为批次边界。返回 list[list[pid]],
+    每个子段为一次时间连续测试批次的 PID(保持原时序)。
+    """
+    def to_epoch(ts):
+        return datetime.strptime(ts, "%Y-%m-%d %H:%M:%S").timestamp()
+
+    groups, cur, prev = [], [], None
+    for p in pids:
+        ts = pid_data[p]["ts_first"]
+        if prev is not None and (to_epoch(ts) - to_epoch(prev)) > gap_max:
+            groups.append(cur)
+            cur = []
+        cur.append(p)
+        prev = ts
+    if cur:
+        groups.append(cur)
+    return groups
 
 
 def combo_lookup(mode, sql, cache, uqc, combos, table=None):
@@ -341,6 +384,10 @@ def main():
                     help="被测 pgvector 引擎名(默认按 PID 数与 config 网格自动推断)")
     ap.add_argument("--test-duration", type=float, default=None,
                     help="search 时长(秒), 用于 est_QPS; 默认取 config search_params.test_duration")
+    ap.add_argument("--min-records", type=int, default=MIN_PID_RECORDS,
+                    help="留存的 PID 单条最少计时记录数, 低于此值的残缺 PID 剔除(默认 40)")
+    ap.add_argument("--gap-max", type=float, default=GAP_MAX,
+                    help="相邻 PID 开始时间差超过该秒数视为新批次, 只取最后一组连续批次(默认 61)")
     args = ap.parse_args()
 
     if not os.path.exists(args.log):
@@ -348,7 +395,7 @@ def main():
         return 1
 
     csv_path = args.csv or os.path.join(RESULTS_DIR, "pgvector_benchmark_results.csv")
-    pid_data = parse_log(args.log)
+    pid_data = parse_log(args.log, min_records=args.min_records)
     combos = read_combos(csv_path)
     print(f"log: {args.log}  pids={len(pid_data)}  combos(csv)={len(combos)}",
           file=sys.stderr)
@@ -357,6 +404,14 @@ def main():
     pids = sorted(
         [p for p, v in pid_data.items() if (v["sq"] or v["eq"] or v["vi"] or v["hv"])],
         key=lambda p: pid_data[p]["ts_first"])
+    # 日志跨多轮未清空时会把多批次+PG 重启碎片混在一起; 按时间连续性切段, 只取
+    # 最后一组连续批次(相邻 PID 开始时间差 <= gap_max 为同一批)。
+    groups = split_contiguous(pids, pid_data, args.gap_max)
+    pids = groups[-1] if groups else []
+    if len(groups) > 1:
+        print(f"  (info) 日志含 {len(groups)} 段时间连续批次, 仅取最后一组 "
+              f"{len(pids)} 个 PID, 丢弃前 {sum(len(g) for g in groups[:-1])} 个",
+              file=sys.stderr)
     if not pids:
         print("[ERR] 日志中未发现 PGVECTOR_TIMING 记录(日志可能已轮转/截断)。",
               file=sys.stderr)

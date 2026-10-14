@@ -65,7 +65,41 @@ class PolarDBUploader(BaseUploader):
                 time.sleep(1)
 
     @classmethod
+    def _remove_degenerate_rows(cls, distance):
+        """Drop rows whose (normalised) vector is all-zero.
+
+        cosine 场景下 uploader 拿到的已经是 reader 归一化过的向量; 零范数的行
+        归一化时算出 0/0 = NaN, 再被 upload_batch 的 math.isnan 兜底改写成 0.0,
+        于是这些行在库里变成全 0 向量。
+
+        pase 的 HNSW 与 `<?>` 算子只实现了平方 L2 (见 hnsw/hnsw_utils.c 的
+        Distance() = fvec_L2sqr), 所以 cosine 只能用 "归一化 + L2" 近似。对一条
+        单位查询向量来说, 全 0 行的平方 L2 距离恒为 1.0; 而真正的近邻若余弦
+        相似度 < 0.5, 其平方 L2 = 2 - 2cos 就 > 1.0 —— 也就是说全 0 行反而比
+        "相似度不到 0.5" 的真实近邻更近。nytimes-256-angular 这类低余弦数据集
+        (典型 cos ≈ 0.4~0.7) 上, 239 个全 0 行会成片涌入 top-k, 召回率因此掉到
+        0.02 左右。pgvector 用的是真余弦 (`<=>`), 全 0 行距离为 1.0/NaN 而沉底,
+        所以不受影响。
+
+        这些行没有任何方向信息, 在 cosine 语义下无意义, 且数据集的 ground truth
+        也从不引用它们 (该数据集 10000 条查询 top-100 中 0 次命中全 0 行), 因此在
+        建索引前直接删除。删除放在建索引之前, 保证 HNSW 图里不会残留这些
+        "聚集在距离 1.0" 的伪近邻。
+        """
+        if distance != Distance.COSINE or cls.vector_size <= 0:
+            return
+        zero = f"array_fill(0.0::float4, ARRAY[{int(cls.vector_size)}])::float4[]"
+        with cls.connection.cursor() as cursor:
+            cursor.execute(f"DELETE FROM {cls.table_name} WHERE vector = {zero}")
+            removed = cursor.rowcount
+        cls.connection.commit()
+        if removed:
+            step(f"removed {removed} degenerate all-zero vector row(s) before index build "
+                 f"(zero-norm input normalised to NaN, coerced to 0.0)")
+
+    @classmethod
     def post_upload(cls, distance):
+        cls._remove_degenerate_rows(distance)
         index_type = str(cls.upload_params.get("_index_type", cls.upload_params.get("index_type", "hnsw")) or "").lower()
         if not index_type or index_type == "none":
             return {}
