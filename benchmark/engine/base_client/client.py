@@ -974,10 +974,10 @@ class BaseClient:
         if not isinstance(in_parse_mode_values, list):
             in_parse_mode_values = [in_parse_mode_values]
 
-        for in_parse_mode_val in in_parse_mode_values:
-            for sql_type in sql_type_values:
-                for use_cache_val in use_cache_values:
-                    for result_cache_val in result_cache_values:
+        for sql_type in sql_type_values:
+            for use_cache_val in use_cache_values:
+                for result_cache_val in result_cache_values:
+                    for in_parse_mode_val in in_parse_mode_values:
                         dataset_dim = self.uploader.upload_params.get("_vector_size")
                         if dataset_dim:
                             dataset_dim = int(dataset_dim)

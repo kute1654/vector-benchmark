@@ -5,7 +5,7 @@
     "dataset": "deep-image-96-angular",
     "upload_params": {
       "index_params": {
-        "ef_c": 256,
+        "ef_c": 200,
         "m": 32
       },
       "optimize": true,
@@ -44,7 +44,7 @@
     "dataset": "sift-128-euclidean",
     "upload_params": {
       "index_params": {
-        "ef_c": 256,
+        "ef_c": 200,
         "m": 32
       },
       "optimize": true,
@@ -92,7 +92,7 @@
     "dataset": "nytimes-256-angular",
     "upload_params": {
       "index_params": {
-        "ef_c": 256,
+        "ef_c": 200,
         "m": 32
       },
       "optimize": true,
@@ -140,7 +140,7 @@
     "dataset": "laion-768-1m-ip",
     "upload_params": {
       "index_params": {
-        "ef_c": 256,
+        "ef_c": 200,
         "m": 32
       },
       "optimize": true,
@@ -193,7 +193,7 @@
     "dataset": "gist-960-euclidean-l2",
     "upload_params": {
       "index_params": {
-        "ef_c": 256,
+        "ef_c": 200,
         "m": 32
       },
       "optimize": true,
@@ -244,7 +244,7 @@
     "dataset": "dbpedia-openai-1000k-angular",
     "upload_params": {
       "index_params": {
-        "ef_c": 256,
+        "ef_c": 200,
         "m": 32
       },
       "optimize": true,
@@ -795,7 +795,8 @@
         "text_literal",
         "array_int_cast",
         "array_real_cast",
-        "halfvec_literal"
+        "halfvec_literal",
+        "with_array_cast"
       ],
       "search_number": 5
     },
@@ -820,7 +821,7 @@
     "upload_params": {
       "index_params": {
         "ef_c": 200,
-        "m": 16
+        "m": 32
       },
       "optimize": true,
       "index_type": "HNSWFLAT",
@@ -839,7 +840,8 @@
         "text_literal",
         "array_int_cast",
         "array_real_cast",
-        "halfvec_literal"
+        "halfvec_literal",
+        "with_array_cast"
       ],
       "search_number": 5
     },
@@ -880,7 +882,8 @@
         "text_literal",
         "array_int_cast",
         "array_real_cast",
-        "halfvec_literal"
+        "halfvec_literal",
+        "with_array_cast"
       ],
       "search_number": 5
     },
@@ -921,7 +924,8 @@
         "text_literal",
         "array_int_cast",
         "array_real_cast",
-        "halfvec_literal"
+        "halfvec_literal",
+        "with_array_cast"
       ],
       "search_number": 5
     },
@@ -962,7 +966,8 @@
         "text_literal",
         "array_int_cast",
         "array_real_cast",
-        "halfvec_literal"
+        "halfvec_literal",
+        "with_array_cast"
       ],
       "search_number": 5
     },
@@ -1003,7 +1008,8 @@
         "text_literal",
         "array_int_cast",
         "array_real_cast",
-        "halfvec_literal"
+        "halfvec_literal",
+        "with_array_cast"
       ],
       "search_number": 5
     },
@@ -1071,8 +1077,8 @@
     },
     "upload_params": {
       "index_params": {
-        "ef_c": 40,
-        "m": 16
+        "ef_c": 200,
+        "m": 32
       },
       "optimize": true,
       "index_type": "HNSWFLAT",

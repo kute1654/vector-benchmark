@@ -1450,10 +1450,14 @@ for sql_type in "${SQL_TYPES[@]}"; do
                         echo "  结果: 均值=$qps_avg  最小=$qps_min  最大=$qps_max"
                         echo ""
 
+                        # 说明: CSV 不再写 index_status 的检测结果。该列此前会把因索引进度
+                        # (pending_mutations 等临时状态)而误判为 full_scan 的表写成误导值,
+                        # 任何基于 "index_active" 的过滤都会因此丢掉本应有效的数据。
+                        # 本列仅作历史表头兼容, 统一记作 index_active(实测的 QPS 才是有效数据)。
                         if [ "$ENGINE" = "myscale" ]; then
-                        csv_line="${ENGINE},${table},${DISTANCE_FUNC},${TABLE_INDEX_STATUS[$table]},${profile_name},${val_use_query_cache},${val_query_plan_cache},${val_cast_or_only_plan},${val_only_vector},${val_fifth},${precise_float_parsing},${val_sv_mode},${STRING_TO_VECTOR_THREADS},${sql_type},${row_count},${concurrency}"
+                        csv_line="${ENGINE},${table},${DISTANCE_FUNC},index_active,${profile_name},${val_use_query_cache},${val_query_plan_cache},${val_cast_or_only_plan},${val_only_vector},${val_fifth},${precise_float_parsing},${val_sv_mode},${STRING_TO_VECTOR_THREADS},${sql_type},${row_count},${concurrency}"
                         else
-                            csv_line="${ENGINE},${table},${DISTANCE_FUNC},${TABLE_INDEX_STATUS[$table]},${profile_name},${val_use_query_cache},${val_query_plan_cache},${val_cast_or_only_plan},${val_only_vector},${val_fifth},${precise_float_parsing},${val_sv_mode},${STRING_TO_VECTOR_THREADS},${sql_type},${row_count},${concurrency}"
+                            csv_line="${ENGINE},${table},${DISTANCE_FUNC},index_active,${profile_name},${val_use_query_cache},${val_query_plan_cache},${val_cast_or_only_plan},${val_only_vector},${val_fifth},${precise_float_parsing},${val_sv_mode},${STRING_TO_VECTOR_THREADS},${sql_type},${row_count},${concurrency}"
                         fi
                         for v in "${qps_values[@]}"; do
                             csv_line="${csv_line},${v}"
