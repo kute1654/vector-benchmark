@@ -1,6 +1,7 @@
 """Pgvector engine implementation."""
 
 import math
+import os
 import random
 import threading
 from typing import Any, Dict, List, Optional, Tuple
@@ -109,6 +110,31 @@ class PgvectorEngine(BaseEngine):
 
         conn = self.connect()
         try:
+            # Configure high-concurrency parallel index build using 90% of the
+            # available device threads, capped by the max_worker_processes limit.
+            # Only the three parallel parameters that can be changed at session
+            # level are set here; max_worker_processes is a PGC_POSTMASTER
+            # parameter and must be set in postgresql.conf followed by a server
+            # restart, so we read its current value and cap target_workers to it.
+            desired_workers = max(1, int(len(os.sched_getaffinity(0)) * 0.9))
+            max_worker_processes = int(
+                self._execute(
+                    conn,
+                    "SHOW max_worker_processes",
+                    fetch=True,
+                )[0][0]
+            )
+            target_workers = min(desired_workers, max_worker_processes)
+            self._execute(conn, f"SET max_parallel_workers = {target_workers}")
+            self._execute(
+                conn,
+                f"SET max_parallel_maintenance_workers = {target_workers}",
+            )
+            self._execute(
+                conn,
+                f"SET max_parallel_workers_per_gather = {target_workers}",
+            )
+
             if index_type == "hnsw":
                 m = kwargs.get("m", 16)
                 ef_construction = kwargs.get("ef_construction", 64)

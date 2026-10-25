@@ -1,4 +1,5 @@
 import math
+import os
 import threading
 import time
 from typing import Callable, List, Optional
@@ -148,6 +149,22 @@ class PolarDBUploader(BaseUploader):
 
         def _run_ddl() -> None:
             try:
+                # High-concurrency index build: use 90% of available device
+                # threads, capped by max_worker_processes. Only the three
+                # session-settable parallel parameters are set here.
+                with cls.connection.cursor() as cursor:
+                    cursor.execute("SHOW max_worker_processes")
+                    max_worker_processes = int(cursor.fetchone()[0])
+                    desired_workers = max(1, int(len(os.sched_getaffinity(0)) * 0.9))
+                    target_workers = min(desired_workers, max_worker_processes)
+                    step(
+                        f"Setting parallel workers to 90% of available threads "
+                        f"({desired_workers}), capped by max_worker_processes "
+                        f"({max_worker_processes}) -> {target_workers}..."
+                    )
+                    cursor.execute(f"SET max_parallel_workers = {target_workers}")
+                    cursor.execute(f"SET max_parallel_maintenance_workers = {target_workers}")
+                    cursor.execute(f"SET max_parallel_workers_per_gather = {target_workers}")
                 with cls.connection.cursor() as cursor:
                     cursor.execute(sql)
                 cls.connection.commit()

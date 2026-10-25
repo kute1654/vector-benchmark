@@ -1,4 +1,5 @@
 import math
+import os
 import time
 import sys
 from typing import List, Optional
@@ -143,6 +144,24 @@ class PGVectorUploader(BaseUploader):
 
         step(f"pgvector post upload: distance={distance} metric={cls.distance_op} table={cls.table_name} index_type={index_type}")
 
+        # High-concurrency index build: use 90% of available device threads,
+        # capped by max_worker_processes. Only the three session-settable
+        # parallel parameters are set; max_worker_processes is a PGC_POSTMASTER
+        # parameter controlled in postgresql.conf + restart, so we cap to it.
+        desired_workers = max(1, int(len(os.sched_getaffinity(0)) * 0.9))
+        max_worker_processes = int(
+            cls.command("SHOW max_worker_processes")[0][0]
+        )
+        target_workers = min(desired_workers, max_worker_processes)
+        step(
+            f"Setting parallel workers to 90% of available CPU threads "
+            f"({desired_workers}), capped by max_worker_processes "
+            f"({max_worker_processes}) -> {target_workers}..."
+        )
+        cls.command(f"SET max_parallel_workers = {target_workers}")
+        cls.command(f"SET max_parallel_maintenance_workers = {target_workers}")
+        cls.command(f"SET max_parallel_workers_per_gather = {target_workers}")
+
         # Create HNSW index
         if index_type.lower() == "hnsw":
             # Default HNSW parameters. config.json uses the ck/myscale-style key
@@ -172,17 +191,14 @@ class PGVectorUploader(BaseUploader):
             cancelled = [False]
             
             def show_progress():
-                dots = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]
-                idx = [0]
                 start_time = time.time()
                 while not stop_spinner[0]:
-                    elapsed = int(time.time() - start_time)
-                    sys.stdout.write(f"\r  ⏳ Building HNSW index... {dots[idx[0] % len(dots)]} {elapsed}s (Ctrl+C to stop)")
-                    sys.stdout.flush()
-                    idx[0] += 1
-                    time.sleep(0.1)
-                sys.stdout.write("\r")
-                sys.stdout.flush()
+                    if not stop_spinner[0]:
+                        time.sleep(30)
+                    if not stop_spinner[0]:
+                        elapsed = int(time.time() - start_time)
+                        step(f"⏳ Building HNSW index... elapsed {elapsed}s (in progress, not hung)")
+                print("", flush=True)
             
             def signal_handler(signum, frame):
                 cancelled[0] = True

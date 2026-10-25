@@ -1,5 +1,6 @@
 """PolarDB-pg engine implementation with PASE vector extension."""
 
+import os
 from typing import Any, Dict, List, Optional, Tuple
 
 import psycopg2
@@ -99,6 +100,26 @@ class PolarDBEngine(BaseEngine):
                 base_nb_num = kwargs.get("base_nb_num", 16)
                 ef_build = kwargs.get("ef_build", 40)
                 ef_search = kwargs.get("ef_search", 100)
+                # Configure high-concurrency parallel index build using 90% of
+                # the available device threads, capped by max_worker_processes.
+                desired_workers = max(1, int(len(os.sched_getaffinity(0)) * 0.9))
+                max_worker_processes = int(
+                    self._execute(
+                        conn,
+                        "SHOW max_worker_processes",
+                        fetch=True,
+                    )[0][0]
+                )
+                target_workers = min(desired_workers, max_worker_processes)
+                self._execute(conn, f"SET max_parallel_workers = {target_workers}")
+                self._execute(
+                    conn,
+                    f"SET max_parallel_maintenance_workers = {target_workers}",
+                )
+                self._execute(
+                    conn,
+                    f"SET max_parallel_workers_per_gather = {target_workers}",
+                )
                 self._execute(
                     conn,
                     f"CREATE INDEX IF NOT EXISTS {idx_name} ON {table} "
