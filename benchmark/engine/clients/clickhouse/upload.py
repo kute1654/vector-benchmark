@@ -1,3 +1,14 @@
+"""ClickHouse 写入阶段：批量 INSERT → OPTIMIZE → 向量索引。
+
+与 MyScale 的 uploader 结构几乎相同（两者都兼容 ClickHouse 协议），差别在
+建索引语法：ClickHouse 26.x 用 ``vector_similarity`` 跳过索引，且必须
+``ADD INDEX`` + ``MATERIALIZE INDEX`` 两步——前者只写元数据，后者才真正在
+历史数据上构建（以异步 mutation 形式执行，需要轮询 ``system.mutations``）。
+
+同样支持两种协议：tcp（9000，clickhouse_driver）与 http（8123，
+clickhouse_connect）。
+"""
+
 import time
 import sys
 from typing import List, Optional
@@ -14,6 +25,8 @@ from engine.clients.clickhouse.config import *
 
 
 class ClickHouseUploader(BaseUploader):
+    """ClickHouse 写入器；连接与参数挂在类属性上，供 worker 进程初始化。"""
+
     client: Client = None
     upload_params = {}
     distance: str = None
@@ -23,6 +36,12 @@ class ClickHouseUploader(BaseUploader):
     @classmethod
     def init_client(cls, host, distance, vector_count, connection_params, upload_params,
                     extra_columns_name: list, extra_columns_type: list):
+        """在 worker 进程内建立连接，缓存表名与度量函数名。
+
+        ``distance`` 经 ``DISTANCE_MAPPING`` 转成 ClickHouse 的距离函数名
+        （``L2Distance`` / ``cosineDistance`` / ``dotProduct``），建索引与查询
+        两处必须使用同一个函数，否则索引不会被查询使用。
+        """
         cls.protocol = connection_params.get("protocol", "tcp")
         if cls.protocol == "tcp":
             cls.client = DriverClient(
@@ -46,18 +65,28 @@ class ClickHouseUploader(BaseUploader):
 
     @classmethod
     def command(cls, sql: str):
+        """执行 DDL/DML；两个客户端方法名不同，这里统一（同 MyScale uploader）。"""
         if cls.protocol == "tcp":
             return cls.client.execute(sql)
         return cls.client.command(sql)
 
     @classmethod
     def query(cls, sql: str):
+        """执行查询并统一返回行列表（tcp 的 execute / http 的 result_rows）。"""
         if cls.protocol == "tcp":
             return cls.client.execute(sql)
         return cls.client.query(sql).result_rows
 
     @classmethod
     def upload_batch(cls, ids: List[int], vectors: List[list], metadata: List[Optional[dict]]):
+        """写入一批记录：列顺序 ``id, vector[, 标量列...]``。
+
+        与 MyScale 不同，ClickHouse 的表**总是**有 vector 列（没有纯文本检索
+        模式），所以 ``vector`` 无条件写入。标量列名取自本批第一条 metadata；
+        经纬度 dict 转成 ``(lon, lat)`` 元组以匹配 ``Point`` 列。
+
+        失败处理：打印后 sleep 3 秒无限重试（扛短暂故障，持续失败需人工介入）。
+        """
         if len(ids) != len(vectors):
             raise RuntimeError("clickhouse batch upload unhealthy")
 
@@ -65,6 +94,7 @@ class ClickHouseUploader(BaseUploader):
         col_list.append('vector')
 
         # Getting the names of structured data columns based on the first meta information.
+        # 用第一条记录代表整批的字段顺序（reader 保证同批字段集合一致）。
         if metadata[0] is not None:
             for col_name in list(metadata[0].keys()):
                 col_list.append(str(col_name))
@@ -78,6 +108,8 @@ class ClickHouseUploader(BaseUploader):
                 for col_name in list(metadata[i].keys()):
                     value = metadata[i][col_name]
                     # Determining if the data is a dictionary type of latitude and longitude.
+                    # 注意：``('lon' and 'lat')`` 实际只等价于 ``'lat'``，所以这里
+                    # 只校验是否含 'lat'，缺 'lon' 时会取到 None（保持现状）。
                     if isinstance(value, dict) and ('lon' and 'lat') in list(value.keys()):
                         # Keep the correct order of longitude and latitude.
                         temp_list.append(tuple([value.get('lon'), value.get('lat')]))
@@ -85,6 +117,8 @@ class ClickHouseUploader(BaseUploader):
                         temp_list.append(value)
             res.append(temp_list)
 
+        # 无限重试：tcp 用带参数行的 INSERT（SQL 只写 "VALUES"），http 用
+        # insert() 显式给列名。
         while True:
             try:
                 if cls.protocol == "tcp":
@@ -100,10 +134,21 @@ class ClickHouseUploader(BaseUploader):
 
     @classmethod
     def post_upload(cls, distance):
+        """写入后收尾：OPTIMIZE → ADD INDEX → MATERIALIZE INDEX。
+
+        返回 ``{"vector_index_build_time": 秒}``（从提交 ADD INDEX 算到
+        mutation 完成，包含 materialize 的等待）。``_index_type`` 为空或不受
+        支持时返回空字典，表示不建索引（搜索走顺序扫描）。
+
+        OPTIMIZE 放在建索引之前：向量索引是按 part 构建的，碎片化的小 part
+        会让索引本身碎片化，进而拖慢查询；先合并成单 part 再建索引，索引也
+        只有一份。OPTIMIZE 失败不致命（只是索引质量差一点），所以仅告警。
+        """
         stage("POST UPLOAD")
 
         step(f"clickhouse post upload: distance={distance} metric={cls.distance} table={cls.table_name}")
 
+        # 没指定索引类型就不建索引：用于"顺序扫描"基线对比。
         index_type = cls.upload_params.get("_index_type", "")
         if not index_type:
             warn("no index_type specified, skipping vector index creation")
@@ -130,6 +175,8 @@ class ClickHouseUploader(BaseUploader):
         # 距离函数：cls.distance 已经通过 DISTANCE_MAPPING 转换为 ClickHouse 函数名
         # （L2Distance, cosineDistance, dotProduct）
         distance_func = cls.distance
+        # 调试输出：把本轮 upload_params 打到 stdout，便于事后核对实际生效的
+        # 索引参数（这一行是既有的调试打印，保留以备排查）。
         print(cls.upload_params)
         # 构建索引参数（位置参数，不是键值对）
         index_params = cls.upload_params.get("index_params") or {}
@@ -157,7 +204,8 @@ class ClickHouseUploader(BaseUploader):
         step("Optimizing table to merge parts before building vector index...")
         try:
             cls.command(f"OPTIMIZE TABLE {cls.table_name} FINAL")
-            # 等待 OPTIMIZE 完成
+            # 等待 OPTIMIZE 完成：轮询 system.merges，直到本表没有进行中的
+            # merge。按 table 名过滤（没有按 database 过滤），同名表不会并存。
             while True:
                 rows = cls.query(
                     f"SELECT COUNT(*) FROM system.merges WHERE table = '{cls.table_name}'"
@@ -178,6 +226,7 @@ class ClickHouseUploader(BaseUploader):
             f"ALTER TABLE {cls.table_name} ADD INDEX vector_index "
             f"vector TYPE vector_similarity({index_args})"
         )
+        # 计时从"提交索引定义"开始，包含后续 MATERIALIZE 与轮询等待。
         vector_index_begin_time = time.perf_counter()
         sql(index_create_str)
         try:
@@ -206,6 +255,8 @@ class ClickHouseUploader(BaseUploader):
             f"WHERE database = 'default' AND table = '{cls.table_name}' AND is_done = 0 "
             f"ORDER BY create_time DESC LIMIT 1"
         )
+        # 每 5s 轮询一次：没有未完成 mutation 即视为建成；出现 fail_reason
+        # 则告警并提前退出（继续等下去也不会成功）；每 30s 打一行进度。
         last_log = 0.0
         index_wait_begin = time.perf_counter()
         while True:
@@ -231,9 +282,11 @@ class ClickHouseUploader(BaseUploader):
                              f"is_done={is_done} elapsed={elapsed:.0f}s")
                         last_log = elapsed
             except Exception as e:
+                # 查询失败（元数据未可见、连接抖动）不终止等待，稍后重试。
                 step(f"mutation status check failed: {e}")
                 time.sleep(3)
                 continue
+        # 注意：这里包含了等待 mutation 的时间，建索引耗时与 upload_time 分开统计。
         vector_index_build_time = time.perf_counter() - vector_index_begin_time
 
         return {

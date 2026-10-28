@@ -1,3 +1,24 @@
+"""PolarDB (PASE) 查询客户端: PREPARE/EXECUTE 与计划缓存对比压测入口。
+
+职责:
+  * 实现 BaseSearcher 的 vector_search / search_one, 按 sql_type 渲染 PASE SQL;
+  * 维护 4 档计划缓存策略 (use_query_plan_cache=0..3) 与结果缓存 GUC 开关;
+  * 处理 pase 输入文本、距离方向 (ds) 与 ef_search 编码。
+
+关键入口:
+  PolarDBSearcher.init_client        —— 建连接、LOAD pase、应用所有缓存/解析器 GUC;
+  PolarDBSearcher.vector_search      —— 每条查询的调度入口 (prepared vs direct);
+  PolarDBSearcher._render_inline_sql —— simple 协议下的各 sql_type SQL 形态。
+
+副作用:
+  * init_client 会建立长连接并设置大量会话级 GUC (仅影响该连接/worker 进程);
+  * PREPARE 失败时会把 prepared_statement_name 置 None 并回退 direct SQL (warn)。
+
+并发模型: 父进程用 multiprocessing.Pool 起 parallel 个 worker, 每个 worker 进程
+各自调用一次 init_client, 因此连接与 GUC 都是进程私有的; 本模块的 thread_local
+在单进程内预留了线程级状态, 但当前实现实际使用的是类属性 cls.connection。
+"""
+
 import math
 import json
 import threading
@@ -16,6 +37,8 @@ from engine.clients.polardb.config import (
     distance_ds, sort_dir_for,
 )
 
+# 线程本地存储。当前 searcher 实际把连接放在类属性 cls.connection 上 (每个
+# worker 进程一个), 这里的 thread_local 暂未使用, 保留给潜在的线程级连接扩展。
 thread_local = threading.local()
 
 # pase 距离算子: float4[] <?> pase 返回 L2(或内积)距离。
@@ -25,6 +48,13 @@ DISTANCE_OP = "<?>"
 
 
 class PolarDBSearcher(BaseSearcher):
+    """PASE 查询实现 (BaseSearcher 子类)。
+
+    一个 worker 进程内共享一个类级连接 cls.connection; 连接与所有会话 GUC 都在
+    init_client 中建立。查询走 vector_search -> prepared/direct 两条路径。
+    """
+
+    # 所有类属性由 init_client 在子进程 initializer 中填充 (父进程的默认值不生效)。
     connection_params = {}
     search_params = {}
     # pase distance operator: float4[] <?> pase.
@@ -43,6 +73,10 @@ class PolarDBSearcher(BaseSearcher):
     prepared_statement_name = "polardb_vector_search_stmt"
 
     def __init__(self, host, connection_params, search_params):
+        """合并默认连接参数 (本机/5433/postgres/表 vec_items) 后交给基类保存。
+
+        注意这里只保存参数, 不建立连接; 真正连接在子进程的 init_client 中建立。
+        """
         default_conn_params = {
             "host": "127.0.0.1",
             "port": POLARDB_DEFAULT_PORT,
@@ -56,6 +90,11 @@ class PolarDBSearcher(BaseSearcher):
 
     @classmethod
     def _apply_session_settings(cls, connection, settings):
+        """逐条应用 `SET key = value` 形式的会话设置。
+
+        值统一以字符串参数绑定 (psycopg2 会传成 text), 由 server 端按 GUC 类型
+        隐式转换。单条失败只 warn 不中断, 避免一个未知 GUC 让整轮压测失败。
+        """
         for key, value in (settings or {}).items():
             try:
                 with connection.cursor() as cursor:
@@ -65,6 +104,11 @@ class PolarDBSearcher(BaseSearcher):
 
     @classmethod
     def _effective_ef_s(cls, search_params: dict) -> int:
+        """从 search_params["params"]["ef_s"] 取 HNSW 查询候选数。
+
+        ef_s 可能是标量或列表 (参数扫描时是列表), 取第一个; 缺省/空值回退 100。
+        该值会被编码进 pase 文本的 `:extra` 字段, 作为查询期 ef_search。
+        """
         params = (search_params or {}).get("params", {})
         if not isinstance(params, dict):
             return 100
@@ -74,10 +118,30 @@ class PolarDBSearcher(BaseSearcher):
         return int(ef_s or 100)
 
     def setup_search(self, host, distance, connection_params: dict, search_params: dict, dataset_config):
+        """无需额外初始化 (连接在 init_client 中建立); 保留基类钩子。"""
         pass
 
     @classmethod
     def init_client(cls, host, distance, connection_params, search_params):
+        """在 worker 进程内建立连接并应用全部会话配置。
+
+        步骤 (顺序有依赖):
+          1. 建立 psycopg2 连接并置 autocommit=True (避免每条查询残留事务);
+          2. LOAD '$libdir/pase' —— 必须先于所有 pase GUC 的 SET, 否则 GUC 未注册;
+          3. 应用 pase_in 解析器档位 (vector_in_parse_mode);
+          4. 应用用户的 session_settings (可选);
+          5. 可选 enable_seqscan=off, 让 generic 计划仍走 HNSW 索引;
+          6. 按 use_result_cache 设置 pase 结果缓存 GUC;
+          7. 按 use_query_plan_cache (0..3) 设置 plan_cache_mode 并 PREPARE。
+
+        参数:
+          host: 主机名 (仅当 connection_params 未给 host 时兜底);
+          distance: Distance 枚举/字符串, 决定 ds 与 ORDER BY 方向;
+          connection_params: 含 host/port/user/password/database/table;
+          search_params: 压测参数 (sql_type, top, params.ef_s, 各缓存开关等)。
+
+        副作用: 建立长连接、修改会话 GUC、可能创建 prepared statement。
+        """
         cls.connection_params = connection_params or {}
         cls.search_params = search_params or {}
         cls.distance = distance
@@ -119,8 +183,8 @@ class PolarDBSearcher(BaseSearcher):
         # 查询计划缓存 (对齐 pgvector 三档语义 + pase 类型化绑定第四档, 与 sql_type 解耦):
         #   use_query_plan_cache=0 -> 完全不 PREPARE, 直接走 _direct_search
         #      (simple 协议文本内联, 每次重新解析+规划) = 不使用计划缓存基线。
-        #   use_query_plan_cache=1 -> PREPARE + plan_cache_mode=force_custom_plan,
-        #      每条 EXECUTE 重新实例化 custom plan (每 EXECUTE 重规划)。
+        #   use_query_plan_cache=1 -> PREPARE + plan_cache_mode=auto (PG 自动决策:
+        #      前几次 EXECUTE 用 custom plan, 之后按代价决定是否转 generic plan)。
         #   use_query_plan_cache=2 -> PREPARE + plan_cache_mode=force_generic_plan +
         #      文本输入 (PREPARE (text), $1::pase) —— generic plan 每行 cast/重复解析,
         #      pase_in 次数多, 作为"generic 复用但逐行解析"的对比档。
@@ -136,7 +200,7 @@ class PolarDBSearcher(BaseSearcher):
                 cls._set_plan_cache_mode("force_generic_plan")
                 cls.pase_typed_bind = (cls.use_query_plan_cache == 3)
             else:
-                # 档1: custom plan (每 EXECUTE 重规划), 沿用 pase 类型绑定。
+                # 档1: plan_cache_mode=auto (PG 自动决策), 沿用 pase 类型绑定。
                 cls._set_plan_cache_mode("auto")
                 cls.pase_typed_bind = True
             cls._prepare_statement()
@@ -196,6 +260,12 @@ class PolarDBSearcher(BaseSearcher):
 
     @classmethod
     def _set_plan_cache_mode(cls, mode: str):
+        """设置 ``plan_cache_mode``（``auto`` / ``force_generic_plan`` /
+        ``force_custom_plan``），它决定 PREPARE 出来的计划是否被复用。
+
+        失败只告警：老版本内核可能不认识某个取值，此时保留服务端默认值继续跑，
+        数据仍可比（只是这一组实验的缓存语义不再是配置里声明的那个）。
+        """
         try:
             with cls.connection.cursor() as cursor:
                 cursor.execute(f"SET plan_cache_mode = {mode}")
@@ -273,6 +343,11 @@ class PolarDBSearcher(BaseSearcher):
 
     @staticmethod
     def _vec_str(vector: List[float]) -> str:
+        """把向量渲染成逗号分隔文本（pase 的输入格式）。
+
+        NaN 统一换成 ``0.0``：PASE 的 ``pase_in`` 不接受 NaN，而数据集中偶有
+        归一化除零留下的 NaN，不处理会让整条查询报错。
+        """
         return ",".join('0.0' if math.isnan(x) else str(x) for x in vector)
 
     @classmethod
@@ -321,6 +396,11 @@ class PolarDBSearcher(BaseSearcher):
         array_ds1 = f"pase(ARRAY[{v}]::float4[], {ef}, 1)"
 
         def select(expr: str, ds1: bool = False) -> str:
+            """拼一条"距离即输出列"的查询；``ds1`` 表示该形态强制按内积语义降序。
+
+            多数 sql_type 用数据集的排序方向（``sort_asc``），个别显式写成 ds=1
+            的形态（``*_ds1``）需要降序——参数保留给这些形态使用。
+            """
             return (f"SELECT id, (vector {op} {expr}) AS dis FROM {t} "
                     f"ORDER BY dis {(sort_ds1 if ds1 else sort_asc)} LIMIT {k}")
 
@@ -410,12 +490,18 @@ class PolarDBSearcher(BaseSearcher):
 
     @classmethod
     def vector_search(cls, vector: List[float], meta_conditions, top: Optional[int]) -> List[Tuple[int, float]]:
-        # 计划缓存 (对齐 pgvector 三档语义, 与 sql_type 解耦): use_query_plan_cache>0
-        # 时命名 PREPARE + EXECUTE ($1::pase 文本绑定, PREPARE 体按 sql_type 渲染)。
-        # 三档语义在 init_client 里映射:
+        """单条 kNN 查询：有 PREPARE 且无标量过滤时 EXECUTE，否则内联 SQL。
+
+        选路条件与 pgvector 一致：带 ``meta_conditions`` 时必须内联，因为
+        PREPARE 体在初始化时就固定了，塞不进动态 WHERE。结果缓存由
+        ``init_client`` 里的会话级 GUC 负责，这一层不做任何缓存。
+        """
+        # 计划缓存 (与 sql_type 解耦): use_query_plan_cache>0 时命名 PREPARE + EXECUTE
+        # ($1::pase 文本绑定, PREPARE 体按 sql_type 渲染)。四档语义在 init_client 里映射:
         #   cache=0 -> 不 PREPARE, 走 _direct_search (simple 协议文本内联, 每次重解析)。
-        #   cache=1 -> PREPARE + plan_cache_mode=force_custom_plan (每 EXECUTE 重规划)。
-        #   cache=2 -> PREPARE + plan_cache_mode=force_generic_plan (复用 generic plan)。
+        #   cache=1 -> PREPARE + plan_cache_mode=auto (PG 自动决定 custom / generic)。
+        #   cache=2 -> PREPARE + plan_cache_mode=force_generic_plan + 文本绑定 ($1::pase)。
+        #   cache=3 -> PREPARE + plan_cache_mode=force_generic_plan + pase 类型绑定 ($1)。
         # 直接查询 SQL 与计划缓存查询SQL的重规划差异, 反映 Plan State Reuse 成本; 查询
         # 结果缓存由 init_client 里按 use_result_cache 设置的 pase 会话级 GUC
         # (pase_result_cache / pase_result_cache_debug) 控制 —— 与 sh 脚本一致。
@@ -429,6 +515,12 @@ class PolarDBSearcher(BaseSearcher):
 
     @classmethod
     def _build_where_clause(cls, meta_conditions):
+        """把 metadata 条件拼成 WHERE 片段（兜底路径，向量数据集不带元数据）。
+
+        支持区间（dict 里的 ``gte``/``lte``）、集合（list → ``IN (...)``）与
+        等值三种形状。值直接拼进 SQL 而不参数化，因为输入来自受控的数据集
+        配置，且此路径不参与 benchmark 的正式计时。
+        """
         if not meta_conditions:
             return ""
         conditions = []
@@ -457,4 +549,8 @@ class PolarDBSearcher(BaseSearcher):
 
     @classmethod
     def search_one(cls, vector: List[float], meta_conditions, top: Optional[int], schema, query: Query) -> List[Tuple[int, float]]:
+        """``BaseSearcher`` 统一入口：PolarDB-PASE 只有向量检索一条路径。
+
+        ``schema`` 与 ``query`` 不参与查询，保留只为与接口签名一致。
+        """
         return cls.vector_search(vector, meta_conditions, top)

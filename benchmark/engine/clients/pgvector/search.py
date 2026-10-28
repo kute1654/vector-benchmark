@@ -1,3 +1,25 @@
+"""pgvector 检索阶段（驱动式引擎的 searcher 实现）。
+
+一次查询两种执行路径，由 ``use_query_plan_cache`` 档位决定：
+
+* ``_direct_search``：把查询向量直接内联进 SQL 文本，走 PostgreSQL 的
+  **simple 协议**。每次都要重新解析 + 规划，作为"无计划缓存"的基线。
+* ``_prepared_search``：``PREPARE`` 命名语句 + ``EXECUTE``，走 **extended
+  协议**（psycopg2 的 ``%s`` 占位绑定），``plan_cache_mode`` 决定服务端是
+  复用 generic plan（force_generic_plan）还是每次重规划（force_custom_plan）。
+
+``sql_type`` 决定查询向量在 SQL 里的**字面量形态**（``'[...]'::vector`` /
+``CAST(...)`` / ``ARRAY[...]`` / ``halfvec`` / CTE ...）。不同形态会走不同的
+类型推断路径，是计划缓存对比实验里被刻意保留的变量；``_render_prepare_sql``
+与 ``_render_inline_sql`` 必须保持同一 ``sql_type`` 下语义等价，否则对比的
+就不是"缓存与否"而是"查询写法不同"。
+
+pgvector 的三个距离算子（``<->``、``<#>``、``<=>``）都满足"越小越相似"，
+因此排序恒为 ``ASC``——这一点与 ClickHouse/MyScale 的内积（越大越好）不同。
+
+时间由 benchmark 框架侧计量，Python 侧拿到的时间单位是**秒**。
+"""
+
 import math
 import json
 import threading
@@ -8,6 +30,7 @@ import psycopg2
 try:
     from pgvector.psycopg2 import register_vector as _pgv_register_vector
 except Exception:  # pragma: no cover
+    # 没装 pgvector-python 时静默降级：仍可用文本参数，只是少了二进制适配器。
     _pgv_register_vector = None
 
 from benchmark.dataset_reader.base_reader import Query
@@ -16,10 +39,14 @@ from benchmark.cli_output import warn
 from engine.clients.pgvector.config import *
 
 
+# 预留的线程本地槽位。注意本类实际把连接存成**类属性** ``cls.connection``，
+# 并未使用 thread_local——多进程模式下每个 worker 是独立进程，连接天然隔离。
 thread_local = threading.local()
 
 
 class PGVectorSearcher(BaseSearcher):
+    """pgvector 检索器：按 ``sql_type`` 与计划缓存档位选择执行路径。"""
+
     search_params = {}
     connection = None
     distance_op: str = None
@@ -36,6 +63,12 @@ class PGVectorSearcher(BaseSearcher):
     prepared_statement_name: Optional[str] = None
 
     def __init__(self, host, connection_params, search_params):
+        """补齐 pgvector 的连接默认值后交给基类。
+
+        配置里只写关心的字段即可（例如只改 port/database），其余用默认值。
+        先合并再 ``super().__init__``，是因为基类会立即用这份参数做初始化，
+        合并晚了就等于默认值没生效。
+        """
         # Set default connection parameters for PGVector
         default_conn_params = {
             "host": "127.0.0.1",
@@ -53,6 +86,12 @@ class PGVectorSearcher(BaseSearcher):
 
     @classmethod
     def _apply_session_settings(cls, connection, session_settings: dict):
+        """逐条执行 ``SET key = value``。
+
+        先按参数化写法 ``SET key = %s`` 执行（值走绑定，安全）；老版本
+        PostgreSQL 拒绝 SET 的参数化形式，因此失败时回退成单引号字面量。
+        单个 setting 失败会直接抛出，由调用方决定是否忽略。
+        """
         if not session_settings:
             return
         with connection.cursor() as cursor:
@@ -63,10 +102,16 @@ class PGVectorSearcher(BaseSearcher):
                     cursor.execute(f"SET {key} = '{value}'")
 
     def setup_search(self, host, distance, connection_params: dict, search_params: dict, dataset_config):
+        """pgvector 无需在检索前额外定调（基类接口占位）。"""
         pass
 
     @classmethod
     def _effective_ef_s(cls, search_params: dict) -> int:
+        """取 ``hnsw.ef_search``，兼容配置里写成单元素列表的形式。
+
+        ``params.ef_s`` 允许是标量或列表（方便一次扫多个取值）；这里只取
+        第一个元素，缺省/空值都回落到 100（pgvector 的默认值）。
+        """
         params = (search_params or {}).get("params", {})
         if not isinstance(params, dict):
             return 100
@@ -79,14 +124,33 @@ class PGVectorSearcher(BaseSearcher):
     def init_client(
             cls, host: str, distance, connection_params: dict, search_params: dict
     ):
+        """在工作进程内建连，并把本实验的会话级设置全部下发。
+
+        执行顺序是有意安排的：
+
+        1. 建连 + ``autocommit``——``SET`` 在显式事务里只对当前事务有效，
+           非 autocommit 下设置会随事务结束丢失。
+        2. 注册 pgvector 二进制参数适配器（有包才做）：让 ``$1`` 以 vector
+           二进制格式发送，避免 generic plan 每行重复走 ``vector_in``。
+        3. session_settings（配置直给的 SET）→ 结果缓存 GUC → 文本解析器
+           GUC → ``hnsw.ef_search``（召回率旋钮）。
+        4. 计划缓存档位：0 不 PREPARE；1/2/3 分别对应 auto、
+           ``force_custom_plan``、``force_generic_plan``，且都打开类型化绑定，
+           使档位之间只差"计划是否复用"这一个变量。
+
+        PREPARE 失败（例如 ``halfvec`` 形态拿不到维度）会把
+        ``prepared_statement_name`` 置空，``vector_search`` 自动回退到内联
+        SQL，因此不会让整轮实验失败。
+        """
         cls.connection_params = connection_params
         cls.host = host
         cls.distance_op = DISTANCE_MAPPING[distance]
         cls.distance_name = str(getattr(distance, "value", distance)).lower()
         cls.search_params = search_params or {}
         cls.sql_type = str(cls.search_params.get("sql_type", "text_literal"))
-        # 注意: use_query_plan_cache 在下方连接建立后统一读取并按 0/1/2 三档语义
-        # (0=不PREPARE/直接文本, 1=PREPARE+USECUSTOM, 2=PREPARE+USEGENERIC) 处理。
+        # sql_text_type: 0=默认形式(由 sql_type 决定的字面量写法),
+        #                1=使用 vector 类型字面量 (为 '[...]'::vector)
+        cls.sql_text_type = int(cls.search_params.get("sql_text_type", 0) or 0)
         cls.use_result_cache = int(cls.search_params.get("use_result_cache", 0))
         # 结果缓存不再用 python dict 模拟, 交由 PG 会话级 GUC 控制
 
@@ -132,31 +196,32 @@ class PGVectorSearcher(BaseSearcher):
         except Exception as exc:
             warn(f"could not set hnsw.ef_search={ef_s}: {exc}")
 
-        # 查询计划缓存: 仅当 use_query_plan_cache > 0 时才走 PREPARE/EXECUTE 形式,
-        # 对齐 polardb 四档语义 (档位与 sql_type 解耦):
-        #   cache=0 -> 完全不 PREPARE, 直接走 _direct_search (简单协议文本内联, 每次
-        #   重新解析+规划), 作为不使用计划缓存的基线。
-        #   cache=1 -> PREPARE + plan_cache_mode=force_custom_plan (每 EXECUTE 重规划)
-        #               + 类型化绑定 (PREPARE (vector), $1 无 cast)。
-        #   cache=2 -> PREPARE + plan_cache_mode=force_generic_plan + 文本绑定
-        #              (PREPARE (text), $1::vector) —— generic plan 每行 cast/解析。
-        #   cache=3 -> PREPARE + plan_cache_mode=force_generic_plan + 类型化绑定
-        #              (PREPARE (vector), $1) —— 文本在 Bind 阶段一次转成 vector Datum,
-        #              generic plan 复用该 Datum, 消除每行 vector_in (对齐 polardb 档3)。
-        # 其中 1/3 档 PREPARE 结构相同、仅 plan_cache_mode 不同 (custom 重规划 vs
-        # generic 复用); 2/3 档同为 generic 但绑定方式不同 (文本 cast vs 类型化),
-        # 便于分别隔离"重规划"与"逐行解析"两类成本。
-        cls.use_query_plan_cache = int(cls.search_params.get("use_query_plan_cache", 0))
+        # 查询计划缓存 (enable_query_plan_cache, 配置键优先; 兼容旧 use_query_plan_cache):
+        #   0 -> 不使用查询计划缓存: 不 PREPARE, prepared_statement_name 为空,
+        #        走 _direct_search (simple 协议文本内联, 每次重新解析+规划) = 无计划缓存基线。
+        #   1 -> 查询计划缓存 + auto 模式        (PREPARE + plan_cache_mode=auto)
+        #   2 -> 查询计划缓存 + custom 模式      (PREPARE + plan_cache_mode=force_custom_plan)
+        #   3 -> 查询计划缓存 + force_generic_plan 模式 (PREPARE + plan_cache_mode=force_generic_plan)
+        # 计划缓存档均采用类型化绑定 (PREPARE (vector), $1 无 cast), 文本在 Bind 阶段
+        # 一次转成 vector Datum; 档位差异只由 plan_cache_mode 承载 (auto 自动决策 /
+        # custom 每次重规划 / generic 复用 generic plan), 从而干净隔离各模式收益。
+        cls.use_query_plan_cache = int(
+            cls.search_params.get(
+                "enable_query_plan_cache",
+                cls.search_params.get("use_query_plan_cache", 0),
+            )
+        )
         cls.typed_bind = False
         if cls.use_query_plan_cache == 0:
             cls.prepared_statement_name = None
         else:
-            if cls.use_query_plan_cache in (2, 3):
-                cls._set_plan_cache_mode("force_generic_plan")
-                cls.typed_bind = (cls.use_query_plan_cache == 3)
-            else:
-                cls._set_plan_cache_mode("auto")
-                cls.typed_bind = True
+            _mode = {
+                1: "auto",
+                2: "force_custom_plan",
+                3: "force_generic_plan",
+            }.get(cls.use_query_plan_cache, "auto")
+            cls._set_plan_cache_mode(_mode)
+            cls.typed_bind = True
             cls._prepare_statement(int(cls.search_params.get("top", 10)))
 
     @classmethod
@@ -242,6 +307,8 @@ class PGVectorSearcher(BaseSearcher):
         col = cls.connection_params.get("vector_col", "vector")
         k = int(top)
         st = cls.sql_type
+        if cls.sql_text_type == 1:
+            st = "text_literal"
 
         # 距离右侧表达式 (以参数 $1 为源, 保留该 sql_type 的向量转换形态)
         if cls.typed_bind:
@@ -325,10 +392,17 @@ class PGVectorSearcher(BaseSearcher):
 
     @classmethod
     def get_connection(cls):
+        """取本进程的连接（``init_client`` 中创建）。"""
         return cls.connection
 
     @staticmethod
     def _vec_str(vector: List[float]) -> str:
+        """把向量渲染成逗号分隔串，供 ``[...]`` / ``ARRAY[...]`` 包裹。
+
+        NaN 替换成 ``0.0``：PostgreSQL 的 vector 类型不接受 NaN，数据集里若
+        出现 NaN（通常是上游归一化除零产生的）会让整条查询报错，而 benchmark
+        需要的是能跑完的对比数据，所以按"缺失即零"处理。
+        """
         return ",".join('0.0' if math.isnan(x) else str(x) for x in vector)
 
     @classmethod
@@ -344,6 +418,9 @@ class PGVectorSearcher(BaseSearcher):
         dim = len(vector)
         k = int(top)
         st = cls.sql_type
+        if cls.sql_text_type == 1:
+            # 使用 vector 类型字面量 (::vector), 覆盖 sql_type 的附加构造 (数组/CTE 等)
+            st = "text_literal"
 
         if st == "text_literal":
             return f"SELECT id, (vector {op} '[{v}]'::vector) AS dis FROM {t} ORDER BY dis ASC LIMIT {k}"
@@ -456,16 +533,26 @@ class PGVectorSearcher(BaseSearcher):
 
     @classmethod
     def vector_search(cls, vector: List[float], meta_conditions, top: Optional[int]) -> List[Tuple[int, float]]:
+        """单条 kNN 查询：有 PREPARE 且无标量过滤时走 EXECUTE，否则内联 SQL。
+
+        为什么带 ``meta_conditions`` 就必须走内联：标量条件由
+        ``_build_where_clause`` 动态拼成 WHERE，而 PREPARE 语句体在
+        ``init_client`` 时就固定了，无法再塞进过滤条件。本项目的向量数据集
+        不带元数据，所以这条分支实际是安全兜底。
+
+        返回 ``[(id, distance), ...]``，顺序即 ``ORDER BY dis ASC`` 的顺序。
+        结果缓存不在这里处理——它由会话级 GUC 在服务端完成。
+        """
         # 结果缓存由 init_client 中按 use_result_cache 设置的 PG 会话级 GUC
         # (result_cache / result_cache_debug) 控制 —— 与 sh 脚本一致, python 侧不再
         # 用 dict 模拟, 避免与 PG 层缓存不一致、干扰召回率/QPS 对比。
-        # 查询计划缓存四档语义 (对齐 polardb):
+        # 查询计划缓存四档语义 (与 init_client 的映射保持一致):
         #   use_query_plan_cache=0 -> 不 PREPARE, prepared_statement_name 为空,
         #     走 _direct_search(简单协议文本内联, 每次重解析+规划) = 无计划缓存基线。
-        #   use_query_plan_cache=1 -> PREPARE + plan_cache_mode=force_custom_plan +
+        #   use_query_plan_cache=1 -> PREPARE + plan_cache_mode=auto +
+        #     类型化绑定 (PG 自动决定 custom / generic)。
+        #   use_query_plan_cache=2 -> PREPARE + plan_cache_mode=force_custom_plan +
         #     类型化绑定 (每 EXECUTE 重新规划)。
-        #   use_query_plan_cache=2 -> PREPARE + plan_cache_mode=force_generic_plan +
-        #     文本绑定 (复用 generic plan, 每行 cast/解析)。
         #   use_query_plan_cache=3 -> PREPARE + plan_cache_mode=force_generic_plan +
         #     类型化绑定 (复用 generic plan, Bind 期一次转 vector Datum)。
         # 1/2/3 档仅在 PREPARE 因缺维度等失败(prepared_statement_name 为空)时回退
@@ -478,7 +565,13 @@ class PGVectorSearcher(BaseSearcher):
 
     @classmethod
     def _build_where_clause(cls, meta_conditions):
-        """Build WHERE clause from metadata conditions (safety path; vector datasets have none)."""
+        """Build WHERE clause from metadata conditions (safety path; vector datasets have none).
+
+        中文说明：把 metadata 条件翻译成 WHERE 片段，支持三种形状——区间
+        （dict 带 ``gte``/``lte``）、集合（list → ``IN (...)``）、等值。注意值
+        是直接拼进 SQL 的（没有参数化），因为这条路径只用于兜底且输入来自
+        受控的数据集配置，不面向外部输入。
+        """
         if not meta_conditions:
             return ""
         conditions = []
@@ -507,4 +600,8 @@ class PGVectorSearcher(BaseSearcher):
 
     @classmethod
     def search_one(cls, vector: List[float], meta_conditions, top: Optional[int], schema, query: Query) -> List[Tuple[int, float]]:
+        """``BaseSearcher`` 的统一入口：pgvector 只有向量检索一条路径。
+
+        ``query``（含原文与列名）在本引擎不使用，保留参数只为与接口一致。
+        """
         return cls.vector_search(vector, meta_conditions, top)

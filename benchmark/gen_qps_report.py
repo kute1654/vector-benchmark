@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """QPS 分析（全数据驱动，仅固定 CSV 源文件名与表头字段）：
 
-数据源（results/）：
+数据源（results/csv/）：
     clickhouse-benchmark-results.csv
     myscale-benchmark-results.csv
     pgvector_benchmark_results.csv
@@ -16,8 +16,9 @@ import os, re, math
 import numpy as np
 
 BASE = os.path.dirname(os.path.abspath(__file__))
-RAW = os.path.join(BASE, 'results')
-CHART_DIR = os.path.join(RAW, 'charts')
+CSV_DIR = os.path.join(BASE, 'results', 'csv')
+BAK_DIR = os.path.join(BASE, 'results', 'bak')
+CHART_DIR = os.path.join(BASE, 'results', 'charts')
 
 # ---------- 固定：源文件名 + CSV 表头字段（读取/分组依据） ----------
 CK_SRC = 'clickhouse-benchmark-results.csv'
@@ -38,6 +39,7 @@ PG_DUR = '60'
 
 
 def _on(v):
+    """把 CSV 里的布尔开关（``1``/``1.0``/``true``）统一判真；其余判假。"""
     return v in ('1', '1.0', 'true', 'True')
 
 
@@ -105,8 +107,12 @@ def load_ckms(fname):
 
 
 def csv_reader(fname):
+    """读取 results/csv/ 下的 CSV；缺失时回退到 results/bak/（表头迁移/覆盖前的备份）。"""
     import csv
-    return list(csv.DictReader(open(os.path.join(RAW, fname), encoding='utf-8-sig')))
+    path = os.path.join(CSV_DIR, fname)
+    if not os.path.exists(path):
+        path = os.path.join(BAK_DIR, fname)
+    return list(csv.DictReader(open(path, encoding='utf-8-sig')))
 
 
 def cache_level(f):
@@ -129,6 +135,7 @@ def core_axes(meta):
 
 
 def cn_of(f):
+    """由 profile 的缓存标志生成中文图例名（结果缓存 × 计划缓存组合）。"""
     if f['rc'] and f['only']:
         return 'RC + plan-only'
     if f['rc'] and f['plan']:
@@ -143,6 +150,7 @@ def cn_of(f):
 
 
 def short_of(f):
+    """生成柱尾短标签：结果缓存前缀 ``r_`` + 计划缓存档位（off/only/plan）。"""
     lvl = cache_level(f)
     pre = 'r_' if f['rc'] else ''
     return pre + ('plan' if lvl == 2 else ('only' if lvl == 1 else 'off'))
@@ -155,6 +163,7 @@ LEVEL_COLOR = {(0, 0): '#9aa5b1', (0, 1): '#8fb3e8', (0, 2): '#2c5fc4',
 
 
 def color_of(f):
+    """按 (是否结果缓存, 计划缓存档位) 查统一配色；未知组合退回灰色。"""
     return LEVEL_COLOR.get((1 if f['rc'] else 0, cache_level(f) if 'only' in f else f.get('lvl', 0)),
                            '#9aa5b1')
 
@@ -231,6 +240,7 @@ def grouped_chart(ax, data, profs, T, title, meta, base, speed_flag, color, cn, 
 
 
 def nice_ceil(x):
+    """把 y 轴上限向上取到预置档位；超出表尾时按百万整数倍取整。"""
     # y 轴刻度档位表：向上取最接近的档位。如需更细/更粗的坐标刻度，可增删这里的数值。
     for s in (100, 200, 250, 500, 1000, 2000, 2500, 5000, 10000, 20000, 50000,
               100000, 200000, 500000, 1000000):
@@ -246,6 +256,7 @@ _FONT_CAND = ['Microsoft YaHei', 'SimHei', 'Noto Sans CJK SC', 'Noto Sans SC',
 
 
 def _pick_cjk_font():
+    """按候选优先级返回系统已安装的第一个中文字体名；都没有则返回 None。"""
     from matplotlib import font_manager
     have = {f.name for f in font_manager.fontManager.ttflist}
     for name in _FONT_CAND:
@@ -258,6 +269,10 @@ _FONT_SET = [False]   # 字体只初始化一次的开关（勿改）
 
 
 def _plt():
+    """延迟导入 matplotlib 并切到无界面后端，首次调用时设置一次中文字体。
+
+    用 ``_FONT_SET`` 做幂等：字体注册是全局副作用，重复执行没有意义。
+    """
     import matplotlib
     matplotlib.use('Agg')
     import matplotlib.pyplot as plt
@@ -457,11 +472,13 @@ def _pg_group(flat, pdata=None, pmodes=None):
     pdata/pmodes 额外携带 vector_in parse 维度，用于 parse 收益平均。"""
     types, ds, codes = [], [], []
     def app(seq, v):
+        """保持首次出现顺序地追加（去重），用于收集数据集/组合/SQL 类型。"""
         if v not in seq:
             seq.append(v)
     for (d, c, st) in flat:
         app(ds, d); app(codes, c); app(types, st)
     def key(c):
+        """排序键：先无结果缓存、后有结果缓存，同组内按计划缓存档位升序。"""
         return (0 if c[0] != '1' else 1, int(c[1]))
     codes.sort(key=key)
     norc = [c for c in codes if c[0] != '1']
@@ -542,11 +559,14 @@ def build_pg(pg):
             T = g['types']
         blocks = sorted(g['ds'], key=lambda d: vdim.get(d, 0))
         def getval(d, p, st):
+            """取某数据集/缓存组合/SQL 类型的 QPS；缺数据按 0 处理便于绘图。"""
             return g['dim'].get((d, st, p), 0.0)
         def blabel(d):
+            """生成数据集块标签：去掉 ``pgvector-`` 前缀并把连字符换成空格。"""
             name = d[0].replace('pgvector-', '').replace('-', ' ')
             return '%s  (%s)' % (name, fmt_rows(d[1]))
         def col(f):
+            """按缓存组合取柱色；未知组合退回灰色。"""
             return LEVEL_COLOR.get((1 if f['rc'] else 0, f['lvl']), '#9aa5b1')
         cc = {'pflag': pf}
         # 分块图：数据集(块，低维→高维) × SQL 类型(子簇，两行) × 3 profile（柱宽为默认 0.75 倍）
@@ -649,10 +669,16 @@ def build_pg_parse(pg):
                               fmt_rows(d[1])) for d in dims]
         xs = np.arange(len(dims))
         def _style(ax):
+            """统一坐标轴样式：只留水平网格线，隐藏上/右边框。"""
             ax.grid(axis='y', color='#dfe6f0', lw=0.8, zorder=0)
             for s in ('top', 'right'):
                 ax.spines[s].set_visible(False)
         def _draw_dims(res, title, fname):
+            """画"维度 × parse 模式"的分组柱图并保存为 ``fname``。
+
+            每维度 3 柱(parse)，strtof 为基准；统一标注规则：QPS 纵写柱内，
+            其它 parse 柱顶标相对 strtof 的倍数(3 位)。
+            """
             # 每维度 3 柱(parse)，strtof 为基准；统一标注规则：QPS 纵写柱内，其它 parse 柱顶标相对 strtof 的倍数(3 位)
             fig, ax = plt.subplots(figsize=(max(8.0, 2.0 * len(dims)), 4.6), dpi=200)
             width = 0.227   # 组内每根柱的槽宽：前版为 0.34，现缩到其 2/3≈0.227，3 柱更细更紧凑

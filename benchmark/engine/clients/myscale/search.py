@@ -1,3 +1,20 @@
+"""MyScale 检索阶段。
+
+三种检索路径（由 ``search_one`` 根据数据集与 ``params`` 路由）：
+
+* ``vector_search``：``distance(...)(vector, <literal>)`` 走向量索引的 ANN
+  查询，可叠加 ``PREWHERE`` 标量过滤；
+* ``text_search``：``TextSearch(...)(text_col, 'query')`` 走倒排全文索引；
+* ``hybrid_search``：``HybridSearch(...)(vector, text_col, vec, 'query')``
+  同时做向量与全文检索，并按 ``fusion_type``（默认 RRF）融合两路结果。
+
+查询请求的时间计在 benchmark 框架侧，Python 路径拿到的时间单位为**秒**。
+
+``sql_type`` 控制向量字面量的生成方式（见 ``_build_query_literal``），
+这些变体用于对比不同参数化/类型推断路径对**查询计划缓存**
+（``enable_query_plan_cache``）命中率的影响。
+"""
+
 import threading
 import string
 import re
@@ -15,16 +32,30 @@ from engine.clients.myscale.config import *
 from engine.clients.myscale.config import _to_int
 from engine.clients.myscale.parser import MyScaleConditionParser
 
+# ---- 文本清洗与字面量工具 ----
 
 def remove_punctuation(input_string):
+    """删除所有 ASCII 标点符号。
+
+    MyScale 全文检索的查询串把标点当作文法分隔符，原始 query_text 中的
+    标点（尤其是引号、括号）可能被解析器当作语法而改变语义甚至报错，
+    因此先整体去掉。
+    """
     translator = str.maketrans('', '', string.punctuation)
     return input_string.translate(translator)
 
+# 匹配独立的布尔操作符（单词边界），用于统一大小写。
 _BOOL_OP_RE = re.compile(r"\b(AND|OR|NOT)\b")
+# 控制字符（含 NUL、换行、DEL），直接替换为空格，避免污染 SQL 字符串字面量。
 _CONTROL_CHARS_RE = re.compile(r"[\x00-\x1f\x7f]")
 
 
 def sanitize_text_query(input_string: Optional[str]) -> str:
+    """清洗全文检索查询串：控制字符 -> 空格、去标点、压缩空白、布尔词转小写。
+
+    返回的字符串随后会经 ``escape_clickhouse_string_literal`` 转义并作为
+    单引号字面量拼进 SQL。``None`` 视为空查询。
+    """
     if input_string is None:
         return ""
     text = _CONTROL_CHARS_RE.sub(" ", str(input_string))
@@ -35,10 +66,20 @@ def sanitize_text_query(input_string: Optional[str]) -> str:
 
 
 def escape_clickhouse_string_literal(input_string: str) -> str:
+    """转义 ClickHouse 单引号字符串：先转义反斜杠，再转义单引号。
+
+    顺序很重要：若先处理单引号，随后替换 ``\\`` 会把刚加上的转义反斜杠
+    再翻倍。这里最终得到可安全放进 ``'...'`` 的内容。
+    """
     return str(input_string).replace("\\", "\\\\").replace("'", "\\'")
 
 
 def to_clickhouse_array_literal(values: List[float]) -> str:
+    """把 Python 浮点列表渲染成紧凑的 JSON/ClickHouse 数组字面量。
+
+    ``separators`` 去掉多余空格，减小 SQL 文本长度；此处**不**做取整，
+    用于 ``HybridSearch`` 的向量参数（该路径更关注语义正确而非计划缓存）。
+    """
     return json.dumps(values, separators=(",", ":"))
 
 
@@ -69,11 +110,28 @@ MYSCALE_SQL_TYPES = ["normal", "cast", "cast_array", "raw_bytes", "raw_bytes_x"]
 
 
 def _vector_to_hex(values: List[float]) -> str:
+    """把 float32 向量打包成大写十六进制串（每维 4 字节，小端）。
+
+    对应 SQL 里的 ``reinterpret(unhex('...'), 'Array(Float32)')`` 与
+    ``reinterpret(x'...', 'Array(Float32)')`` 两种写法，用于绕开文本解析。
+    """
     buf = struct.pack(f"<{len(values)}f", *values)
     return buf.hex().upper()
 
 
 def _build_query_literal(values: List[float], sql_type: str) -> str:
+    """按 ``sql_type`` 生成查询向量字面量（与 ClickHouse searcher 的写法一致）。
+
+    五种形态分别走服务端不同的解析/类型推断路径：
+
+    * ``normal``：裸数组 ``[v1,v2,...]``；
+    * ``cast``：先当字符串再 ``cast(...)``；
+    * ``cast_array``：``CAST([...] AS Array(Float32))``；
+    * ``raw_bytes`` / ``raw_bytes_x``：十六进制二进制重解释。
+
+    这些差异会影响 ``enable_query_plan_cache`` 是否能复用同一份计划，是
+    benchmark 对比的核心变量之一。未知取值回落到 ``cast_array``。
+    """
     v_str = ",".join(str(v) for v in values)
     if sql_type == "normal":
         return f"[{v_str}]"
@@ -91,10 +149,14 @@ def _build_query_literal(values: List[float], sql_type: str) -> str:
         return f"CAST([{v_str}] AS Array(Float32))"
 
 
+# 每个工作线程一份连接：ClickHouse 系列驱动不保证线程安全，而搜索阶段会
+# 多线程并发查询，连接必须按线程隔离。
 thread_local = threading.local()
 
 
 class MyScaleSearcher(BaseSearcher):
+    """MyScale 检索器；三种检索路径见模块 docstring。"""
+
     search_params = {}
     client = None
     distance: str = None
@@ -106,6 +168,13 @@ class MyScaleSearcher(BaseSearcher):
 
     @classmethod
     def _apply_session_settings(cls, connection, session_settings: dict):
+        """逐条执行 ``SET key = value``（来自 search_params.session_settings）。
+
+        设置是**连接级**的：ClickHouse 的 SET 只对当前 session 生效，所以每个
+        工作线程在 ``init_client`` 建连后都要各自重放一遍，否则只有主线程的
+        连接带上了这些参数。单条失败只告警不中断——不同版本的 setting 集合
+        不完全一致，缺一条不影响其它设置与后续查询。
+        """
         if not session_settings:
             return
         protocol = str((cls.connection_params or {}).get("protocol", "tcp")).lower()
@@ -120,6 +189,13 @@ class MyScaleSearcher(BaseSearcher):
                 warn(f"failed to apply session setting {key}={value}: {e}")
 
     def setup_search(self, host, distance, connection_params: dict, search_params: dict, dataset_config):
+        """按数据集分组做一次检索前的参数定调。
+
+        ``text_search`` 组的数据集只测全文检索：这里把 ``only_text_search`` 写进
+        ``search_params["params"]``，后续 ``vector_search`` / ``search_one`` 会据此
+        跳过向量路径。写入前先确认 ``params`` 是 dict 并就地构造，避免配置里给
+        的是 None 或列表时在别处炸掉。
+        """
         if dataset_config is not None and getattr(dataset_config, "result_group", None) == "text_search":
             params = search_params.get("params", None)
             if not isinstance(params, dict):
@@ -128,6 +204,18 @@ class MyScaleSearcher(BaseSearcher):
             search_params["params"] = params
 
     def post_warmup(self, dataset_config):
+        """warmup 结束后检查向量索引段是否已全部 LOADED（仅告警，不阻塞）。
+
+        为什么需要这一步：MyScale 的 ``ADD VECTOR INDEX`` 状态变成 ``Built``
+        只代表索引**构建**完成，索引段还要异步加载进内存。加载未完成时查询
+        会退化成部分扫描，recall 会莫名偏低，而这种偏差在没有提示的情况下
+        极难归因。这里在正式测速前读一次 ``system.vector_index_segments``，
+        有未加载段就打一条 warn 说明"recall 可能偏低，直到加载完成"。
+
+        用临时连接（tcp 用 ``clickhouse_driver``，http 用
+        ``clickhouse_connect``）而不是线程本地连接：本方法在 warmup 之后、
+        多线程测速之前调用，不应把一条探测连接留给后续工作线程复用。
+        """
         conn = self.connection_params or {}
         protocol = conn.get("protocol", "tcp")
         table_name = validate_table_name(conn.get("table", MYSCALE_DATABASE_NAME))
@@ -208,6 +296,18 @@ class MyScaleSearcher(BaseSearcher):
     def init_client(
             cls, host: str, distance, connection_params: dict, search_params: dict
     ):
+        """在工作线程内建立连接、缓存度量名，并下发本连接的 SET 设置。
+
+        超时策略分两档：warmup 阶段（``search_params["_warmup"]`` 为真）默认取
+        ``max(base_timeout, 1800)`` 秒，因为冷启动后的首批查询要付出把索引段
+        读进内存的代价，用常规超时会大量误报超时；正式测速阶段用
+        ``base_timeout``（默认 300s），保证慢查询能如实暴露为超时而不是被
+        无限放行。``connect_timeout`` 单独给 10s，避免网络不通时长时间挂住。
+
+        连接只挂在 ``thread_local.client`` 上（每线程一份），最后应用
+        session_settings 与计划缓存/查询缓存设置——这些 SET 都是连接级的，
+        换线程即丢失，所以必须在建连后立刻执行。
+        """
         cls.connection_params = connection_params
         protocol = str((connection_params or {}).get("protocol", "tcp")).lower()
         if protocol == "tcp":
@@ -272,6 +372,12 @@ class MyScaleSearcher(BaseSearcher):
         Returns None when the config does not pick a mode (leave the server
         default alone, i.e. the pre-existing serial path) or when the server
         has no such settings.
+
+        中文说明：返回 ``None`` 有三种情况——配置没写 mode（保持服务端默认，
+        即改造前的串行路径）、服务端没有这两个 setting（上游 ClickHouse 没有
+        这个 fork 的改动）、或方言不支持。把两个 setting 拼成一条 ``SET``
+        一起下发，避免分成两条时中途失败留下"只改了 mode 没改线程数"的半
+        生效状态。
         """
         mode_raw = (search_params or {}).get("string_to_vector_parallel_mode", None)
         if mode_raw is None:
@@ -285,7 +391,17 @@ class MyScaleSearcher(BaseSearcher):
 
     @classmethod
     def _supports_string_to_vector_parallel(cls, protocol: str) -> bool:
-        """Probe system.settings once per process (upstream ClickHouse lacks these)."""
+        """Probe system.settings once per process (upstream ClickHouse lacks these).
+
+        中文说明：``string_to_vector_parallel_mode`` 只存在于本项目的 fork，上游
+        ClickHouse 没有；直接 SET 会报未知 setting 并让整次搜索失败。因此先用
+        一次探测查询确认两个 setting 都存在，结果缓存在
+        ``_string_to_vector_supported`` 上，每个进程只探测一次。
+
+        探测本身失败（连接抖动、权限）时**不缓存**结果：缓存成 False 会让本次
+        运行剩余的全部查询静默降级成串行，性能数据就失去可比性；不缓存则下
+        一次调用会重试。
+        """
         if cls._string_to_vector_supported is None:
             probe = (
                 "SELECT count() FROM system.settings WHERE name IN "
@@ -316,10 +432,37 @@ class MyScaleSearcher(BaseSearcher):
 
     @classmethod
     def apply_query_plan_cache_settings(cls, search_params: dict, protocol: str):
-        cache_mode = _to_int((search_params or {}).get("use_query_plan_cache", search_params.get("use_query_plan_cache", 0)), 0)
+        """把配置里的缓存开关翻译成一组 ``SET``，并在本连接上生效。
+
+        两类缓存分开控制：
+
+        * **计划缓存**——``enable_query_plan_cache`` 用三值编码压缩了两个布尔
+          量（见下方注释），外加 ``enable_cast_vector``（查询向量字面量是否
+          在计划里保留 CAST）、``query_plan_cache_only_vector``（只缓存向量
+          查询）与 ``only_cache_query_plan``（只缓存 QueryPlan 阶段）。
+        * **结果缓存**——``use_query_cache`` 一个开关同时驱动四个
+          ``enable_reads_from_query_cache`` / ``enable_writes_to_query_cache`` /
+          ``query_cache_min_query_runs`` / ``use_query_cache``。四者必须一致，
+          否则会出现"只读不写"（永不命中）或"只写不读"（白付写入开销）
+          这种静默失真。
+
+        顺序上先 DROP 两类缓存再 SET：DROP 本身也需要在开关打开前执行，且
+        残留的缓存条目（上一次实验的）会让首轮命中率虚高，必须清干净。
+        整段包在 try 里只告警：老版本服务端可能缺个别 setting，不应因此让
+        搜索阶段起不来——缺哪个就会在日志里看到对应的失败项。
+        """
+        # enable_query_plan_cache 为三值编码(来自 config enable_query_plan_cache):
+        # 0=缓存关, 1=启用计划缓存, 2=启用且仅缓存 QueryPlan(only_cache_query_plan=1)。
+        # 因 only_cache_query_plan=1 必须 enable_query_plan_cache=1, 有效组合由 2*2
+        # 压缩为 [0,1,2] 三种。
+        cache_mode_enc = _to_int((search_params or {}).get("enable_query_plan_cache", search_params.get("use_query_plan_cache", 0)), 0)
         CAST_mode = _to_int((search_params or {}).get("query_plan_cache_enable_CAST", 0), 0)
         query_cache = _to_int((search_params or {}).get("use_query_cache", 0), 0)
-        only_cache_query_plan = _to_int((search_params or {}).get("vector_only_cache_query_plan", 0), 0)
+        # 三值编码解码: cache_mode=1 iff enc>=1; only_cache_query_plan=1 iff enc>=2。
+        # 兼容外部直接传入独立 vector_only_cache_query_plan 的场景。
+        cache_mode = 1 if cache_mode_enc >= 1 else 0
+        only_cache_query_plan = (1 if cache_mode_enc >= 2
+                                 else _to_int((search_params or {}).get("vector_only_cache_query_plan", 0), 0))
         # if cache_mode > 1:
         #     query_cache = 1
         #     cache_mode = cache_mode - 2
@@ -371,10 +514,31 @@ class MyScaleSearcher(BaseSearcher):
 
     @classmethod
     def get_client(cls):
+        """取本线程的连接（``init_client`` 里写入）。"""
         return thread_local.client
 
     @classmethod
     def vector_search(cls, vector: List[float], meta_conditions, top: Optional[int]) -> List[Tuple[int, float]]:
+        """纯向量检索：``distance(<参数>)(vector, <字面量>)`` 排序取 top。
+
+        SQL 形状（由下面几段拼接而成）::
+
+            SELECT id, distance('alpha=...')(vector, <literal>) AS dis
+            FROM <table>
+            PREWHERE <标量条件>
+            ORDER BY dis [DESC] LIMIT <top>
+
+        几个容易踩的点：
+
+        * 参数列表来自 ``search_params["params"]``，但 ``only_text_search`` /
+          ``only_vector_search`` / ``fusion_*`` 是 benchmark 自己的调度开关，
+          不是 MyScale 的距离参数，必须剔除，否则服务端会报未知参数；以
+          ``dense`` 开头的是混合检索的稠密侧权重，同样不属于这里。
+        * 标量过滤走 ``PREWHERE`` 而非 ``WHERE``：MyScale/ClickHouse 先按
+          PREWHERE 裁剪 part 再读取向量列，能显著减少送入距离计算的行数。
+        * 度量是内积（``IP``）时距离越大越相似，排序方向要反过来；L2/余弦
+          都是越小越相似，默认升序。
+        """
         conn = cls.connection_params or {}
         protocol = str(conn.get("protocol", "tcp")).lower()
         table_name = validate_table_name(conn.get("table", MYSCALE_DATABASE_NAME))
@@ -430,6 +594,16 @@ class MyScaleSearcher(BaseSearcher):
     @classmethod
     def search_one(cls, vector: List[float], meta_conditions, top: Optional[int], schema, query: Query) -> List[
         Tuple[int, float]]:
+        """单条查询的路径选择器（引擎无关接口的唯一入口）。
+
+        只有"查询带文本"且"表上确实建了 fts 索引列"时才可能走文本路径，否则
+        一律纯向量检索——没有 fts 索引还去调 ``TextSearch`` 会直接报错。
+        进入文本分支后再看 ``params`` 里的开关：``only_vector_search`` 强制
+        向量、``only_text_search`` 强制全文，都未设置时做混合检索（RRF）。
+
+        ``schema`` 与 ``query`` 之外的参数保持与基类一致的签名，方便
+        ``BaseSearcher`` 统一调用；本实现不需要 schema。
+        """
         if query.query_text is not None and cls.connection_params.get("fts_idx_cols", None) is not None:
             params = (cls.search_params or {}).get("params") or {}
             if params.get("only_vector_search", False):
@@ -444,6 +618,20 @@ class MyScaleSearcher(BaseSearcher):
 
     @classmethod
     def hybrid_search(cls, top: Optional[int], query: Query) -> List[Tuple[int, float]]:
+        """稠密+稀疏融合检索：调用 MyScale 的 ``HybridSearch(...)`` 表函数。
+
+        融合参数默认 RRF（Reciprocal Rank Fusion）：``fusion_weight=0.5`` 让
+        两路权重相等，``fusion_k=60`` 是 RRF 里惯用的平滑常数（越大越削弱
+        头部排名差异）。这些默认值只在配置没给的时候生效，配置写了就原样下传。
+
+        查询向量用 ``to_clickhouse_array_literal`` 生成 ``[..]`` 数组字面量
+        （不用 ``_build_query_literal`` 的四种变形）：混合检索这条路径在
+        benchmark 里不参与计划缓存对比，保持最直白的写法即可。查询文本必须
+        先清洗再转义——它会被包进单引号字面量，原始文本里的引号会破坏 SQL。
+
+        失败时打印整条 SQL 再抛出：混合检索的参数组合最容易出错，没有 SQL
+        就只能靠猜。
+        """
         conn = cls.connection_params or {}
         protocol = str(conn.get("protocol", "tcp")).lower()
         table_name = validate_table_name(conn.get("table", MYSCALE_DATABASE_NAME))
@@ -490,6 +678,16 @@ class MyScaleSearcher(BaseSearcher):
 
     @classmethod
     def text_search(cls, top: Optional[int], query: Query) -> List[Tuple[int, float]]:
+        """纯全文检索：``TextSearch(<参数>)(<文本列>, '<清洗后的查询>')``。
+
+        参数来自 ``search_params["params"]``，剔除 benchmark 调度开关
+        （``only_text_search`` / ``only_vector_search``）和属于混合检索的
+        ``dense*`` / ``fusion_*`` 键，剩下的才是 TextSearch 认识的分词/查询
+        参数。一个参数都没有时退化成不带括号的 ``TextSearch``，让服务端用默认
+        配置——注意这里不能再拼一对空括号 ``TextSearch()``，那是两种不同写法。
+
+        和混合检索一样，清洗后的文本要再转义单引号后才能放进 SQL 字面量。
+        """
         conn = cls.connection_params or {}
         protocol = str(conn.get("protocol", "tcp")).lower()
         table_name = validate_table_name(conn.get("table", MYSCALE_DATABASE_NAME))

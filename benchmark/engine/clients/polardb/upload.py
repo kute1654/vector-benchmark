@@ -1,3 +1,16 @@
+"""PolarDB-pg（PASE 扩展）的写入阶段。
+
+流程与 pgvector 的 uploader 相同（批量 INSERT → post_upload 建索引），
+差异在于：
+
+* 向量以 PostgreSQL 数组字面量 ``{0.1,0.2,...}`` 写入 ``float4[]`` 列，
+  并用 ``CAST(%s AS float4[])`` 显式转换；
+* 建索引语句是 PASE 的 ``pase_hnsw`` / ``pase_ivfflat``，维度写在 reloption
+  而不是列类型上；
+* cosine 数据集在建索引前会删除全零向量行，否则它们会污染 HNSW 图
+  （原因见 :meth:`PolarDBUploader._remove_degenerate_rows`）。
+"""
+
 import math
 import os
 import threading
@@ -18,6 +31,8 @@ from engine.clients.polardb.config import (
 
 
 class PolarDBUploader(BaseUploader):
+    """PolarDB 写入器；连接与配置挂在类属性上，供每个 worker 进程独立初始化。"""
+
     connection = None
     upload_params = {}
     table_name = None
@@ -25,6 +40,12 @@ class PolarDBUploader(BaseUploader):
 
     @classmethod
     def init_client(cls, host, distance, vector_count, connection_params, upload_params, extra_columns_name, extra_columns_type):
+        """在 worker 进程内建立连接，并缓存表名与向量维度。
+
+        这里与 pgvector 不同：``vector_size`` 取的是 ``upload_params`` 里的
+        ``_vector_size``（真正的维度，由 ClientFactory 注入），而不是
+        ``vector_count``；因为 PASE 索引的 ``dim`` reloption 需要准确维度。
+        """
         cls.connection = psycopg2.connect(
             host=connection_params.get("host", "127.0.0.1"),
             port=connection_params.get("port", POLARDB_DEFAULT_PORT),
@@ -38,6 +59,15 @@ class PolarDBUploader(BaseUploader):
 
     @classmethod
     def upload_batch(cls, ids: List[int], vectors: List[list], metadata: List[Optional[dict]]):
+        """写入一批记录：一次 ``execute_values`` 拼多行 INSERT。
+
+        列顺序为 ``id, vector, 标量列...``；标量列名取自本批第一条 metadata
+        （为 None 时该批不带标量列）。向量转成 PostgreSQL 数组字面量
+        ``{0.1,0.2,...}``，NaN 改写成 0.0（PASE/pgvector 都不接受 NaN）；
+        插入模板里对第二列显式 ``CAST(%s AS float4[])``，避免被当成 text[]。
+
+        最多重试 3 次（每次间隔 1s），失败先 rollback；仍失败则抛给进程池。
+        """
         columns = ["id", "vector"]
         meta_columns = list((metadata[0] or {}).keys()) if metadata else []
         columns.extend(meta_columns)
@@ -100,6 +130,15 @@ class PolarDBUploader(BaseUploader):
 
     @classmethod
     def post_upload(cls, distance):
+        """写入后收尾：清理退化行 → 建 PASE 索引 →（可选）ANALYZE。
+
+        返回 ``{"vector_index_build_time": 秒, "index_type": ...}``；建索引耗时
+        由独立的 ``post_upload`` 阶段统计，不混入 ``upload_time``。
+
+        ``index_type == "none"`` 时直接返回空字典（搜索走顺序扫描）。
+        PASE 索引要求维度 <= ``PASE_MAX_DIM``（512），超限直接报错而不是
+        静默退化为顺序扫描，避免"以为在用 ANN 索引"的误判。
+        """
         cls._remove_degenerate_rows(distance)
         index_type = str(cls.upload_params.get("_index_type", cls.upload_params.get("index_type", "hnsw")) or "").lower()
         if not index_type or index_type == "none":
@@ -114,6 +153,7 @@ class PolarDBUploader(BaseUploader):
                 f"this dataset cannot build a pase index"
             )
 
+        # 索引名带表名，重跑实验时 DROP TABLE ... CASCADE 会一并清掉。
         if index_type == "hnsw":
             # config.json 用 pgvector/ck 风格参数 ef_c / m; 映射到 pase reloptions:
             #   m  -> base_nb_num (HNSW 建图时每个节点的邻居数)
@@ -129,6 +169,8 @@ class PolarDBUploader(BaseUploader):
                 f"ef_search = {ef_search}, base64_encoded = 0)"
             )
         elif index_type == "ivfflat":
+            # IVFFlat 走聚类中心；distance_type 必须与查询时的 ds 一致，
+            # 否则索引结构按错误的度量建立，召回会明显异常。
             lists = int(params.get("lists", 100))
             dist_type = distance_ds(distance)   # ds: 0 = L2, 1 = inner product
             sql = (
@@ -148,6 +190,11 @@ class PolarDBUploader(BaseUploader):
         _build_errors: List[Exception] = []
 
         def _run_ddl() -> None:
+            """后台线程执行的建索引 DDL；异常收集到 ``_build_errors`` 而非直接抛出。
+
+            线程里抛出的异常不会传回主线程，因此先存起来，join 之后由主线程
+            统一判断是否失败（这样才能保留心跳输出并给出完整错误上下文）。
+            """
             try:
                 # High-concurrency index build: use 90% of available device
                 # threads, capped by max_worker_processes. Only the three
@@ -177,12 +224,15 @@ class PolarDBUploader(BaseUploader):
             build_thread.join(timeout=30)
             if build_thread.is_alive():
                 step(f"⏳ index building in progress... elapsed {time.perf_counter() - build_begin:.1f}s")
+        # 后台线程的异常不能直接抛出（会在子线程里丢失），统一收集后由主线程
+        # 重新抛出，让进程池能感知建索引失败并终止实验。
         if _build_errors:
             raise _build_errors[0]
         build_time = time.perf_counter() - build_begin
         step(f"✓ Vector index built successfully in {build_time:.3f}s")
         # `optimize: true` (ck/myscale convention) -> ANALYZE so the planner has
         # fresh statistics for both custom and generic plans
+        # 中文：统计信息缺失会让 custom/generic plan 的选择失真，影响计划缓存对比。
         if cls.upload_params.get("optimize"):
             analyze_begin = time.perf_counter()
             sql_log(f"ANALYZE {cls.table_name}")

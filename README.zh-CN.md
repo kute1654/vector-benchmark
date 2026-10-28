@@ -13,6 +13,10 @@ vector-benchmark/
 │   ├── run.py                          #   主基准入口（MyscaleBench，Nuitka 编译目标）
 │   ├── query_forms.py                  #   SQL 形式 × 缓存档位 QPS 对比
 │   ├── generate_sql_files.py           #   生成 bash 测试用 SQL 文件
+│   ├── plan_cache_correctness_invalidation.py # 计划缓存正确性/失效测试套件
+│   ├── gen_qps_report.py               #   由结果 CSV 生成 QPS 图
+│   ├── gen_step_time_report.py         #   由结果 CSV 生成分阶段耗时图
+│   ├── generate_quora_embeddings.py    #   Quora 文本向量生成辅助脚本
 │   ├── analyze_pgvector_log.py         #   pgvector 服务端日志分析
 │   ├── analyze_myscale_log.py          #   MyScale 服务端日志分析
 │   ├── analyze_polardb_log.py          #   PolarDB PASE 服务端日志分析
@@ -26,8 +30,7 @@ vector-benchmark/
 │   │   ├── datasets.json               #     数据集注册表
 │   │   └── downloads/                  #     下载的数据文件
 │   ├── configurations/                 #   实验配置（JSON 数组）
-│   │   ├── config.json                 #     默认实验配置
-│   │   └── templates/                  #     配置模板（复制到 configurations/ 使用）
+│   │   └── config.json                 #     默认实验配置（单数组、多实验）
 │   ├── engine/                         #   引擎抽象层
 │   │   ├── base.py                     #     BaseEngine（QPS/召回率测量）
 │   │   ├── pgvector.py / polardb.py / clickhouse.py / myscale.py
@@ -48,20 +51,23 @@ vector-benchmark/
 │   │   ├── json_reader.py              #     JSONL（jsonl）
 │   │   ├── gz_tsv_reader.py            #     BeIR 文本检索（gz_tsv）
 │   │   └── utils.py
-│   ├── results/                        #   测试结果（CSV/JSON）
+│   ├── results/                        #   测试结果（已忽略，不入库）
+│   │   ├── csv/                        #     基准 CSV 汇总
+│   │   ├── json/                       #     每次运行的详细 JSON
+│   │   ├── charts/                     #     gen_*_report.py 生成的图表
+│   │   └── bak/                        #     表结构变更时的 CSV 备份轮转
 │   ├── docs/                           #   框架文档
 │   │   ├── design.md                   #     设计文档
-│   │   └── dataset.md                  #     数据集格式说明
-│   └── bash-test/                      #   sh 类 QPS 测试（ClickHouse / MyScale）
-│       ├── clickhouse-benchmark.sh     #   ClickHouse/MyScale 原生 QPS 压测
-│       ├── pgvector-benchmark.sh       #   [可清除] pgvector（pgbench，见 design.md 附录 B）
-│       ├── polardb-pase-query-forms-benchmark.sh # [可清除] PolarDB PASE（pgbench，见 design.md 附录 B）
-│       ├── generate-sql-files.sh       #   采样生成测试 SQL
-│       ├── verify_string_to_vector_engine.py   #  MyScale string→vector 校验
-│       └── sql-bench/                  #   生成的 SQL 文件
+│   │   ├── dataset.md                  #     数据集格式说明
+│   │   └── plan_cache_correctness_invalidation.md # 计划缓存正确性套件说明
+│   └── bash-test/                      #   Shell QPS 测试
+│       ├── clickhouse-benchmark.sh     #   ClickHouse/MyScale 原生 QPS（权威口径）
+│       ├── pgvector-benchmark.sh       #   pgvector pgbench + 单语句延迟探针
+│       ├── polardb-pase-query-forms-benchmark.sh # PolarDB PASE SQL 形式/缓存交叉校验
+│       ├── generate-sql-files.sh       #   采样生成 ClickHouse 测试 SQL
+│       └── sql-bench/                  #   生成的 SQL 文件（已忽略，不入库）
 │
-├── docs/                               # 查询形式 / 计划缓存分析文档
-├── results/                            # Shell 基准结果汇总 CSV
+├── docs/                               # 查询形式 / 计划缓存分析文档（已忽略，不入库）
 ├── README.md                           # 英文版
 ├── README.zh-CN.md                     # 中文版
 ├── build_nuitka.sh                     # Nuitka 构建脚本（x86_64）
@@ -111,7 +117,11 @@ wget https://ann-benchmarks.com/gist-960-euclidean.hdf5
       "index_params": { "m": 16, "ef_construction": 200 },
       "parallel": 16,
       "batch_size": 256,
-      "search_number": 10
+      "search_number": 1,
+      "sql_type": ["text_literal", "text_cast"],
+      "enable_query_plan_cache": [0, 1, 2, 3],
+      "use_query_cache": [0],
+      "vector_in_parse_mode": ["default"]
     },
     "search_params": {
       "parallel": [1, 4, 8],
@@ -138,8 +148,14 @@ python run.py --engines "pgvector-*" --host 127.0.0.1 --port 5432
 # 运行指定配置
 python run.py --engines pgvector-sift-128-euclidean
 
+# 将通配符限定到单一引擎族（--engine-type 只做过滤，不会改写配置）
+python run.py --engines "*" --engine-type pgvector
+
 # 跳过数据上传（仅运行查询）
 python run.py --engines pgvector-sift-128-euclidean --skip-upload
+
+# 只建表 + 建索引后退出（用于给 shell 测试准备目标表）
+python run.py --engines pgvector-sift-128-euclidean --skip-search
 
 # 仅测试召回率（不测试 QPS）
 python run.py --engines pgvector-sift-128-euclidean --recall-only
@@ -152,16 +168,16 @@ JSON 目标配置文件（包含目标表的连接参数与表名；若包含多
 `query_forms.py` 的 `--config` 参数说明），例如：
 
 ```bash
-cd ..
+# 在仓库根目录执行
 python -m benchmark query_forms \
-  --config query-forms/targets.json \
+  --config tmp/query-forms-targets.json \
   --query-count 100 \
   --concurrency 4 \
   --duration 20 \
-  --output results/query-forms-qps.csv
+  --output benchmark/results/csv/query-forms-qps.csv
 ```
 
-输出按 `数据库 × 缓存配置 × SQL 类型` 写入 CSV。ClickHouse/MyScale 使用服务端查询结果缓存和向量查询计划缓存；PostgreSQL 兼容数据库的计划缓存场景使用 prepared statement，结果缓存场景使用每个连接内的有界结果缓存。
+输出按 `数据库 × 缓存配置 × SQL 类型` 逐行写入 CSV。ClickHouse/MyScale 使用服务端查询结果缓存和向量查询计划缓存；PostgreSQL 兼容数据库的计划缓存场景使用 prepared statement，结果缓存场景使用每个连接内的有界结果缓存。各引擎默认档位列表见 `python -m benchmark query_forms --help`：同一 `host:port` 的多个目标会被拒绝（ClickHouse 与 MyScale 默认端口相同，需串行运行）。
 
 ## 配置文件格式
 
@@ -210,10 +226,27 @@ python -m benchmark query_forms \
 | `parallel` | int | 数据导入并发线程数 |
 | `batch_size` | int | 每批写入的行数 |
 | `search_number` | int | 导入后查询轮数 |
-| `use_cache` | int[] | 启用 prepared statement 模式（pgvector/PolarDB） |
-| `use_query_cache` | int[] | 启用查询结果缓存，并与查询计划缓存组合测试 |
+| `sql_type` | string[] | 要遍历的查询形式名（`[sql_type]` 列表） |
+| `enable_query_plan_cache` | int[] | 计划缓存档位；pgvector/PolarDB 为 `0..3`，MyScale 为 `0..2` |
+| `use_query_plan_cache` | int[] | pgvector/PolarDB 兼容的旧别名 |
+| `use_query_cache` | int[] | 结果缓存开关（`0`/`1`），与计划缓存档位组合 |
+| `vector_query_plan_cache` | int[] | ClickHouse 计划缓存档位（`0..2`） |
+| `vector_only_cache_query_plan`、`vector_query_plan_cache_only_vector`、`vector_use_cast` | int[] | ClickHouse 缓存键变体 |
+| `enable_cast_vector`、`only_cache_query_plan`、`query_plan_cache_only_vector` | int[] | MyScale 缓存键变体 |
+| `vector_in_parse_mode` | string[] | pgvector/PolarDB 向量文本解析器：`default`、`strtof`、`inline`、`fast_float` |
 | `optimize` | bool | 导入后优化表（ClickHouse） |
-| `enable_query_plan_cache` | int[] | 启用查询计划缓存（MyScale） |
+
+计划缓存档位按引擎区分：
+
+| 档位 | pgvector | PolarDB PASE | ClickHouse（`vector_query_plan_cache`）/ MyScale（`enable_query_plan_cache`） |
+|------|----------|--------------|-------------------------------------------------------------------------------|
+| `0` | 不 `PREPARE`；内联文本，每次都重新生成计划 | 同 pgvector | 缓存关闭 |
+| `1` | `PREPARE` + `plan_cache_mode=auto`，类型化绑定 | `PREPARE` + `plan_cache_mode=auto`，类型化绑定 | 缓存开启 |
+| `2` | `PREPARE` + `force_custom_plan`，类型化绑定 | `PREPARE` + `force_generic_plan`，文本绑定（`$1::pase`） | 缓存开启 + plan-only / cast 变体 |
+| `3` | `PREPARE` + `force_generic_plan`，类型化绑定 | `PREPARE` + `force_generic_plan`，pase 类型化绑定（`$1`） | — |
+
+对 pgvector/PolarDB，`use_query_cache=1` 会额外开启会话级结果缓存
+（`pgvector.result_cache*` / `pase_result_cache*`）；对 ClickHouse/MyScale 则是服务端查询缓存。
 
 ### search_params
 
@@ -309,7 +342,13 @@ python -m benchmark query_forms \
 
 ## 测试模式
 
-框架只保留**两类**测试脚本：
+三类测试脚本共用同一套 SQL 形式注册表与 CSV 列约定，每类引擎族的**权威 QPS** 固定如下：
+
+| 类别 | 脚本 | 权威口径 |
+|------|------|----------|
+| Python | `run.py`、`query_forms.py` | pgvector / PolarDB 的 QPS + 召回率；全部引擎的建表/建索引/数据导入 |
+| 原生 sh | `bash-test/clickhouse-benchmark.sh` | ClickHouse / MyScale 的 QPS |
+| pgbench 交叉校验 | `bash-test/pgvector-benchmark.sh`、`bash-test/polardb-pase-query-forms-benchmark.sh` | 独立校验 pgvector / PolarDB 各 SQL 形式（含计划缓存模式）的行为 |
 
 ### Python 测试（建库 / 建索引 + QPS + 召回率）
 
@@ -341,6 +380,48 @@ ENGINE=myscale ./clickhouse-benchmark.sh benchmark_sift_128
 > 先通过 `python run.py`（上传阶段）完成目标表的建表、建索引与数据导入，再执行上述 sh 脚本。
 > 脚本用法详见 `clickhouse-benchmark.sh` 头部注释。
 
+脚本通过 `SETTINGS_GROUPS` 指定缓存组合，每项格式为
+`profile|use_query_cache|vector_query_plan_cache|vector_only_cache_query_plan|vector_query_plan_cache_only_vector|vector_use_cast`
+（MyScale 另有 `enable_cast_vector`、`only_cache_query_plan`、
+`query_plan_cache_only_vector`，确切顺序见脚本头部注释）。`CK_EF_S` 设置会话级
+`hnsw_candidate_list_size_for_search`。
+
+### pgbench 交叉校验（pgvector / PolarDB）
+
+`pgvector-benchmark.sh` 与 `polardb-pase-query-forms-benchmark.sh` 保留为 Python 数值之外的
+独立交叉校验。两者沿用 ClickHouse 风格约定"一个脚本 = N 条查询，QPS = tps × N"，并遍历
+各引擎的计划缓存模式（见 `upload_params`）× 结果缓存开关。
+
+由于 pgbench 只按*事务*（整份 N 条查询脚本）统计延迟，pgvector 脚本额外实现了一个**单语句
+延迟探针**：每次吞吐测量后，用 `psql` 加 `\timing on` 在单个事务内逐条重放同一脚本，再把
+`Time:` 样本合并计算 `mean_time_ms` / `p95_time_ms` / `p99_time_ms`（最近秩法）。相关变量：
+
+| 变量 | 默认值 | 含义 |
+|------|--------|------|
+| `LATENCY_PROBE_STATEMENTS` | `1000` | 每个组合采样的语句总数；`0` 关闭探针并写入 `not_recorded` |
+| `TIMELIMIT` / `WARMUP_TIMELIMIT` / `REPEAT` | `10` / `1` / `1` | pgbench 测量时长、预热时长、重复次数 |
+
+```bash
+cd benchmark/bash-test
+./pgvector-benchmark.sh benchmark_sift_128_1k
+TABLE=Benchmark_768_1m INDEX_TYPE=hnsw ./polardb-pase-query-forms-benchmark.sh
+```
+
+### 缓存配置对比（`query_forms.py`）
+
+`query_forms.py` 遍历全部已注册查询形式 × 缓存配置：
+
+- **ClickHouse / MyScale**：`off`、`result-cache`、`plan-cache`、`plan-cast`、
+  `plan-only-vector`、`plan-result-cache`。缓存配置以每条查询的内联 `SETTINGS` 表达；
+  服务端需开启 `enable_vector_performance_test`，且每个配置开始前会清空对应服务端缓存
+  （`SYSTEM DROP QUERY CACHE`、`SYSTEM DROP VECTOR QUERY PLAN CACHE` /
+  `SYSTEM DROP QUERY PLAN CACHE`）。
+- **pgvector / PolarDB**：`direct`、`result-cache`、`prepared-plan`、
+  `prepared-result-cache`。计划缓存配置使用 prepared statement
+  （`enable_query_plan_cache` 各档位），结果缓存配置使用服务端会话级结果缓存。
+
+同一 `host:port` 的目标会被拒绝，因为 ClickHouse 与 MyScale 默认端口相同——请串行运行。
+
 ## Shell 建表与索引操作
 
 建表、建索引与数据导入统一由 `python run.py` 的上传阶段完成（见 `upload_params` 配置）。
@@ -363,16 +444,24 @@ CREATE INDEX ON benchmark_sift_128_1k USING pase_hnsw (vector)
 ## 查看结果
 
 ```bash
-# 查看 CSV 汇总结果
-cd benchmark/results
-cat benchmark_results.csv | column -t -s,
+# Python 客户端 CSV 汇总
+column -t -s, benchmark/results/csv/pgvector_benchmark_results.csv
+column -t -s, benchmark/results/csv/clickhouse_benchmark_results.csv
+column -t -s, benchmark/results/csv/benchmark_results.csv
 
-# 查看 JSON 详细结果
-ls -la *search*.json
-cat pgvector-sift-128-euclidean-search-*.json | python -m json.tool
+# Shell 测试 CSV（同一目录，文件名不同）
+column -t -s, benchmark/results/csv/clickhouse-benchmark-results.csv
+column -t -s, benchmark/results/csv/myscale-benchmark-results.csv
+column -t -s, benchmark/results/csv/pgvector-benchmark-results.csv
+column -t -s, benchmark/results/csv/vector-query-forms-polardb-results.csv
 
-# 查看 Shell 测试结果
-cat results/vector-query-forms-pgvector-results.csv
+# JSON 详细结果
+ls benchmark/results/json/
+python -m json.tool benchmark/results/json/pgvector-*-search-*.json | head -50
+
+# 图表
+ls benchmark/results/charts/
+python benchmark/gen_qps_report.py
 ```
 
 ## 常用操作速查
@@ -409,7 +498,8 @@ ORDER BY dis ASC LIMIT 10;
 
 - 检查 `ef_search` 参数是否过大
 - 确认并发数合理
-- 使用 Shell 脚本测试排除 Python 网络开销影响
+- ClickHouse / MyScale 请使用 sh 路径（`bash-test/clickhouse-benchmark.sh`）获取精确 QPS
+  （Python 驱动开销会压低 ClickHouse/MyScale 的 QPS）
 
 ### 连接失败
 
@@ -423,16 +513,28 @@ ORDER BY dis ASC LIMIT 10;
 |------|--------|------|
 | `--engines` | `*` | 实验名称（通配符匹配 `configurations/*.json` 的 `name` 字段） |
 | `--datasets` | `*` | 数据集名称（通配符匹配 `datasets.json` 的 `name` 字段） |
-| `--host` | `127.0.0.1` | 数据库服务器地址 |
-| `--port` | `9000` | 数据库服务器端口 |
+| `--engine-type` | 无 | 按 `engine` 过滤匹配到的配置（`clickhouse`、`myscale`、`pgvector`、`polardb`），不改写配置 |
+| `--host` | 配置值，否则 `127.0.0.1` | 覆盖数据库服务器地址 |
+| `--port` | 配置值，否则 `5432`/`5433`/`9000` | 覆盖数据库服务器端口 |
 | `--skip-upload` | `false` | 跳过数据上传和索引构建 |
-| `--recall-only` | `false` | 仅运行召回率/指标评估，遍历所有测试查询 |
+| `--skip-search` | `false` | 只建表 + 建索引后退出（为 shell 测试准备目标表） |
+| `--recall-only` | `false` | 仅运行召回率/指标评估，遍历所有测试查询（忽略 `queries_pool_size`） |
 
 ## 结果输出
 
 结果保存在 `benchmark/results/` 目录下：
-- `benchmark_results.csv` — 汇总的基准测试结果
-- `{experiment_name}-search-{id}-{timestamp}.json` — 每个实验的详细结果
+
+- `csv/pgvector_benchmark_results.csv` — pgvector/PolarDB Python 客户端结果
+- `csv/clickhouse_benchmark_results.csv` — ClickHouse Python 客户端结果
+- `csv/benchmark_results.csv` — MyScale Python 客户端结果
+- `csv/*-benchmark-results.csv`、`csv/vector-query-forms-*-results.csv` — shell 测试结果
+- `json/{experiment}-search-{id}-{timestamp}.json` — 每个实验的详细结果
+- `charts/` — `gen_qps_report.py` / `gen_step_time_report.py` 生成的图表
+- `bak/` — 表结构变更时 CSV 的带时间戳备份
+
+Python 客户端延迟列（`mean_time`、`p95_time`、`p99_time`）单位是**秒**；shell 测试延迟列
+（`mean_time_ms`、`p95_time_ms`、`p99_time_ms`）单位是**毫秒**。未采集的测量写为
+`not_recorded`。
 
 ## 打包
 

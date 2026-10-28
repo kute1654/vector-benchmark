@@ -1,44 +1,5 @@
 [
   {
-    "name": "clickhouse-deep-image-96-angular",
-    "engine": "clickhouse",
-    "dataset": "deep-image-96-angular",
-    "upload_params": {
-      "index_params": {
-        "ef_c": 200,
-        "m": 32
-      },
-      "optimize": true,
-      "index_type": "HNSWFLAT",
-      "vector_query_plan_cache": [
-        0
-      ],
-      "vector_use_cast": [
-        0
-      ],
-      "vector_query_plan_cache_only_vector": [
-        0
-      ],
-      "vector_only_cache_query_plan": [
-        0
-      ],
-      "use_query_cache": [
-        0
-      ],
-      "search_number": 1
-    },
-    "search_params": {
-      "parallel": 1,
-      "top": 10,
-      "test_duration": 1,
-      "params": {
-        "ef_s": [
-          100
-        ]
-      }
-    }
-  },
-  {
     "name": "clickhouse-sift-128-euclidean",
     "engine": "clickhouse",
     "dataset": "sift-128-euclidean",
@@ -49,23 +10,7 @@
       },
       "optimize": true,
       "index_type": "HNSWFLAT",
-      "vector_query_plan_cache": [
-        0,
-        1
-      ],
-      "vector_use_cast": [
-        0,
-        1
-      ],
-      "vector_query_plan_cache_only_vector": [
-        0
-      ],
-      "vector_only_cache_query_plan": [
-        0
-      ],
-      "use_query_cache": [
-        0
-      ],
+      "vector_query_plan_cache": [1,0,2],
       "sql_type": [
         "normal",
         "cast",
@@ -77,7 +22,7 @@
     },
     "search_params": {
       "parallel": 1,
-      "top": 10,
+      "top": [10],
       "test_duration": 1,
       "params": {
         "ef_s": [
@@ -97,23 +42,7 @@
       },
       "optimize": true,
       "index_type": "HNSWFLAT",
-      "vector_query_plan_cache": [
-        0,
-        1
-      ],
-      "vector_use_cast": [
-        0,
-        1
-      ],
-      "vector_query_plan_cache_only_vector": [
-        0
-      ],
-      "vector_only_cache_query_plan": [
-        0
-      ],
-      "use_query_cache": [
-        0
-      ],
+      "vector_query_plan_cache": [1,0,2],
       "sql_type": [
         "normal",
         "cast",
@@ -125,7 +54,7 @@
     },
     "search_params": {
       "parallel": 1,
-      "top": 10,
+      "top": [10],
       "test_duration": 1,
       "params": {
         "ef_s": [
@@ -145,26 +74,7 @@
       },
       "optimize": true,
       "index_type": "HNSWFLAT",
-      "vector_query_plan_cache": [
-        0,
-        1
-      ],
-      "vector_use_cast": [
-        0,
-        1
-      ],
-      "vector_query_plan_cache_only_vector": [
-        0,
-        1
-      ],
-      "vector_only_cache_query_plan": [
-        0,
-        1
-      ],
-      "use_query_cache": [
-        0,
-        1
-      ],
+      "vector_query_plan_cache": [1,0,2],
       "sql_type": [
         "normal",
         "cast",
@@ -175,10 +85,8 @@
       "search_number": 1
     },
     "search_params": {
-      "parallel": [
-        1
-      ],
-      "top": 10,
+      "parallel": 1,
+      "top": [10],
       "test_duration": 1,
       "params": {
         "ef_s": [
@@ -198,26 +106,7 @@
       },
       "optimize": true,
       "index_type": "HNSWFLAT",
-      "vector_query_plan_cache": [
-        0,
-        1
-      ],
-      "vector_use_cast": [
-        0,
-        1
-      ],
-      "vector_query_plan_cache_only_vector": [
-        0,
-        1
-      ],
-      "vector_only_cache_query_plan": [
-        0,
-        1
-      ],
-      "use_query_cache": [
-        0,
-        1
-      ],
+      "vector_query_plan_cache": [1,0,2],
       "sql_type": [
         "normal",
         "cast",
@@ -229,7 +118,7 @@
     },
     "search_params": {
       "parallel": 1,
-      "top": 10,
+      "top": [10],
       "test_duration": 1,
       "params": {
         "ef_s": [
@@ -249,26 +138,7 @@
       },
       "optimize": true,
       "index_type": "HNSWFLAT",
-      "vector_query_plan_cache": [
-        0,
-        1
-      ],
-      "vector_use_cast": [
-        0,
-        1
-      ],
-      "vector_query_plan_cache_only_vector": [
-        0,
-        1
-      ],
-      "vector_only_cache_query_plan": [
-        0,
-        1
-      ],
-      "use_query_cache": [
-        0,
-        1
-      ],
+      "vector_query_plan_cache": [1,0,2],
       "sql_type": [
         "normal",
         "cast",
@@ -280,149 +150,8 @@
     },
     "search_params": {
       "parallel": 1,
-      "top": 10,
+      "top": [10],
       "test_duration": 1,
-      "params": {
-        "ef_s": [
-          100
-        ]
-      }
-    }
-  },
-  {
-    "name": "clickhouse-text-quora-mini-dev",
-    "engine": "clickhouse",
-    "dataset": "quora-mini-text-dev",
-    "upload_params": {
-      "fts_idx_cols": [
-        "body"
-      ],
-      "fts_idx_params": {
-        "body": {
-          "tokenizer": {
-            "type": "stem",
-            "stop_word_filters": [
-              "english"
-            ]
-          }
-        }
-      },
-      "vector_query_plan_cache": [
-        0,
-        1
-      ],
-      "vector_use_cast": [
-        0,
-        1
-      ],
-      "vector_query_plan_cache_only_vector": [
-        0,
-        1
-      ],
-      "vector_only_cache_query_plan": [
-        0,
-        1
-      ],
-      "use_query_cache": [
-        0,
-        1
-      ],
-      "search_number": 10
-    },
-    "search_params": {
-      "parallel": 16,
-      "top": 10,
-      "test_duration": 20,
-      "params": {
-        "enable_nlq": "true",
-        "operator": "OR"
-      }
-    }
-  },
-  {
-    "name": "clickhouse-mstg-hybrid-quora-mini-dev",
-    "engine": "clickhouse",
-    "dataset": "quora-mini-hybrid-dev",
-    "upload_params": {
-      "index_type": "HNSWFLAT",
-      "optimize": true,
-      "fts_idx_cols": [
-        "body"
-      ],
-      "fts_idx_params": {
-        "body": {
-          "tokenizer": {
-            "type": "stem",
-            "stop_word_filters": [
-              "english"
-            ]
-          }
-        }
-      },
-      "vector_query_plan_cache": [
-        0,
-        1
-      ],
-      "vector_use_cast": [
-        0,
-        1
-      ],
-      "vector_query_plan_cache_only_vector": [
-        0,
-        1
-      ],
-      "vector_only_cache_query_plan": [
-        0,
-        1
-      ],
-      "use_query_cache": [
-        0,
-        1
-      ],
-      "search_number": 10
-    },
-    "search_params": {
-      "parallel": 16,
-      "top": 10,
-      "test_duration": 20,
-      "params": {
-        "ef_s": [
-          100
-        ]
-      }
-    }
-  },
-  {
-    "name": "myscale-deep-image-96-angular",
-    "engine": "myscale",
-    "dataset": "deep-image-96-angular",
-    "upload_params": {
-      "index_params": {
-        "ef_c": 200,
-        "m": 32
-      },
-      "optimize": true,
-      "index_type": "HNSWFLAT",
-      "enable_query_plan_cache": [
-        0,
-        1
-      ],
-      "enable_cast_vector": [
-        0,
-        1
-      ],
-      "query_plan_cache_only_vector": [
-        0,
-        1
-      ],
-      "string_to_vector_parallel_mode": [0, 1, 2],
-      "string_to_vector_parallel_threads": 8,
-      "search_number": 5
-    },
-    "search_params": {
-      "parallel": 16,
-      "top": 10,
-      "test_duration": 10,
       "params": {
         "ef_s": [
           100
@@ -441,22 +170,7 @@
       },
       "optimize": true,
       "index_type": "HNSWFLAT",
-      "enable_query_plan_cache": [
-        0,
-        1
-      ],
-      "enable_cast_vector": [
-        0,
-        1
-      ],
-      "query_plan_cache_only_vector": [
-        0,
-        1
-      ],
-      "vector_only_cache_query_plan": [
-        0,
-        1
-      ],
+      "enable_query_plan_cache": [1,0,2],
       "sql_type": [
         "normal",
         "cast",
@@ -464,13 +178,11 @@
         "raw_bytes",
         "raw_bytes_x"
       ],
-      "string_to_vector_parallel_mode": [0, 1, 2],
-      "string_to_vector_parallel_threads": 8,
       "search_number": 1
     },
     "search_params": {
       "parallel": 1,
-      "top": 10,
+      "top": [10],
       "test_duration": 1,
       "params": {
         "ef_s": [
@@ -490,15 +202,7 @@
       },
       "optimize": true,
       "index_type": "HNSWFLAT",
-      "enable_query_plan_cache": [
-        0,
-        1
-      ],
-      "vector_only_cache_query_plan": [
-        0,
-        1
-      ],
-      "use_query_cache":[0,1],
+      "enable_query_plan_cache": [1,0,2],
       "sql_type": [
         "normal",
         "cast",
@@ -510,7 +214,7 @@
     },
     "search_params": {
       "parallel": 1,
-      "top": 10,
+      "top": [10],
       "test_duration": 1,
       "params": {
         "ef_s": [
@@ -530,26 +234,7 @@
       },
       "optimize": true,
       "index_type": "HNSWFLAT",
-      "enable_query_plan_cache": [
-        0,
-        1
-      ],
-      "enable_cast_vector": [
-        0,
-        1
-      ],
-      "query_plan_cache_only_vector": [
-        0,
-        1
-      ],
-      "vector_only_cache_query_plan": [
-        0,
-        1
-      ],
-      "use_query_cache": [
-        0,
-        1
-      ],
+      "enable_query_plan_cache": [1,0,2],
       "sql_type": [
         "normal",
         "cast",
@@ -557,13 +242,11 @@
         "raw_bytes",
         "raw_bytes_x"
       ],
-      "string_to_vector_parallel_mode": [0, 1, 2],
-      "string_to_vector_parallel_threads": 8,
       "search_number": 1
     },
     "search_params": {
       "parallel": 1,
-      "top": 10,
+      "top": [10],
       "test_duration": 1,
       "params": {
         "ef_s": [
@@ -583,26 +266,7 @@
       },
       "optimize": true,
       "index_type": "HNSWFLAT",
-      "enable_query_plan_cache": [
-        0,
-        1
-      ],
-      "enable_cast_vector": [
-        0,
-        1
-      ],
-      "query_plan_cache_only_vector": [
-        0,
-        1
-      ],
-      "vector_only_cache_query_plan": [
-        0,
-        1
-      ],
-      "use_query_cache": [
-        0,
-        1
-      ],
+      "enable_query_plan_cache": [1,0,2],
       "sql_type": [
         "normal",
         "cast",
@@ -610,13 +274,11 @@
         "raw_bytes",
         "raw_bytes_x"
       ],
-      "string_to_vector_parallel_mode": [0, 1, 2],
-      "string_to_vector_parallel_threads": 8,
       "search_number": 1
     },
     "search_params": {
       "parallel": 1,
-      "top": 10,
+      "top": [10],
       "test_duration": 1,
       "params": {
         "ef_s": [
@@ -636,26 +298,7 @@
       },
       "optimize": true,
       "index_type": "HNSWFLAT",
-      "enable_query_plan_cache": [
-        0,
-        1
-      ],
-      "query_plan_cache_enable_CAST": [
-        0,
-        1
-      ],
-      "query_plan_cache_only_vector": [
-        0,
-        1
-      ],
-      "vector_only_cache_query_plan": [
-        0,
-        1
-      ],
-      "use_query_cache": [
-        0,
-        1
-      ],
+      "enable_query_plan_cache": [1,0,2],
       "sql_type": [
         "normal",
         "cast",
@@ -663,147 +306,12 @@
         "raw_bytes",
         "raw_bytes_x"
       ],
-      "string_to_vector_parallel_mode": [0, 1, 2],
-      "string_to_vector_parallel_threads": 8,
       "search_number": 1
     },
     "search_params": {
       "parallel": 1,
-      "top": 10,
+      "top": [10],
       "test_duration": 1,
-      "params": {
-        "ef_s": [
-          100
-        ]
-      }
-    }
-  },
-  {
-    "name": "myscale-text-quora-mini-dev",
-    "engine": "myscale",
-    "dataset": "quora-mini-text-dev",
-    "upload_params": {
-      "fts_idx_cols": [
-        "body"
-      ],
-      "fts_idx_params": {
-        "body": {
-          "tokenizer": {
-            "type": "stem",
-            "stop_word_filters": [
-              "english"
-            ]
-          }
-        }
-      },
-      "enable_query_plan_cache": [
-        0,
-        1
-      ],
-      "enable_cast_vector": [
-        0,
-        1
-      ],
-      "query_plan_cache_only_vector": [
-        0,
-        1
-      ],
-      "string_to_vector_parallel_mode": [0, 1, 2],
-      "string_to_vector_parallel_threads": 8,
-      "search_number": 1
-    },
-    "search_params": {
-      "parallel": 16,
-      "top": 10,
-      "test_duration": 20,
-      "params": {
-        "enable_nlq": "true",
-        "operator": "OR"
-      }
-    }
-  },
-  {
-    "name": "myscale-mstg-hybrid-quora-mini-dev",
-    "engine": "myscale",
-    "dataset": "quora-mini-hybrid-dev",
-    "upload_params": {
-      "index_type": "HNSWFLAT",
-      "optimize": true,
-      "fts_idx_cols": [
-        "body"
-      ],
-      "fts_idx_params": {
-        "body": {
-          "tokenizer": {
-            "type": "stem",
-            "stop_word_filters": [
-              "english"
-            ]
-          }
-        }
-      },
-      "enable_query_plan_cache": [
-        0,
-        1
-      ],
-      "enable_cast_vector": [
-        0,
-        1
-      ],
-      "query_plan_cache_only_vector": [
-        0,
-        1
-      ],
-      "string_to_vector_parallel_mode": [0, 1, 2],
-      "string_to_vector_parallel_threads": 8,
-      "search_number": 1
-    },
-    "search_params": {
-      "parallel": 16,
-      "top": 10,
-      "test_duration": 20,
-      "params": {
-        "ef_s": [
-          100
-        ]
-      }
-    }
-  },
-  {
-    "name": "pgvector-deep-image-96-angular",
-    "engine": "pgvector",
-    "dataset": "deep-image-96-angular",
-    "upload_params": {
-      "index_params": {
-        "ef_c": 200,
-        "m": 32
-      },
-      "optimize": true,
-      "index_type": "HNSWFLAT",
-      "enable_query_plan_cache": [
-        0,
-        1,
-        2,
-        3
-      ],
-      "use_query_cache": [
-        0,
-        1
-      ],
-      "vector_in_parse_mode": ["strtof", "inline", "fast_float"],
-      "sql_type": [
-        "text_literal",
-        "array_int_cast",
-        "array_real_cast",
-        "halfvec_literal",
-        "with_array_cast"
-      ],
-      "search_number": 5
-    },
-    "search_params": {
-      "parallel": 16,
-      "top": 10,
-      "test_duration": 60,
       "params": {
         "ef_s": [
           100
@@ -831,11 +339,6 @@
         2,
         3
       ],
-      "use_query_cache": [
-        0,
-        1
-      ],
-      "vector_in_parse_mode": ["strtof", "inline", "fast_float"],
       "sql_type": [
         "text_literal",
         "array_int_cast",
@@ -843,15 +346,15 @@
         "halfvec_literal",
         "with_array_cast"
       ],
-      "search_number": 5
+      "search_number": 1
     },
     "search_params": {
-      "parallel": 8,
-      "top": 10,
-      "test_duration": 60,
+      "parallel": [1],
+      "top": [1,2,5,10,20,50,100],
+      "test_duration": 1,
       "params": {
         "ef_s": [
-          100
+          20,50,100,200,500,1000
         ]
       }
     }
@@ -873,11 +376,6 @@
         2,
         3
       ],
-      "use_query_cache": [
-        0,
-        1
-      ],
-      "vector_in_parse_mode": ["strtof", "inline", "fast_float"],
       "sql_type": [
         "text_literal",
         "array_int_cast",
@@ -885,15 +383,15 @@
         "halfvec_literal",
         "with_array_cast"
       ],
-      "search_number": 5
+      "search_number": 1
     },
     "search_params": {
-      "parallel": 8,
-      "top": 10,
-      "test_duration": 60,
+      "parallel": [1],
+      "top": [1,2,5,10,20,50,100],
+      "test_duration": 1,
       "params": {
         "ef_s": [
-          100
+          20,50,100,200,500,1000
         ]
       }
     }
@@ -915,11 +413,6 @@
         2,
         3
       ],
-      "use_query_cache": [
-        0,
-        1
-      ],
-      "vector_in_parse_mode": ["strtof", "inline", "fast_float"],
       "sql_type": [
         "text_literal",
         "array_int_cast",
@@ -927,15 +420,15 @@
         "halfvec_literal",
         "with_array_cast"
       ],
-      "search_number": 5
+      "search_number": 1
     },
     "search_params": {
-      "parallel": 8,
-      "top": 10,
-      "test_duration": 60,
+      "parallel": [1],
+      "top": [1,2,5,10,20,50,100],
+      "test_duration": 1,
       "params": {
         "ef_s": [
-          100
+          20,50,100,200,500,1000
         ]
       }
     }
@@ -957,11 +450,6 @@
         2,
         3
       ],
-      "use_query_cache": [
-        0,
-        1
-      ],
-      "vector_in_parse_mode": ["strtof", "inline", "fast_float"],
       "sql_type": [
         "text_literal",
         "array_int_cast",
@@ -969,15 +457,15 @@
         "halfvec_literal",
         "with_array_cast"
       ],
-      "search_number": 5
+      "search_number": 1
     },
     "search_params": {
-      "parallel": 8,
-      "top": 10,
-      "test_duration": 60,
+      "parallel": [1],
+      "top": [1,2,5,10,20,50,100],
+      "test_duration": 1,
       "params": {
         "ef_s": [
-          100
+          20,50,100,200,500,1000
         ]
       }
     }
@@ -999,11 +487,6 @@
         2,
         3
       ],
-      "use_query_cache": [
-        0,
-        1
-      ],
-      "vector_in_parse_mode": ["strtof", "inline", "fast_float"],
       "sql_type": [
         "text_literal",
         "array_int_cast",
@@ -1011,15 +494,15 @@
         "halfvec_literal",
         "with_array_cast"
       ],
-      "search_number": 5
+      "search_number": 1
     },
     "search_params": {
-      "parallel": 8,
-      "top": 10,
-      "test_duration": 60,
+      "parallel": [1],
+      "top": [1,2,5,10,20,50,100],
+      "test_duration": 1,
       "params": {
         "ef_s": [
-          100
+          20,50,100,200,500,1000
         ]
       }
     }

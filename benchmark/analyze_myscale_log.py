@@ -5,8 +5,24 @@
 
 说明：
   服务器 executeQuery 时序日志不记录 SQL 文本与 SET/DROP 语句，因此无法直接从
-  日志判断批次 / profile / sql_type。这里采用两条依据：
-    1) 批次边界 -> 依靠日志阶段锚点：
+  日志判断批次 / profile / sql_type。
+
+  预热方式（现状）：**每张表只预热一次**，而不是每次查询/每个批次前预热一次。
+  预热是整表网格最前方的一段长突发（client 以 _table_warmup_done 控制，
+  对应 analyze_pgvector_log.py 的 prewarm 剥离；sh 则是 Step 5 逐表预热）。
+  因此"每个批次头部都有一次写缓存冷查询"的旧前提已不成立：冷写锚点的数量与
+  位置不再可预测（服务端计划缓存跨运行存续时，甚至整批都命中旧缓存）。
+
+  批次边界按两种依据切分（run_db 自动选择）：
+    1) 首选【SET 簇切分】(新预热方式, client.py/run.py 驱动的运行)：
+       每个 searcher 格子开始前，客户端会先连发一组会话级 SET 语句，日志里
+       表现为一簇连续"管理记录"（无 Interpreter、无 reuse*，仅 build ast /
+       check query_plan / prepare query plan 前段）。以"SET 簇 + 直到下一簇
+       的 SELECT 主体"为一个格子；预热与旧表遗留的格子都在最前方，取最后
+       N 个格子即与结果 CSV 的 N 行一一对应，profile/sql_type 按 CSV 行序
+       翻译（client CSV 无 settings_profile 列时按缓存参数列推导）。
+       每个格子若含 k 个 searcher（同格多次压测），按 len//N 归并。
+    2) 兜底【冷锚模板】(sh 每轮迭代都重放 SET 行, SET 簇不再是格边界)：
        * plan_cache 每组在最前, 其"写计划缓存冷查询"(setAst+setPlan) 锁定测试起点,
          可忽略开始前的作废干扰日志; 每组 sql_type 的 4 个写缓存冷写严格交替
          [setAst, normalizedAST, setAst, normalizedAST], 用滑窗模板对齐去掉干扰;
@@ -16,21 +32,24 @@
        * profile 顺序与 clickhouse-benchmark.sh 主循环一致:
          plan_cache, off, only_plan_cache, query_off, query_plan_cache,
          query_only_plan_cache (sql_type 外层、profile 内层)。
-    2) 各步骤耗时 -> 每个阶段收集该批全部查询的计时段(us)，去掉最大值与最小值
-       后取平均(ms)；若该阶段只出现 1 个值则直接取其耗时。冷查询(写缓存)的
-       极端大值会被 max 削除，因此无需单独区分冷/热时间。
+
+  各步骤耗时 -> 每个阶段收集该批全部查询的计时段(us)，去掉最大值与最小值
+  后取平均(ms)；若该阶段只出现 1 个值则直接取其耗时。冷查询(写缓存)的
+  极端大值会被 max 削除，因此无需单独区分冷/热时间。
 """
 import re, os, sys, csv, argparse
 from bisect import bisect_left
 from collections import OrderedDict
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-RESULTS_DIR = os.path.join(BASE_DIR, "results")
+RESULTS_DIR = os.path.join(BASE_DIR, "results", "csv")
 
-# 各数据库(结果文件前缀, 默认日志路径)。
+# 各数据库(结果文件前缀, 默认日志路径)。命名与 engine/base_client/client.py 中的
+# 输出文件一致: MyScale 写入 benchmark_results.csv, ClickHouse 写入
+# clickhouse_benchmark_results.csv。
 DB_RESULT_PREFIX = {
-    "myscale": "myscale-benchmark-results.csv",
-    "clickhouse": "clickhouse-benchmark-results.csv",
+    "myscale": "benchmark_results.csv",
+    "clickhouse": "clickhouse_benchmark_results.csv",
 }
 # 在执行之前需要把日志中前面的一段有干扰的日志（首条正确的日志的buildQueryPipeline的耗时一般2ms以上或1ms以上，且后续几个buildQueryPipeline的耗时基本一致）清除，否则会导致解析出问题
 DB_LOG_PATH = {
@@ -48,7 +67,7 @@ PROFILE_NAME_MAP = {
     "myscale": {
         "off": "off", "plan_cache": "plan_cache", "only_plan_cache": "only_plan_cache",
         "query_off": "query_off", "query_plan_cache": "query_plan_cache",
-        "query_only_plafn_cache": "query_only_plan_cache",
+        "query_only_plan_cache": "query_only_plan_cache",
     },
     "clickhouse": {
         "off": "ck_off", "plan_cache": "ck_plan_cache", "only_plan_cache": "ck_only_plan_cache",
@@ -57,9 +76,11 @@ PROFILE_NAME_MAP = {
     },
 }
 
+# 注意: 阶段耗时可能是**小数微秒**(如 "build query plan:0.09us", 亚微秒精度),
+# 若只匹配 \d+us 这类行会整条失配、该阶段全部丢失, 故用 (\d+(?:\.\d+)?)。
 RE_TIMING = re.compile(
     r"^(\d{4})\.(\d{2})\.(\d{2}) (\d{2}):(\d{2}):(\d{2})\.(\d+)\s+\[ *(\d+) \]\s+"
-    r"\{([0-9a-fA-F-]+)\}\s+<\w+>\s+(\w+):\s*(.+?):(\d+)us\s*$"
+    r"\{([0-9a-fA-F-]+)\}\s+<\w+>\s+(\w+):\s*(.+?):(\d+(?:\.\d+)?)us\s*$"
 )
 STAGE_COLS = ["build_ast", "check_qp", "prep_plan", "build_plan", "pipe",
               "after_pipe", "reuse_ast", "reuse_plan", "reuse_result",
@@ -75,8 +96,15 @@ STAGE_MAP = {
 
 
 def line_ts_us(g):
+    """把日志行首 ``YYYY.MM.DD HH:MM:SS.uuuuuu`` 的分组转成整数微秒时间戳。
+
+    只用于同一份日志内部的相对比较，不追求 Unix 纪元绝对值；因此把日期
+    压成 ``YYYYMMDD`` 后乘上一天的微秒数，避免跨天时出现负数差。
+    """
     y, mo, d, hh, mm, ss, sus = g[:7]
-    return (((int(y) * 10000 + int(mo) * 100 + int(d)) * 8640000000) +
+    # 一天的微秒数 = 86400 * 1e6；若写成 8.64e9 (少一个 0)，一天内最大 8.64e10us
+    # 会溢出到"下一天"，跨天日志排序互相穿插。
+    return (((int(y) * 10000 + int(mo) * 100 + int(d)) * 86400000000) +
             ((int(hh) * 3600 + int(mm) * 60 + int(ss)) * 1000000) + int(sus))
 
 
@@ -104,7 +132,7 @@ def parse_log(log_path):
             elif ts < rec["ts_us"]:
                 rec["ts_us"] = ts
             rec["comps"].add(comp)
-            rec["stages"][stage] = int(us)
+            rec["stages"][stage] = float(us)
             rec["raws"].append(line.rstrip("\n"))
             if len(rec["raws"]) > 200:
                 del rec["raws"][:-200]
@@ -132,6 +160,11 @@ def print_split_points(batches, queries):
 SELECT_COMP_MARKERS = ("InterpreterSelectWithUnionQuery", "InterpreterSelectQueryAnalyzer")
 
 def is_cold_write(rec):
+    """判断记录是否为"首次建计划"的冷查询。
+
+    ``setAst``/``setPlan``/``normalizedAST`` 都表示这条查询在写缓存，而
+    不是复用缓存，因此可作为批次切分时的冷写锚点。
+    """
     return any(s in rec["stages"] for s in ("setAst", "setPlan", "normalizedAST"))
 
 def _reuse_plan_is_real_select(st):
@@ -150,6 +183,11 @@ def _reuse_plan_is_real_select(st):
     return i_pipe > i_plan and st.get("buildQueryPipeline", 0) > 0
 
 def is_select(rec):
+    """判断一条日志记录是否对应真正的 SELECT（而非 SET/DROP 等管理语句）。
+
+    优先看 Interpreter 组件前缀；没有前缀时退化为看复用阶段，并用
+    ``_reuse_plan_is_real_select`` 排除"只复用了计划但没建流水线"的空壳。
+    """
     if rec["comps"] and any(m in rec["comps"] for m in SELECT_COMP_MARKERS):
         return True
     st = rec["stages"]
@@ -160,8 +198,60 @@ def is_select(rec):
     return any(s in st for s in ("reuse ast", "reuse query result"))
 
 
+def sorted_entries(qlist, queries):
+    """按时间排序的日志条目 [(ts_us, qid, rec), ...]，两种切分方式共用。"""
+    entries = [(queries[qid]["ts_us"], qid, queries[qid]) for qid in qlist]
+    entries.sort(key=lambda e: e[0])
+    return entries
+
+
+# ---- SET 簇切分（新"每表一次预热"方式的首选切分） ----
+# client.py 每个 searcher 格子开始前都会连发一组会话级 SET（实测固定 10 条），
+# 日志里表现为一簇连续管理记录；预热格子与旧表遗留格子都排在最前方，
+# 取末尾与结果 CSV 行数等量的格子即可对齐。阈值取 3：单条杂散管理语句
+# (如偶发 SET) 不应被当成格边界，真格边界至少有一整组 SET。
+MIN_SET_CLUSTER = 3
+
+def is_manage(rec):
+    """管理语句(SET/DROP 等)：没有 Interpreter 前缀、也没有任何 reuse* 阶段。"""
+    return not is_select(rec)
+
+def cut_batches_cells(entries, min_cluster=MIN_SET_CLUSTER):
+    """按"SET 簇"把日志切成格子：返回 [ [entry,...], ... ]（时间序）。
+
+    一个格子 = 一簇连续管理记录(>= min_cluster 条) + 直到下一簇之前的全部查询。
+    与冷锚模板不同，这里不要求每批开头出现写缓存冷查询，因此每张表只预热一次
+    的新预热方式（格子头部计划缓存可能直接命中，无冷写）也能正确切分。
+    纯管理记录、不含任何 SELECT 的格子（如会话关闭后的尾部 SET）直接丢弃。
+    """
+    n = len(entries)
+    manage = [is_manage(e[2]) for e in entries]
+    bounds = []                      # 每簇 SET 的起始下标
+    i = 0
+    while i < n:
+        if manage[i]:
+            j = i
+            while j < n and manage[j]:
+                j += 1
+            if j - i >= min_cluster:
+                bounds.append(i)
+            i = j
+        else:
+            i += 1
+    if not bounds:
+        return []
+    cells = []
+    if bounds[0] > 0:
+        cells.append(entries[:bounds[0]])        # 首簇之前的前导干扰
+    for idx, b in enumerate(bounds):
+        end = bounds[idx + 1] if idx + 1 < len(bounds) else n
+        cells.append(entries[b:end])
+    return [c for c in cells if any(not is_manage(e[2]) for e in c)]
+
+
 def cut_batches_b1(qlist, queries, sql_types):
-    """方案 B2：用日志阶段锚点切出 len(sql_types)*6 个批次。
+    """兜底切分（sh 每轮重放 SET、SET 簇不再是格边界时）：冷锚模板，
+    用日志阶段锚点切出 len(sql_types)*6 个批次。
 
     批次严格按 sh 脚本主循环顺序产生：
         外层 sql_type(5 个) -> 内层 SETTINGS_GROUPS(6 个)，共 30 批。
@@ -185,11 +275,7 @@ def cut_batches_b1(qlist, queries, sql_types):
     (sql_type 外层、profile 内层)。
     """
     # 第一次遍历：按时间收集条目，标记写缓存冷查询 / 管理语句 / 真 SELECT。
-    entries = []                      # (ts, qid, rec)
-    for qid in qlist:
-        rec = queries[qid]
-        entries.append((rec["ts_us"], qid, rec))
-    entries.sort(key=lambda e: e[0])
+    entries = sorted_entries(qlist, queries)          # (ts, qid, rec)
 
     cold_xs = []                      # 写缓存冷查询: (ts, has_setAst)
     for ts, qid, rec in entries:
@@ -227,6 +313,7 @@ def cut_batches_b1(qlist, queries, sql_types):
     n = len(entries)
 
     def _has_plan_reuse_or_cold(rec):
+        """批次头判据：该记录要么在建计划缓存，要么复用了计划缓存。"""
         if is_cold_write(rec):
             return True           # setAst/normalizedAST/setPlan
         return "reuse query plan" in rec["stages"]
@@ -314,25 +401,58 @@ def cut_batches_b1(qlist, queries, sql_types):
     return out
 
 
-def load_result_csv(csv_path):
-    """按行序返回结果 CSV 的 (profile,sql_type) -> {rps, ...} 映射。
+# client.py 写的结果 CSV 没有 settings_profile 列, 但缓存参数列等价地编码了
+# profile: use_query_plan_cache / vector_query_plan_cache 取 0=off, 1=plan_cache,
+# 2=only_plan_cache; use_query_cache=1 再加 "query_" 前缀(query_* 三组)。
+CACHE_MODE_TO_PROFILE = {0: "off", 1: "plan_cache", 2: "only_plan_cache"}
 
-    结果 CSV 会追加多张基准表、多轮运行的结果（含被 test 脚本注释掉的旧分组）。
-    日志没有时间列，因此这里只取**最后 30 行数据**（= 当前最新一次完整的
-    6 profile x 5 sql_type 运行；6 x 5 = 30），与日志对应。
+def _canon_profile(db, row):
+    """把一行结果 CSV 翻译成 PROFILE_ORDER 的规范 profile 名。
+
+    有 settings_profile 列(sh 结果)时按 PROFILE_NAME_MAP 反查;
+    否则(client.py 结果)按缓存参数列推导。推不出时返回 ""(该行跳过)。
     """
-    out = OrderedDict()
+    prof = (row.get("settings_profile") or "").strip()
+    if prof:
+        inv = {v: k for k, v in (PROFILE_NAME_MAP.get(db) or {}).items()}
+        return inv.get(prof, prof)
+    mode = None
+    for col in ("use_query_plan_cache", "vector_query_plan_cache"):
+        v = (row.get(col) or "").strip()
+        if v:
+            try:
+                mode = int(float(v))
+            except ValueError:
+                mode = None
+            break
+    if mode not in CACHE_MODE_TO_PROFILE:
+        return ""
+    prof = CACHE_MODE_TO_PROFILE[mode]
+    try:
+        qcache = int(float((row.get("use_query_cache") or "0").strip() or 0))
+    except ValueError:
+        qcache = 0
+    return "query_" + prof if qcache else prof
+
+def load_result_rows(db, csv_path):
+    """按**行序**(= 执行顺序)返回结果 CSV 数据行的标签列表。
+
+    每行 -> {"profile"(规范名), "sql_type", "rps", "concurrency", "row_count"}。
+    client.py 按执行顺序逐行追加, 因此行序与日志里的格子(SET 簇)顺序一致,
+    调用方用末尾 N 行与日志末尾 N 个格子对齐; 预热不产生结果行, 天然错位在前方。
+    """
+    out = []
     if not os.path.exists(csv_path):
         return out
     with open(csv_path, "r", encoding="utf-8", errors="replace") as f:
         rows = [r for r in csv.DictReader(f)]
-    for row in rows[-30:]:
-        prof = (row.get("settings_profile") or "").strip()
+    for row in rows:
+        prof = _canon_profile(db, row)
         sql = (row.get("sql_type") or "").strip()
         if not prof or not sql:
             continue
         try:
-            qps = float(row.get("qps_avg", 0) or 0)
+            qps = float(row.get("rps", 0) or row.get("qps_avg", 0) or 0)
         except (TypeError, ValueError):
             qps = 0.0
         if qps <= 0:
@@ -340,18 +460,31 @@ def load_result_csv(csv_path):
                 qps = float(row.get("run_1", 0) or 0)
             except (TypeError, ValueError):
                 qps = 0.0
-        out[(prof, sql)] = {"rps": qps,
-                            "concurrency": row.get("concurrency", ""),
-                            "row_count": row.get("row_count", "")}
+        out.append({"profile": prof, "sql_type": sql, "rps": qps,
+                    "concurrency": row.get("concurrency", "") or row.get("parallel", ""),
+                    "row_count": row.get("row_count", "")})
     return out
 
 
 def _ms(us):
+    """微秒转毫秒；None 原样返回（保持表格里的"-"语义）。"""
     return None if us is None else us / 1000.0
 
 
 def fmt(v, nd=3):
-    return "-" if v is None else f"{v:.{nd}f}"
+    """按小数位格式化数值；None 显示为 ``-``，便于对齐表格。
+
+    阶段列以 ms 计, 但有些阶段(如 build query plan)只有亚微秒量级(0.1us =
+    0.0001ms), 固定 4 位小数会显示成 0.0000 像丢了值; 这里对非零小值自动
+    增加小数位(最多 8 位), 保证至少保留两位有效数字。
+    """
+    if v is None:
+        return "-"
+    if v != 0:
+        av = abs(v)
+        while nd < 8 and av < 10 ** (-nd) * 10:   # 首位有效数字后留一位
+            nd += 1
+    return f"{v:.{nd}f}"
 
 
 def _trimmed_avg_us(vals):
@@ -440,12 +573,17 @@ def read_result_meta(csv_path):
 
 
 def _render(rows, header):
+    """把二维表渲染成等宽文本：先按列求最大宽度，再逐行左对齐拼接。
+
+    纯文本输出便于直接贴进报告或 diff；不依赖第三方表格库。
+    """
     width = [len(h) for h in header]
     for row in rows:
         for c in range(len(header)):
             width[c] = max(width[c], len(str(row[c])))
 
     def fmtline(vals):
+        """按预计算列宽把一行单元格左对齐，用 `` | `` 分隔。"""
         return " | ".join(str(v).ljust(width[i]) for i, v in enumerate(vals))
 
     lines = [fmtline(header)]
@@ -456,6 +594,11 @@ def _render(rows, header):
 
 
 def run_db(db, args):
+    """对单个数据库跑完整流程：选日志/结果 CSV → 切批 → 交叉校验 → 写输出。
+
+    ``args.csv`` 未给出时自动挑选该数据库最新的结果文件；日志与 CSV 的
+    批次必须一一对应，因此切批数量默认取 CSV 行数。
+    """
     # 默认取该数据库"最新"结果文件(未显式指定 --csv 时)。
     if args.csv:
         csv_path = os.path.abspath(args.csv)
@@ -465,8 +608,9 @@ def run_db(db, args):
             csv_path = os.path.join(RESULTS_DIR, DB_RESULT_PREFIX[db])
         print(f"+ 数据库[{db}] 采用最新结果文件: {csv_path}", file=sys.stderr)
 
-    result_map = load_result_csv(csv_path)
-    exp = args.batch or (len(PROFILE_ORDER) * len(SQL_TYPES))
+    result_rows = load_result_rows(db, csv_path)
+    exp = args.batch or (len(result_rows) if result_rows
+                         else len(PROFILE_ORDER) * len(SQL_TYPES))
 
     engine, table_name = read_result_meta(csv_path)
     if not engine:
@@ -482,8 +626,46 @@ def run_db(db, args):
     queries = parse_log(log_path)
     print(f"  + 解析到 {len(queries)} 条查询执行", file=sys.stderr)
     qlist = sorted(queries.keys(), key=lambda q: (queries[q]["ts_us"], id(q)))
-    batches = cut_batches_b1(qlist, queries, SQL_TYPES)
-    print(f"  + 按锚点切出 {len(batches)} 个批次 (期望 {exp})", file=sys.stderr)
+
+    # 首选 SET 簇切分: 结果 CSV 行序 = 执行顺序, 用末尾 N 行标签对齐日志末尾
+    # N 个格子; 每表只预热一次的预热格子与旧表遗留格子都在前方, 被"取末尾"自然
+    # 丢弃。并行/多 searcher 可能把一个格子切成 k 个连续格子(各会话各发一簇
+    # SET), 按 k=len//N 归并(k<=4); 格子数远超行数(sh 每轮重放 SET)则回退冷锚模板。
+    labels = result_rows[-exp:] if result_rows else []
+    batches = []
+    cells = cut_batches_cells(sorted_entries(qlist, queries))
+    if labels and len(cells) < len(labels) and len(cells) >= 2:
+        # 日志已滚动: 只保留了最近一段。预热格(每表一次)也在段首时, 它不是结果
+        # 行, 先剥掉(查询量远超其余格子的中位数数倍), 剩余格子与 CSV 末尾行对齐。
+        counts = [sum(1 for e in c if not is_manage(e[2])) for c in cells]
+        med = sorted(counts)[len(counts) // 2]
+        for i, n in enumerate(counts):
+            if n >= 3 * max(med, 1):
+                print(f"  + 日志已滚动, 剥离预热格 #{i} (SELECT {n} 条, "
+                      f"其余格子中位数 {med})", file=sys.stderr)
+                cells = cells[:i] + cells[i + 1:]
+                break
+    if labels and cells and len(cells) >= len(labels):
+        k = len(cells) // len(labels)
+        if k <= 4:
+            tail = cells[len(cells) - len(labels) * k:]
+            for i, lab in enumerate(labels):
+                qids = [qid for c in tail[i * k:(i + 1) * k]
+                        for (_ts, qid, _rec) in c]
+                batches.append((lab["profile"], lab["sql_type"], qids))
+            print(f"  + SET 簇切分: 共 {len(cells)} 格, 每批归并 {k} 格, "
+                  f"切出 {len(batches)} 个批次 (与结果 CSV 行对齐)", file=sys.stderr)
+    elif labels and cells and len(cells) >= 2:
+        # 滚动后只剩末尾若干格: 与 CSV 末尾同数量行对齐(首格可能被截断)。
+        labs = labels[len(labels) - len(cells):]
+        for c, lab in zip(cells, labs):
+            batches.append((lab["profile"], lab["sql_type"],
+                            [qid for (_ts, qid, _rec) in c]))
+        print(f"  + SET 簇切分(日志已滚动): 末尾 {len(cells)} 格与 CSV 末尾 "
+              f"{len(cells)} 行对齐, 切出 {len(batches)} 个批次", file=sys.stderr)
+    if not batches:
+        batches = cut_batches_b1(qlist, queries, SQL_TYPES)
+        print(f"  + 冷锚模板切分出 {len(batches)} 个批次 (期望 {exp})", file=sys.stderr)
     if len(batches) != exp:
         print(f"  + 注意: 实际批次 {len(batches)} 与期望 {exp} 不一致", file=sys.stderr)
 
@@ -527,6 +709,7 @@ def run_db(db, args):
 
 
 def main():
+    """命令行入口：解析参数并对 myscale / clickhouse / both 依次执行分析。"""
     ap = argparse.ArgumentParser(
         description="按批次汇总时序日志, 结合结果 CSV 交叉验证。支持 myscale / clickhouse。")
     ap.add_argument("--db", choices=["myscale", "clickhouse", "both"],

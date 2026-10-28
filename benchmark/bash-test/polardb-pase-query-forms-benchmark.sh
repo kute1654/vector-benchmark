@@ -94,10 +94,53 @@
 #
 # IMPORTANT: The target PolarDB instance must have the pase extension already
 # installed and the target table must exist with a float4[] vector column.
+#
+# ---------------------------------------------------------------------------
+# 用途
+#   针对同一 PolarDB-pase 实例, 批量测量多种"向量字面量 SQL 形态"的吞吐 (QPS)
+#   与延迟, 并按 计划缓存 x 结果缓存 的 2x2 档位做正交对照, 结果追加写入 CSV。
+#
+# 用法
+#   ./polardb-pase-query-forms-benchmark.sh [数据表名]
+#   不传表名且 stdin 是终端时交互选择表与索引类型; 非终端必须显式指定。
+#
+# 位置参数
+#   $1  数据表名 (等价于 TABLE=); 本脚本一次只测一张表 (TABLES 只有 1 个元素)。
+#
+# 主要环境变量
+#   连接: HOST PORT USER PASSWORD DATABASE PSQL PGBENCH
+#   对象: TABLE INDEX_TYPE(hnsw|ivfflat) PGDATA PG_CTL
+#   口径: TIMELIMIT WARMUP_TIMELIMIT REPEAT TOP_K CONCURRENCIES
+#         ROW_COUNTS_OVERRIDE SQL_TYPES_OVERRIDE CACHE_PROFILES_OVERRIDE
+#         PGBENCH_QUERY_MODE(simple|extended|prepared, 默认 prepared)
+#         PGBENCH_JOBS MAX_PGBENCH_SCRIPTS
+#   查询: DISTANCE_OP HASH_DISTANCE_OP SORT_DIR PASE_EXTRA
+#   预热: BUFFER_WARMUP_SEC WARM_TABLE_FOR_SEQUENTIAL
+#   输出: SQL_DIR OUTPUT_CSV; ENGINE 仅用于文件/CSV 标记 (默认 polardb)
+#
+# 依赖命令
+#   psql, pgbench (默认取 PolarDB 安装目录 bin), timeout, awk/sed/grep/mktemp,
+#   sort/column; 冷启动若需清 OS 页缓存还需 root 权限与 pg_ctl。
+#
+# 输出文件
+#   SQL: ${SQL_DIR}/polardb_<表>_<profile>_<sql_type>_<行数>.sql
+#   CSV: ${OUTPUT_CSV}, 默认 ../results/csv/vector-query-forms-polardb-results.csv
+#        延迟列单位为毫秒 (latency_avg_ms / statement_avg_ms)。
+# ---------------------------------------------------------------------------
 
+# set -euo pipefail:
+#   -e 任一命令非零退出即中止 (个别允许失败处显式 set +e 或 || true);
+#   -u 引用未定义变量直接报错 (故大量使用 ${VAR:-} 兜底);
+#   -o pipefail 管道中任一环失败即整条管道失败 (避免只看最后一个命令的退出码)。
 set -euo pipefail
 
 # 自动检测 psql 对应的 lib 目录，避免 "undefined symbol" 错误
+#
+# 作用: 若 psql 位于 <prefix>/bin, 则把 <prefix>/lib 前置进 LD_LIBRARY_PATH,
+#       让 psql/pgbench 优先加载与之配套的 libpq, 避免系统 libpq 版本不匹配。
+# 参数: $1 = psql/pgbench 可执行文件路径 (空或不可执行则静默返回)。
+# 副作用: 修改并导出 LD_LIBRARY_PATH。
+# 返回: 恒为 0 (检测失败不视为错误)。
 _auto_ld_path() {
     local psql_path="${1:-}"
     [ -n "$psql_path" ] && [ -x "$psql_path" ] || return 0
@@ -120,8 +163,9 @@ TIMELIMIT="${TIMELIMIT:-1}"
 WARMUP_TIMELIMIT="${WARMUP_TIMELIMIT:-1}"
 REPEAT="${REPEAT:-1}"
 TOP_K="${TOP_K:-10}"
-SQL_DIR="${SQL_DIR:-sql-bench/polardb-pase-query-forms}"
-OUTPUT_CSV="${OUTPUT_CSV:-../results/vector-query-forms-${ENGINE}-results.csv}"
+_SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SQL_DIR="${SQL_DIR:-${_SCRIPT_DIR}/sql-bench/polardb-pase-query-forms}"
+OUTPUT_CSV="${OUTPUT_CSV:-${_SCRIPT_DIR}/../results/csv/vector-query-forms-${ENGINE}-results.csv}"
 # PolarDB PASE 实例的客户端二进制均位于 /home/polar/tmp_polardb_pg_17_base/bin
 POLAR_BIN_DEFAULT=/home/polar/tmp_polardb_pg_17_base/bin
 PSQL="${PSQL:-$POLAR_BIN_DEFAULT/psql}"
@@ -141,6 +185,10 @@ _auto_ld_path "$PSQL"
 _auto_ld_path "$PGBENCH"
 
 # 自动推导 pg_ctl 路径: 与 PSQL 同目录
+#
+# 作用: 依次尝试 (1) PSQL 同目录的 pg_ctl, (2) 常见安装路径, (3) 回退到 PATH。
+# 参数: 无 (读取全局 PSQL)。
+# 返回: 通过 stdout 输出 pg_ctl 路径; 不修改全局变量。
 _auto_pg_ctl_path() {
     local psql_path="${PSQL:-psql}"
     if echo "$psql_path" | grep -q '/'; then
@@ -225,6 +273,14 @@ SQL_TYPES=(
 ROW_COUNTS=(1)
 CONCURRENCIES=(1)
 
+# 用 "*_OVERRIDE" 环境变量覆盖脚本内置列表 (SQL_TYPES / ROW_COUNTS / ...)。
+#
+# 作用: 若 override 变量非空, 用空白分词后整体替换目标数组 (而非追加)。
+# 参数: $1 = 目标数组变量名; $2 = 提供新值的环境变量名。
+# 惯用法: ${!override_name} 是 bash 间接引用 (按名字取值);
+#         local -n target_array 是 nameref (按名字引用变量), 从而原地改写调用方数组。
+#         read -r -a 按 IFS 切分成数组, <<< 为 here-string, 不启动子进程。
+# 副作用: 修改调用方数组; 返回 0。
 apply_list_override() {
     local var_name="$1"
     local override_name="$2"
@@ -241,6 +297,12 @@ apply_list_override ROW_COUNTS ROW_COUNTS_OVERRIDE
 apply_list_override CONCURRENCIES CONCURRENCIES_OVERRIDE
 apply_list_override CACHE_PROFILES CACHE_PROFILES_OVERRIDE
 
+# 执行一条短 SQL 并把裸结果打印到 stdout (用于元数据探测/诊断)。
+#
+# 参数: $1 = SQL 文本。
+# 返回: 透传 psql 的退出码; timeout 60 防止 DDL/锁等待挂死。
+# 副作用: 无 (只读性质由调用方保证); stderr 丢弃, 由调用方用空结果判断失败。
+#   -t 只输出元组 (去掉表头/行数), -A 无对齐模式 (用 | 分隔字段, 便于解析)。
 client_query() {
     PGPASSWORD="$PASSWORD" timeout 60 "$PSQL" -h "$HOST" -p "$PORT" -U "$USER" -d "$DATABASE" -t -A -c "$1" 2>/dev/null
 }
@@ -259,6 +321,13 @@ list_vector_tables() {
 }
 
 # 交互选择数据表 (不带参数时, 无 tty 则报错)
+#
+# 作用: 列出 public 下含 float4[]/real[] 向量列的表, 让用户按编号选择。
+# 参数: 无。
+# 返回: 0 且 stdout 输出所选表名; 无候选表或读取失败返回 1。
+# 副作用: 提示信息写 stderr, 只有最终选择结果写 stdout, 便于 $(...) 捕获。
+#   `done < <(list_vector_tables)` 是进程替换: 把函数输出当文件喂给 while,
+#   若改用管道则 while 在子 shell 里执行, names 数组无法带回父 shell。
 pick_table_by_prompt() {
     local -a names=()
     local line choice i
@@ -276,6 +345,7 @@ pick_table_by_prompt() {
     while :; do
         printf "请选择数据表编号 (1-%d): " "${#names[@]}" >&2
         IFS= read -r choice || return 1
+        # =~ 正则确保纯数字 (避免空串/负号让 -ge 报错); -ge/-le 做纯数值比较。
         if [[ "$choice" =~ ^[0-9]+$ ]] && [ "$choice" -ge 1 ] && [ "$choice" -le "${#names[@]}" ]; then
             echo "${names[$((choice-1))]}"
             return 0
@@ -285,6 +355,10 @@ pick_table_by_prompt() {
 }
 
 # 交互选择索引类型 (hnsw|ivfflat)
+#
+# 作用: 打印菜单并循环读取编号, 直到输入合法。
+# 返回: 0 且 stdout 输出 hnsw/ivfflat; 读不到输入 (EOF) 返回 1。
+# 副作用: 提示写 stderr; case 分支直接 echo 结果并 return, 避免额外变量。
 pick_index_type_by_prompt() {
     local choice
     echo "请选择索引类型:" >&2
@@ -1239,26 +1313,34 @@ write_csv_header
 TMPDIR=$(mktemp -d)
 trap "rm -rf $TMPDIR" EXIT
 
-warmup_sql=""
+# 预热: 按"每张表一次"执行, 把该表索引加载进内存。时长取 WARMUP_TIMELIMIT
+# 但最少 60 秒; 每张表只需预热一次, 后续该表所有 profile/sql_type 共享预热效果。
+warmup_timelimit=$WARMUP_TIMELIMIT
+if [ -n "$warmup_timelimit" ] && [ "$warmup_timelimit" -ge 0 ] 2>/dev/null && [ "$warmup_timelimit" -lt 60 ]; then
+    warmup_timelimit=60
+fi
+
 for table in "${TABLES[@]}"; do
+    warmup_sql=""
     for group in "${CACHE_PROFILES[@]}"; do
         IFS='|' read -r pname _ _ _ <<< "$group"
         warmup_sql="$(sql_file_for "$table" "${SQL_TYPES[0]}" "${ROW_COUNTS[0]}" "$pname")"
-        [ -s "$warmup_sql" ] && break 2
+        [ -s "$warmup_sql" ] && break
     done
-done
 
-if [ -n "$warmup_sql" ] && [ -f "$warmup_sql" ] && [ "$WARMUP_TIMELIMIT" != "0" ]; then
-    echo ">>> 预热 ${WARMUP_TIMELIMIT}s: $warmup_sql"
-    # 预热使用第一个 profile 的 SET 行
-    IFS='|' read -r warmup_pname _ _ _ <<< "${CACHE_PROFILES[0]}"
-    warmup_set_line="$(session_set_line_for_profile "$warmup_pname")"
-    set +e
-    warmup_run="$TMPDIR/warmup_queries"
-    make_single_query_scripts_with_settings "$warmup_sql" "$warmup_set_line" "$warmup_run" >/dev/null
-    run_benchmark_file "$warmup_run" 1 "$TMPDIR/warmup.stderr" "$TMPDIR/warmup.log" "$WARMUP_TIMELIMIT" >/dev/null 2>&1
-    set -e
-fi
+    if [ -n "$warmup_sql" ] && [ -f "$warmup_sql" ] && [ "$WARMUP_TIMELIMIT" != "0" ]; then
+        echo ">>> 预热表 $table ${warmup_timelimit}s: $warmup_sql"
+        # 预热使用第一个 profile 的 SET 行
+        IFS='|' read -r warmup_pname _ _ _ <<< "${CACHE_PROFILES[0]}"
+        warmup_set_line="$(session_set_line_for_profile "$warmup_pname")"
+        set +e
+        warmup_run="$TMPDIR/warmup_queries_${table}"
+        make_single_query_scripts_with_settings "$warmup_sql" "$warmup_set_line" "$warmup_run" >/dev/null
+        run_benchmark_file "$warmup_run" 1 "$TMPDIR/warmup_${table}.stderr" "$TMPDIR/warmup_${table}.log" "$warmup_timelimit" >/dev/null 2>&1
+        set -e
+        echo ">>> 表 $table 预热完成"
+    fi
+done
 echo ""
 
 echo ">>> 开始测试"

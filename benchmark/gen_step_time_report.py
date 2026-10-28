@@ -9,11 +9,12 @@
 pgvector 因需要在一张图上放置全部 11 类 SQL 语句类型，故采用横向柱状图
 （纵轴为 sql_type，横轴为耗时；每条 sql_type 行内再按 profile 分组、按步骤堆叠）。
 
-数据源（results/）：
+数据源（results/csv/，由 analyze_*_log.py 生成）：
   clickhouse-Benchmark_256_290k-log-analysis-1000.csv   （CK，6 profile × 5 sql_type）
   myscale-Benchmark_256_290k-log-analysis-1000.csv      （MyScale，profile 名与 CK 不同，口径相同）
   pgvector_log_analysis-nytimes-256-angular-1000.csv    （pgvector 1000 条 SQL，11 类 sql_type）
   pgvector_log_analysis-nytimes-256-angular-1.csv       （pgvector 1 条 SQL，11 类 sql_type）
+输入先在 results/csv/ 查找，缺失时回退到 results/bak/（表头迁移或覆盖前的历史结果）。
 
 用法：
   python gen_step_time_report.py                 # 生成全部图表
@@ -31,8 +32,20 @@ matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 
 BASE = os.path.dirname(os.path.abspath(__file__))                            # 脚本目录
-RAW = os.path.join(BASE, 'results')                                          # 数据目录
-CHART_DIR = os.path.join(RAW, 'charts')                                      # 图输出目录
+RAW = os.path.join(BASE, 'results', 'csv')                                   # 数据目录
+BAK = os.path.join(BASE, 'results', 'bak')                                   # 表头迁移/覆盖前的备份目录
+CHART_DIR = os.path.join(BASE, 'results', 'charts')                          # 图输出目录
+
+
+def resolve_input(name):
+    """先在 results/csv/ 找输入 CSV，找不到再回退到 results/bak/（旧结果会被轮转到这里）。"""
+    path = os.path.join(RAW, name)
+    if os.path.exists(path):
+        return path
+    path = os.path.join(BAK, name)
+    if os.path.exists(path):
+        return path
+    raise FileNotFoundError('missing log-analysis CSV: %s (looked in results/csv and results/bak)' % name)
 
 # ---------------- 可配置项 ----------------
 PV_PARSE_MODE = 'strtof'                                                  # strtof / inline / fast_float
@@ -106,6 +119,7 @@ PV_SHORT4 = {'off': 'off', 'pc_auto': 'auto', 'pc_gen_t': 'gen_t', 'pc_gen_v': '
 
 
 def to_float(x):
+    """把 CSV 字符串转 float；空串与占位符 ``-`` 视为缺失（None）。"""
     x = (x or '').strip()
     return None if x in ('', '-') else float(x)
 
@@ -121,6 +135,11 @@ def steady(x):
 
 
 def steady_exec_n(x):
+    """从 ``"<次数> / s=<秒>"`` 形态里取 steady 段的秒数；缺失返回 None。
+
+    原始 CSV 同时记录执行次数与稳态耗时，绘图只关心后者，因此按
+    ``/ s=`` 切分取尾部。
+    """
     x = (x or '').strip()
     if '/ s=' in x:
         x = x.split('/ s=')[-1].strip()
@@ -197,6 +216,10 @@ INK, MUTED, RULE = '#182230', '#5f6f84', '#dfe6f0'   # 正文/轴标签文字色
 
 
 def nice_max(x):
+    """把最大值向上取整到预置刻度档位，让 y 轴顶端留有少量余量。
+
+    档位表比纯数学取整更符合"人能读"的刻度；超出表尾时退回 ``ceil``。
+    """
     # x 轴刻度档位表：向上取最接近档位；需更细/更粗刻度可增删这里的数值
     for s in [0.05, 0.1, 0.15, 0.2, 0.25, 0.3, 0.4, 0.5, 0.6, 0.8, 1, 1.5, 2, 2.5, 3, 4, 5, 6, 8, 9, 10, 12, 15]:
         if x <= s:
@@ -205,6 +228,10 @@ def nice_max(x):
 
 
 def fmt_val(v):
+    """按数值量级选择小数位：越大越粗（>=1 两位，>=0.1 三位，其余四位）。
+
+    目的是让柱顶标注在 0.0x~10 的跨度内都保持同样的有效数字观感。
+    """
     if v >= 1:
         return '%.2f' % v
     if v >= 0.1:
@@ -215,6 +242,12 @@ def fmt_val(v):
 # CK/MyScale 竖版融合图（每步耗时柱+占比标注），绘制后递减输出：ck_fusion_*.png / myscale_fusion_*.png
 def draw_fusion(rows, prof_ids, shorts, prof_colors, sql_types, steps, step_colors, light_set,
                 title, out_path, figw=13.0):
+    """画 CK/MyScale 的堆叠柱状融合图：
+    每组 SQL 类型内按 profile 并排，柱内按阶段分段。
+
+    每个阶段一个颜色块，柱顶标注总耗时；``light_set`` 里的阶段颜色浅，
+    改用深色文字以保证可读性。
+    """
     nprof, nsql = len(prof_ids), len(sql_types)
     ymax = nice_max(max(rows[(p, s)]['total'] for p in prof_ids for s in sql_types))
     w = 0.86 / nprof                    # 柱宽：profile 越多单根越窄；0.86 可整体放大/缩小柱宽
@@ -266,6 +299,11 @@ def draw_fusion(rows, prof_ids, shorts, prof_colors, sql_types, steps, step_colo
 
 # CK/MyScale 竖版总耗时图（仅 total 总柱+数值标注），绘制后递减输出：ck_total.png / myscale_total.png
 def draw_total(rows, prof_ids, legend_labels, prof_colors, sql_types, out_path, title, figw=13.0):
+    """画 CK/MyScale 总耗时对比图：每个 profile 一根单色柱，柱顶标注总耗时。
+
+    与 ``draw_fusion`` 共用配色和分组布局，但不做阶段拆分，便于先看
+    "总量差异"再看"差异来自哪一步"。
+    """
     nprof, nsql = len(prof_ids), len(sql_types)
     ymax = nice_max(max(rows[(p, s)]['total'] for p in prof_ids for s in sql_types))
     w = 0.82 / nprof                    # 柱宽：profile 越多单根越窄；0.82 可整体放大/缩小
@@ -429,13 +467,13 @@ def prepare(charts=True):
     }
 
     if charts:
-        sql_ck, rows_ck, _ = load_cklike(os.path.join(RAW, 'clickhouse-Benchmark_256_290k-log-analysis-1000.csv'), {})
-        sql_ms, rows_ms, _ = load_cklike(os.path.join(RAW, 'myscale-Benchmark_256_290k-log-analysis-1000.csv'), MS_PMAP)
+        sql_ck, rows_ck, _ = load_cklike(resolve_input('clickhouse-Benchmark_256_290k-log-analysis-1000.csv'), {})
+        sql_ms, rows_ms, _ = load_cklike(resolve_input('myscale-Benchmark_256_290k-log-analysis-1000.csv'), MS_PMAP)
         sql_pg = PV_SQL_TYPES
-        rows_pg = load_pgvector(os.path.join(RAW, 'pgvector_log_analysis-nytimes-256-angular-1000.csv'),
+        rows_pg = load_pgvector(resolve_input('pgvector_log_analysis-nytimes-256-angular-1000.csv'),
                                 PV_PARSE_MODE, PV_SQL_TYPES)
         sql_pg1 = PV_SQL_TYPES
-        rows_pg1 = load_pgvector(os.path.join(RAW, 'pgvector_log_analysis-nytimes-256-angular-1.csv'),
+        rows_pg1 = load_pgvector(resolve_input('pgvector_log_analysis-nytimes-256-angular-1.csv'),
                                  PV_PARSE_MODE, PV_SQL_TYPES)
 
         # ---- ClickHouse：3 张图 ----
@@ -484,6 +522,7 @@ def prepare(charts=True):
 
 
 def main():
+    """脚本入口：生成全部图表（``prepare`` 内部按固定清单逐张绘制）。"""
     prepare(charts=True)
 
 

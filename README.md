@@ -13,6 +13,10 @@ vector-benchmark/
 │   ├── run.py                          #   Main entry (MyscaleBench, Nuitka target)
 │   ├── query_forms.py                  #   SQL-form × cache-profile QPS comparison
 │   ├── generate_sql_files.py           #   Generate SQL benchmark files for bash tests
+│   ├── plan_cache_correctness_invalidation.py # Plan-cache correctness/invalidation suite
+│   ├── gen_qps_report.py               #   QPS charts from result CSVs
+│   ├── gen_step_time_report.py         #   Stage-time charts from result CSVs
+│   ├── generate_quora_embeddings.py    #   Quora text-embedding helper
 │   ├── analyze_pgvector_log.py         #   pgvector server-log analysis
 │   ├── analyze_myscale_log.py          #   MyScale server-log analysis
 │   ├── analyze_polardb_log.py          #   PolarDB PASE server-log analysis
@@ -26,8 +30,7 @@ vector-benchmark/
 │   │   ├── datasets.json               #     Dataset registry
 │   │   └── downloads/                  #     Downloaded data files
 │   ├── configurations/                 #   Experiment configs (JSON arrays)
-│   │   ├── config.json                 #     Default experiment config
-│   │   └── templates/                  #     Config templates (copy into configurations/)
+│   │   └── config.json                 #     Default experiment config (one array, many experiments)
 │   ├── engine/                         #   Engine abstraction layer
 │   │   ├── base.py                     #     BaseEngine (QPS / recall measurement)
 │   │   ├── pgvector.py / polardb.py / clickhouse.py / myscale.py
@@ -48,20 +51,23 @@ vector-benchmark/
 │   │   ├── json_reader.py              #     JSONL (jsonl)
 │   │   ├── gz_tsv_reader.py            #     BeIR text retrieval (gz_tsv)
 │   │   └── utils.py
-│   ├── results/                        #   Test results (CSV/JSON)
+│   ├── results/                        #   Test results (gitignored)
+│   │   ├── csv/                        #     Benchmark CSV summaries
+│   │   ├── json/                       #     Detailed per-run JSON results
+│   │   ├── charts/                     #     Charts produced by gen_*_report.py
+│   │   └── bak/                        #     Timestamped CSV rotations
 │   ├── docs/                           #   Framework docs
 │   │   ├── design.md                   #     Design document
-│   │   └── dataset.md                  #     Dataset format guide
-│   └── bash-test/                      #   sh QPS tests (ClickHouse / MyScale)
-│       ├── clickhouse-benchmark.sh     #   ClickHouse/MyScale native QPS load
-│       ├── pgvector-benchmark.sh       #   [removable] pgvector (pgbench, see design.md App. B)
-│       ├── polardb-pase-query-forms-benchmark.sh # [removable] PolarDB PASE (pgbench, see design.md App. B)
-│       ├── generate-sql-files.sh       #   Sample-generated SQL
-│       ├── verify_string_to_vector_engine.py   #  MyScale string→vector verification
-│       └── sql-bench/                  #   Generated SQL files
+│   │   ├── dataset.md                  #     Dataset format guide
+│   │   └── plan_cache_correctness_invalidation.md # Plan-cache correctness suite
+│   └── bash-test/                      #   Shell QPS tests
+│       ├── clickhouse-benchmark.sh     #   ClickHouse/MyScale native QPS (authoritative)
+│       ├── pgvector-benchmark.sh       #   pgvector pgbench + single-statement latency probe
+│       ├── polardb-pase-query-forms-benchmark.sh # PolarDB PASE SQL-form / cache cross-check
+│       ├── generate-sql-files.sh       #   Sample-generated ClickHouse SQL
+│       └── sql-bench/                  #   Generated SQL files (gitignored)
 │
-├── docs/                               # Query-form / plan-cache analysis docs
-├── results/                            # Shell benchmark summary CSVs
+├── docs/                               # Query-form / plan-cache analysis docs (gitignored)
 ├── README.md                           # This file (English)
 ├── README.zh-CN.md                     # Chinese version
 ├── build_nuitka.sh                     # Nuitka build script (x86_64)
@@ -111,7 +117,11 @@ Experiment configuration files are JSON arrays stored in `configurations/`. Each
       "index_params": { "m": 16, "ef_construction": 200 },
       "parallel": 16,
       "batch_size": 256,
-      "search_number": 10
+      "search_number": 1,
+      "sql_type": ["text_literal", "text_cast"],
+      "enable_query_plan_cache": [0, 1, 2, 3],
+      "use_query_cache": [0],
+      "vector_in_parse_mode": ["default"]
     },
     "search_params": {
       "parallel": [1, 4, 8],
@@ -138,8 +148,14 @@ python run.py --engines "pgvector-*" --host 127.0.0.1 --port 5432
 # Run a specific config
 python run.py --engines pgvector-sift-128-euclidean
 
+# Restrict a wildcard to one engine family (`--engine-type` filters, never overrides)
+python run.py --engines "*" --engine-type pgvector
+
 # Skip data upload (only run search)
 python run.py --engines pgvector-sift-128-euclidean --skip-upload
+
+# Create table + index only (used to prepare tables for the shell tests)
+python run.py --engines pgvector-sift-128-euclidean --skip-search
 
 # Recall-only mode (no QPS test)
 python run.py --engines pgvector-sift-128-euclidean --recall-only
@@ -147,26 +163,27 @@ python run.py --engines pgvector-sift-128-euclidean --recall-only
 
 ### 5. Compare all SQL forms and cache profiles
 
-After the four target tables have been created and indexed, run one matrix
+After the target tables have been created and indexed, run one matrix
 covering every registered query form. Prepare a JSON target config file first
 (connection params + table names; if it lists multiple engines, run one at a
-time — see the `--config` docs in `query_forms.py`), for example:
+time — ClickHouse and MyScale share the same default port), for example:
 
 ```bash
-cd ..
+# From the repository root
 python -m benchmark query_forms \
-  --config query-forms/targets.json \
+  --config tmp/query-forms-targets.json \
   --query-count 100 \
   --concurrency 4 \
   --duration 20 \
-  --output results/query-forms-qps.csv
+  --output benchmark/results/csv/query-forms-qps.csv
 ```
 
-The output contains one row per `engine × cache profile × sql_type`.
+The output contains one row per `target × cache profile × sql_type`.
 ClickHouse/MyScale use their server query-result and vector-plan cache
 settings. PostgreSQL-compatible targets use prepared statements for the
 plan-cache profile and a bounded per-connection result cache for the
-result-cache profile.
+result-cache profile. Run `python -m benchmark query_forms --help` for the
+per-engine default profile list.
 
 ## Configuration File Format
 
@@ -215,10 +232,28 @@ Parameters for creating tables, building indexes, and importing data:
 | `parallel` | int | Number of concurrent threads for data import |
 | `batch_size` | int | Rows per insert batch |
 | `search_number` | int | Number of search rounds after upload |
-| `use_cache` | int[] | Enable prepared statement mode (pgvector/PolarDB) |
-| `use_query_cache` | int[] | Enable query-result cache; combined with the plan-cache setting |
+| `sql_type` | string[] | `[sql_type]` values to sweep (query-form names, see below) |
+| `enable_query_plan_cache` | int[] | Plan-cache tier; pgvector/PolarDB `0..3`, MyScale `0..2` |
+| `use_query_plan_cache` | int[] | Legacy alias accepted by pgvector/PolarDB |
+| `use_query_cache` | int[] | Result-cache switch (`0`/`1`), combined with the plan-cache tier |
+| `vector_query_plan_cache` | int[] | ClickHouse plan-cache tier (`0..2`) |
+| `vector_only_cache_query_plan`, `vector_query_plan_cache_only_vector`, `vector_use_cast` | int[] | ClickHouse cache-key variants |
+| `enable_cast_vector`, `only_cache_query_plan`, `query_plan_cache_only_vector` | int[] | MyScale cache-key variants |
+| `vector_in_parse_mode` | string[] | pgvector/PolarDB vector-text parser: `default`, `strtof`, `inline`, `fast_float` |
 | `optimize` | bool | Optimize table after import (ClickHouse) |
-| `enable_query_plan_cache` | int[] | Enable query plan cache (MyScale) |
+
+Plan-cache tiers are engine-specific:
+
+| Tier | pgvector | PolarDB PASE | ClickHouse (`vector_query_plan_cache`) / MyScale (`enable_query_plan_cache`) |
+|------|----------|--------------|-------------------------------------------------------------------------------|
+| `0` | No `PREPARE`; inline text, re-plan every query | Same as pgvector | Cache off |
+| `1` | `PREPARE` + `plan_cache_mode=auto`, typed bind | `PREPARE` + `plan_cache_mode=auto`, typed bind | Cache on |
+| `2` | `PREPARE` + `force_custom_plan`, typed bind | `PREPARE` + `force_generic_plan`, text bind (`$1::pase`) | Cache on + plan-only / cast variant |
+| `3` | `PREPARE` + `force_generic_plan`, typed bind | `PREPARE` + `force_generic_plan`, pase typed bind (`$1`) | — |
+
+For pgvector/PolarDB, `use_query_cache=1` additionally enables the session-level
+result cache (`pgvector.result_cache*` / `pase_result_cache*`). For
+ClickHouse/MyScale it enables the server query cache.
 
 ### search_params
 
@@ -314,7 +349,14 @@ Configure `session_settings` under `search_params` to execute SET commands befor
 
 ## Testing Modes
 
-The framework keeps exactly **two** kinds of test scripts:
+Three classes of test scripts share the same SQL-form registry and CSV column
+conventions. The **authoritative QPS** for each engine family is fixed:
+
+| Class | Script(s) | Authoritative for |
+|-------|-----------|-------------------|
+| Python | `run.py`, `query_forms.py` | pgvector / PolarDB QPS + recall; table/index creation and loading for all engines |
+| Native sh | `bash-test/clickhouse-benchmark.sh` | ClickHouse / MyScale QPS |
+| pgbench cross-check | `bash-test/pgvector-benchmark.sh`, `bash-test/polardb-pase-query-forms-benchmark.sh` | Independent check of pgvector / PolarDB per-SQL-form behaviour (including plan-cache modes) |
 
 ### Python Benchmark (create/index + QPS + recall)
 
@@ -350,6 +392,56 @@ ENGINE=myscale ./clickhouse-benchmark.sh benchmark_sift_128
 > upload phase, then run the sh script. See the header comments of
 > `clickhouse-benchmark.sh` for usage details.
 
+The script accepts `SETTINGS_GROUPS` entries of the form
+`profile|use_query_cache|vector_query_plan_cache|vector_only_cache_query_plan|vector_query_plan_cache_only_vector|vector_use_cast`
+(MyScale appends a seventh field: `enable_cast_vector`, then
+`only_cache_query_plan`, `query_plan_cache_only_vector`; see the header for
+the exact ordering). `CK_EF_S` sets the session-level
+`hnsw_candidate_list_size_for_search`.
+
+### pgbench cross-check (pgvector / PolarDB)
+
+`pgvector-benchmark.sh` and `polardb-pase-query-forms-benchmark.sh` are retained
+as independent cross-checks of the Python numbers. Both follow the
+ClickHouse-style convention "one script = N queries, QPS = tps × N" and sweep
+the per-engine plan-cache modes (§ `upload_params`) × result-cache on/off.
+
+Because pgbench reports latency per *transaction* (one full N-query script), the
+pgvector script adds a separate **single-statement latency probe**: after each
+throughput measurement it replays the same script through `psql` with
+`\timing on`, one statement at a time, inside a single transaction, and merges
+the `Time:` samples to compute `mean_time_ms` / `p95_time_ms` / `p99_time_ms`
+(nearest-rank). The probe is controlled by:
+
+| Variable | Default | Meaning |
+|----------|---------|---------|
+| `LATENCY_PROBE_STATEMENTS` | `1000` | Total statements sampled per combination; `0` disables the probe and writes `not_recorded` |
+| `TIMELIMIT` / `WARMUP_TIMELIMIT` / `REPEAT` | `10` / `1` / `1` | pgbench measure time, warmup time, repetitions |
+
+```bash
+cd benchmark/bash-test
+./pgvector-benchmark.sh benchmark_sift_128_1k
+TABLE=Benchmark_768_1m INDEX_TYPE=hnsw ./polardb-pase-query-forms-benchmark.sh
+```
+
+### Cache profile comparison (`query_forms.py`)
+
+`query_forms.py` sweeps every registered query form × cache profile:
+
+- **ClickHouse / MyScale**: `off`, `result-cache`, `plan-cache`, `plan-cast`,
+  `plan-only-vector`, `plan-result-cache`. Profiles are expressed as inline
+  `SETTINGS` on each query; the server must have
+  `enable_vector_performance_test` enabled, and each profile starts by dropping
+  the relevant server cache (`SYSTEM DROP QUERY CACHE`, `SYSTEM DROP VECTOR
+  QUERY PLAN CACHE` / `SYSTEM DROP QUERY PLAN CACHE`).
+- **pgvector / PolarDB**: `direct`, `result-cache`, `prepared-plan`,
+  `prepared-result-cache`. The plan-cache profiles use prepared statements
+  (`enable_query_plan_cache` tiers); the result-cache profiles use the
+  session-level server result cache.
+
+Targets on the same `host:port` are rejected because ClickHouse and MyScale
+share the default port — run them sequentially.
+
 ## Shell Setup & Index Operations
 
 Table/index creation and data import are all done through the `python run.py`
@@ -372,16 +464,24 @@ CREATE INDEX ON benchmark_sift_128_1k USING pase_hnsw (vector)
 ## Viewing Results
 
 ```bash
-# View CSV summary
-cd benchmark/results
-cat benchmark_results.csv | column -t -s,
+# Python-client CSV summaries
+column -t -s, benchmark/results/csv/pgvector_benchmark_results.csv
+column -t -s, benchmark/results/csv/clickhouse_benchmark_results.csv
+column -t -s, benchmark/results/csv/benchmark_results.csv
 
-# View JSON detailed results
-ls -la *search*.json
-cat pgvector-sift-128-euclidean-search-*.json | python -m json.tool
+# Shell-test CSVs (same directory, different file names)
+column -t -s, benchmark/results/csv/clickhouse-benchmark-results.csv
+column -t -s, benchmark/results/csv/myscale-benchmark-results.csv
+column -t -s, benchmark/results/csv/pgvector-benchmark-results.csv
+column -t -s, benchmark/results/csv/vector-query-forms-polardb-results.csv
 
-# View sh (ClickHouse/MyScale) benchmark results
-cat results/vector-query-forms-pgvector-results.csv
+# Detailed per-run JSON
+ls benchmark/results/json/
+python -m json.tool benchmark/results/json/pgvector-*-search-*.json | head -50
+
+# Charts
+ls benchmark/results/charts/
+python benchmark/gen_qps_report.py
 ```
 
 ## Quick Reference
@@ -433,16 +533,29 @@ If you see `Seq Scan` instead of `Index Scan`:
 |--------|---------|-------------|
 | `--engines` | `*` | Experiment name (glob pattern matching `configurations/*.json` `name` field) |
 | `--datasets` | `*` | Dataset name (glob pattern matching `datasets.json` `name` field) |
-| `--host` | `127.0.0.1` | Database server host |
-| `--port` | `9000` | Database server port |
+| `--engine-type` | none | Filter matched configs by `engine` (`clickhouse`, `myscale`, `pgvector`, `polardb`); never rewrites the config |
+| `--host` | config value, else `127.0.0.1` | Override database server host |
+| `--port` | config value, else `5432`/`5433`/`9000` | Override database server port |
 | `--skip-upload` | `false` | Skip data upload and index build stages |
-| `--recall-only` | `false` | Only run recall/metric evaluation over all test queries |
+| `--skip-search` | `false` | Create table + index only, then exit (prepares tables for the shell tests) |
+| `--recall-only` | `false` | Only run recall/metric evaluation over all test queries (ignores `queries_pool_size`) |
 
 ## Results
 
-Results are saved in `benchmark/results/`:
-- `benchmark_results.csv` — Aggregated benchmark results
-- `{experiment_name}-search-{id}-{timestamp}.json` — Detailed per-experiment results
+Results are saved under `benchmark/results/`:
+
+- `csv/pgvector_benchmark_results.csv` — pgvector/PolarDB Python-client results
+- `csv/clickhouse_benchmark_results.csv` — ClickHouse Python-client results
+- `csv/benchmark_results.csv` — MyScale Python-client results
+- `csv/*-benchmark-results.csv`, `csv/vector-query-forms-*-results.csv` — shell-test results
+- `json/{experiment}-search-{id}-{timestamp}.json` — detailed per-experiment results
+- `charts/` — charts produced by `gen_qps_report.py` / `gen_step_time_report.py`
+- `bak/` — timestamped rotations of CSV files whose schema changed
+
+Python-client latency columns (`mean_time`, `p95_time`, `p99_time`) are in
+**seconds**; shell-test latency columns (`mean_time_ms`, `p95_time_ms`,
+`p99_time_ms`) are in **milliseconds**. Missing measurements are written as
+`not_recorded`.
 
 ## Packaging
 
