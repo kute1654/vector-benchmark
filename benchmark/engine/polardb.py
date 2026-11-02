@@ -20,7 +20,7 @@ engine/clients/polardb/search.py (PolarDBSearcher), 两者 SQL 形态并不完�
 """
 
 import os
-from typing import Any, Dict, List, Optional, Tuple
+from typing import List, Optional, Tuple
 
 import psycopg2
 import psycopg2.extras

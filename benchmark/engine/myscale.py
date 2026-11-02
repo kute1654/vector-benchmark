@@ -9,9 +9,8 @@
 ``query`` 仍生成 ``L2Distance`` / ``cosineDistance`` 标量函数。
 """
 
-from typing import Any, Dict, List, Optional, Tuple
+from typing import List, Tuple
 
-from .base import BaseEngine
 from .clickhouse import ClickHouseEngine
 
 

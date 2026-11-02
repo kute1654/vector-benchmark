@@ -32,8 +32,7 @@ query_with_type 等显式工具方法。
 import math
 import os
 import random
-import threading
-from typing import Any, Dict, List, Optional, Tuple
+from typing import List, Optional, Tuple
 
 import psycopg2
 import psycopg2.extras

@@ -10,9 +10,6 @@
 """
 
 import psycopg2
-from psycopg2 import sql
-import signal
-import time
 
 from benchmark.cli_output import compact_kv, sql as sql_log, step
 from engine.base_client.configure import BaseConfigurator

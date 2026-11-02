@@ -7,7 +7,7 @@
 所有 ``build_*`` 方法返回的都是 SQL **字符串**，由调用方拼进查询。
 """
 
-from typing import Any, List, Optional, Dict
+from typing import Any, List, Optional
 
 from engine.base_client.parser import BaseConditionParser, FieldValue
 

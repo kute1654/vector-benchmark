@@ -4,8 +4,21 @@
 # 支持录入表名，根据表名自动生成SQL，测试结果写入CSV
 #
 # 用法:
-#   ./clickhouse-benchmark.sh [表名1] [表名2] ...
-#   不带参数时交互式输入表名
+#   ./clickhouse-benchmark.sh [选项] [表名1] [表名2] ...
+#
+# 选项:
+#   -t, --tables <序号序列>     数据表序号, 空格/逗号分隔 (如 "1 3 5" 或 "1,3,5"),
+#                               序号对应 `-l` 列出的表; 也可直接用位置参数传表名
+#   -n, --row-counts <数值序列> 随机抽样向量条数 (即每个 SQL 文件的查询条数),
+#                               空格/逗号分隔, 覆盖 ROW_COUNTS/ROW_COUNTS_OVERRIDE
+#   -l, --list                 列出库中含向量列的表及序号后退出
+#   -h, --help                 显示本帮助
+#   位置参数                    表名 (与 -t 二选一, 可混用)
+#
+# 示例:
+#   ./clickhouse-benchmark.sh -l
+#   ./clickhouse-benchmark.sh -t "1 2" -n "100 1000"
+#   ./clickhouse-benchmark.sh -n "100 1000" benchmark_1536_1m benchmark_768_1m
 #
 # 引擎选择 (环境变量 ENGINE, 默认 clickhouse):
 #   ENGINE=myscale    ./clickhouse-benchmark.sh 表名    # 连 MyScale, 检索函数固定为 distance() 一族 (走 ANN 索引)
@@ -62,21 +75,27 @@
 #   一个向量字面量, 批大小为 1 时会按设计退回串行 (thread_count<2), 并不代表转换
 #   逻辑出错; 要看出并行差异需要一条含多个向量字面量的查询。
 #
-# 测试维度: engine × table × settings_profile(含 string_to_vector 并行 mode) × precise_float_parsing × sql_type(normal/cast/cast_array/type_hint/raw_bytes/raw_bytes_x/with/with_cast/with_cast_array/with_type_hint/with_raw_bytes/with_raw_bytes_x/subquery_id/with_subquery_id) × row_count × concurrency (线程数 STRING_TO_VECTOR_THREADS 为固定值, 不是维度)
+# 测试维度: engine × table × settings_profile(含 string_to_vector 并行 mode) × precise_float_parsing × sql_type(normal/cast/cast_array/type_hint/raw_bytes/raw_bytes_x; WITH/子查询形态因查询计划缓存无法复用而移除) × row_count × concurrency (线程数 STRING_TO_VECTOR_THREADS 为固定值, 不是维度)
 #
 # 延迟指标 (CSV 末尾三列, 单位毫秒):
-#   p95_time_ms / p99_time_ms  直接解析 `clickhouse benchmark` 结束报告里的
-#                              "95%"/"99%" 百分位行 (该行单位是 sec., 这里换算成毫秒)。
+#   p95_time_ms / p99_time_ms  直接解析 `clickhouse benchmark` 结束报告里的百分位行
+#                              (上游写 "95%"/"99%", MyScale fork 写 "95.000%"/"99.000%",
+#                              两种写法都按数值匹配; 单位 sec./ms. 由报告自己标注,
+#                              脚本按单位换算成毫秒)。
 #   mean_time_ms               优先解析 MyScale fork 报告里的 "Avg Latency" 行;
 #                              上游 ClickHouse 不输出均值延迟, 此时按 concurrency / QPS
 #                              推导 (并发>1 时是近似平均服务时间, 不是精确测量值)。
 #   每次 repeat 各解析一份, 写入 CSV 的是各次运行去掉最大/最小值后的均值
 #   (与 qps_avg 同口径); 某次运行失败时不参与延迟统计, 全部失败则记 0.000。
-#   注意: 上游 ClickHouse 的百分位只打印到 3 位小数 (秒), 即分辨率约 1ms。
+#   三项延迟各自独立: mean 只要该次运行成功就计入, p95/p99 解析成功才计入,
+#   不再因为某一项缺失就把三项一起丢弃。
+#   注意: 上游 ClickHouse 的百分位只打印到 3 位小数 (秒), 即分辨率约 1ms;
+#   MyScale fork 额外支持 --use-millisecond-time, 脚本对 myscale 会自动加上,
+#   报告改按毫秒输出 (3 位小数, 分辨率 0.001 ms), 因此 MS 的延迟列带小数。
 #
 # ---- 用途与整体流程 ----
-#   1) Step 1    读取表名 (命令行参数, 或交互式输入)
-#   2) Step 2    选择距离函数与排序方向
+#   1) Step 1    读取表名 (-t 序号 / 位置参数 / -h 帮助)
+#   2) Step 2    按所选表的索引类型/度量自动选择距离函数与排序方向
 #   3) Step 2.5  检测向量索引是否真正生效 (未生效时询问是否继续)
 #   4) Step 3    校验 SETTINGS_GROUPS 里每个 profile 的开关组合是否合法
 #   5) Step 4    按 表 × profile × sql_type × row_count 采样生成 .sql 文件
@@ -85,7 +104,7 @@
 #   8) Step 6    逐组合运行 clickhouse-benchmark, 解析 QPS/延迟并追加写入 CSV
 #
 # ---- 参数 ----
-#   $1..$n   表名 (可多个); 不传则交互式输入。表须位于 default 库。
+#   $1..$n   表名 (可多个); 或用 -t <序号序列> 按编号选择。表须位于 default 库。
 #
 # ---- 环境变量 ----
 #   ENGINE                         clickhouse | myscale, 默认 clickhouse
@@ -95,9 +114,19 @@
 #   CK_EF_S                        ClickHouse 会话级 hnsw_candidate_list_size_for_search
 #   TIMELIMIT                      单次 benchmark 时长 (秒, 默认 10)
 #   WARMUP_TIMELIMIT               每表预热时长 (秒, 默认 60; 小于 60 会被抬到 60)
-#   REPEAT                         每个组合重复次数 (默认 10)
+#   REPEAT                         每个组合重复次数 (默认 5)
+#   固定行为: 每次调用测的第一张表的第一个组合, 在 REPEAT 次正式记录之前先跑一次
+#             同参数 (同 profile/SQL 文件/并发/时长) 的测量并丢弃, 用于消除首跑冷启动
+#             (计划缓存填充、8 线程首次访问索引页等)。实测 MyScale 首组合 run_1 可低至
+#             后续次的 0.12 倍, 其余组合没有该现象; 这次预热不写 CSV、不计入均值。
 #   OUTPUT_CSV                     结果 CSV 路径 (默认 results/csv/<engine>-benchmark-results.csv)
 #   SQL_DIR                        生成 SQL 的目录 (默认 bash-test/sql-bench/clickhouse-query-forms)
+#   SQL_REGEN                      SQL 文件重建策略 (默认 auto):
+#                                  auto = n=1 每次重新采样生成 (单条查询保持随机性,
+#                                         多轮 QPS 有差异); n>1 复用已有文件 (大样本
+#                                         均值稳定, 免重复采样; 文件缺失/为空/距离函数
+#                                         与本次选择不一致时仍会重建);
+#                                  1=全部重新生成; 0=全部复用 (校验同上)
 #   TOP_K                          ORDER BY ... LIMIT 的 k (默认 10)
 #   STRING_TO_VECTOR_THREADS       并行字符串→向量转换线程数 (默认 1; 0=自动取硬件并发)
 #   VERIFY_PARALLEL_MODES          1=基准测试前做 mode 变体一致性校验 (默认 0)
@@ -125,7 +154,8 @@
 #   string_to_vector_mode, string_to_vector_threads, sql_type, row_count, concurrency,
 #   run_1..run_<REPEAT> (每次运行的 QPS; 失败或无法解析记 0),
 #   qps_avg (个数>2 时去掉最大/最小后的均值), qps_min, qps_max,
-#   mean_time_ms, p95_time_ms, p99_time_ms —— 这三列单位均为毫秒。
+#   mean_time_ms, p95_time_ms, p99_time_ms —— 这三列单位均为毫秒,
+#   timestamp (该组合写入结果的时间 YYYY-MM-DD HH:MM:SS; 旧数据迁移后记 not_recorded)。
 #
 # ---- 退出码 ----
 #   0  正常完成; 或在「索引未生效, 是否继续」提示中回答非 y (主动取消)
@@ -135,7 +165,9 @@
 #
 # ---- 失败重试 ----
 #   每个组合固定跑 REPEAT 次; 单次失败只记录 QPS=0 并继续下一次, 不重跑已成功次数。
-#   延迟列只采纳「成功且能解析出百分位」的运行; 一次都没有时记 0.000。
+#   首个组合额外的一次预热测量失败也照常继续 (只打印提示, 不写 CSV)。
+#   延迟列按指标各自采纳成功运行: mean 只要运行成功就记; p95/p99 需要该次解析成功,
+#   一次都没有时对应列记 0.000 (三项不再互相牵连)。
 #
 # ---- 重要实现约定 ----
 #   缓存开关走会话级 SET 行 (运行副本头部), 生成的 .sql 文件里仍保留内联 SETTINGS,
@@ -154,6 +186,13 @@ if [ "$ENGINE" = "myscale" ]; then
     CLICKHOUSE="${CLICKHOUSE:-/home/clickhouse/build/programs/clickhouse}"
 else
     CLICKHOUSE="${CLICKHOUSE:-/home/ClickHouse/build/programs/clickhouse}"
+fi
+# MyScale fork 的 benchmark 支持 --use-millisecond-time: 报告里的百分位与
+# "Avg Latency" 都改按毫秒输出 (3 位小数, 分辨率 0.001 ms), 不再受秒的 3 位
+# 小数(即 1 ms 整数)限制; 上游 ClickHouse 没有这个参数, 只在 myscale 时追加。
+BENCH_TIME_OPTS=()
+if [ "$ENGINE" = "myscale" ]; then
+    BENCH_TIME_OPTS=(--use-millisecond-time)
 fi
 # 服务端 native 协议地址 (9000 端口), client 与 benchmark 都连这里
 HOST="127.0.0.1"
@@ -174,6 +213,9 @@ else
     OUTPUT_CSV="${OUTPUT_CSV:-${SCRIPT_DIR}/../results/csv/clickhouse-benchmark-results.csv}"
 fi
 SQL_DIR="${SQL_DIR:-${SCRIPT_DIR}/sql-bench/clickhouse-query-forms}"
+# SQL 文件生成策略: auto(默认)=n=1 每次重新采样/n>1 复用(校验非空且距离函数一致);
+# 1=全部重新生成; 0=全部复用。详见文件头 SQL_REGEN 说明。
+SQL_REGEN="${SQL_REGEN:-auto}"
 TOP_K="${TOP_K:-10}"
 
 # 测试维度 (可被 *_OVERRIDE 环境变量整体替换):
@@ -187,10 +229,9 @@ SQL_TYPES=(
     cast
     cast_array
     raw_bytes
-    raw_bytes_x
 )
 ROW_COUNTS=(1000)
-CONCURRENCIES=(1)
+CONCURRENCIES=(8)
 PRECISE_FLOAT_PARSING_VALUES=(1)
 
 # 并行字符串→向量转换 (MyScale 新增功能) 的测试维度, 详见文件头说明。
@@ -207,8 +248,9 @@ if [ "$ENGINE" = "myscale" ]; then
     # plan_cache 这一组额外派生出 mode=1 (块式) / mode=2 (轮转式) 两个 profile, 使
     # 并行字符串→向量转换可以在同一组缓存开关下与 mode=0 直接对比; 其余 profile 只跑 mode=0。
     SETTINGS_GROUPS=(
-        "plan_cache|0|1|0|0|0"
+        
         "off|0|0|0|0|0"
+        "plan_cache|0|1|0|0|0"
         # "plan_cache_blocked|0|1|0|0|0|1"
         # "plan_cache_cyclic|0|1|0|0|0|2"
         # "plan_cast|0|1|1|0|0"
@@ -216,11 +258,11 @@ if [ "$ENGINE" = "myscale" ]; then
         "only_plan_cache|0|1|0|0|1"
         # "only_plan_cast|0|1|1|0|1"
         # "only_plan_only_vector|0|1|0|1|1"
-        "query_off|1|0|0|0|0"
-        "query_plan_cache|1|1|0|0|0"
+        # "query_off|1|0|0|0|0"
+        # "query_plan_cache|1|1|0|0|0"
         # "query_plan_cast|1|1|1|0|0"
         # "query_plan_only_vector|1|1|0|1|0"
-        "query_only_plan_cache|1|1|0|0|1"
+        # "query_only_plan_cache|1|1|0|0|1"
         # "query_only_plan_cast|1|1|1|0|1"
         # "query_only_plan_only_vector|1|1|0|1|1"
     )
@@ -232,21 +274,19 @@ else
     # use_query_cache 与 vector_query_plan_cache 可同时开启;
     # f3/f4=1 仅在 f2=1 时有效。
     SETTINGS_GROUPS=(
-        "ck_plan_cache|0|1|0|0|0"
+        
         "ck_off|0|0|0|0|0"
+        "ck_plan_cache|0|1|0|0|0"
         "ck_only_plan_cache|0|1|1|0|0"
         # "ck_plan_cast|0|1|0|0|1"
         # "ck_only_plan_cast|0|1|1|0|1"
-        "result_off|1|0|0|0|0"
-        "result_plan_cache|1|1|0|0|0"
-        "result_only_plan_cache|1|1|1|0|0"
+        # "result_off|1|0|0|0|0"
+        # "result_plan_cache|1|1|0|0|0"
+        # "result_only_plan_cache|1|1|1|0|0"
         # "result_plan_cast|1|1|0|0|1"
         # "result_only_plan_cast|1|1|1|0|1"
     )
 fi
-
-# MyScale 不支持子查询形式的向量参数
-MYS_SCALE_UNSUPPORTED_TYPES=(subquery_id with_subquery_id)
 
 # ============ 工具函数 ============
 
@@ -362,47 +402,7 @@ case "$ENGINE" in
     *) echo "错误: ENGINE 只支持 clickhouse 或 myscale (当前: $ENGINE)" >&2; exit 1 ;;
 esac
 
-# MyScale 不支持把 Array 重新解释成 String 的子查询形式, 从 SQL_TYPES 中过滤掉。
-# 过滤手法: 把不支持列表用空格包起来, 再用 `*" $t "*` 做子串匹配 (避免 "id" 误匹配 "subquery_id")。
-if [ "$ENGINE" = "myscale" ]; then
-    filtered=()
-    removed=()
-    for t in "${SQL_TYPES[@]}"; do
-        if [[ " ${MYS_SCALE_UNSUPPORTED_TYPES[*]} " == *" $t "* ]]; then
-            removed+=("$t")
-        else
-            filtered+=("$t")
-        fi
-    done
-    # ${#removed[@]} 是数组元素个数; -gt 0 即非空
-    if [ ${#removed[@]} -gt 0 ]; then
-        echo "注意: ENGINE=myscale, 以下 SQL 形式不支持(reinterpret Array 为 String), 已跳过: ${removed[*]}"
-    fi
-    SQL_TYPES=("${filtered[@]}")
-fi
-
 validate_string_to_vector_threads
-
-case "$ENGINE" in
-    clickhouse|myscale) ;;
-    *) echo "错误: ENGINE 只支持 clickhouse 或 myscale (当前: $ENGINE)" >&2; exit 1 ;;
-esac
-
-if [ "$ENGINE" = "myscale" ]; then
-    filtered=()
-    removed=()
-    for t in "${SQL_TYPES[@]}"; do
-        if [[ " ${MYS_SCALE_UNSUPPORTED_TYPES[*]} " == *" $t "* ]]; then
-            removed+=("$t")
-        else
-            filtered+=("$t")
-        fi
-    done
-    if [ ${#removed[@]} -gt 0 ]; then
-        echo "注意: ENGINE=myscale, 以下 SQL 形式不支持(reinterpret Array 为 String), 已跳过: ${removed[*]}"
-    fi
-    SQL_TYPES=("${filtered[@]}")
-fi
 
 # ---- 引擎相关工具函数 ----
 
@@ -543,6 +543,50 @@ detect_vector_dimension() {
     echo "${dim:-0}"
 }
 
+# 探测数据表的向量索引类型及其绑定的度量, 输出 "索引类型|度量选项|度量原文"。
+# 参数: $1=表名。返回: 始终 0; 探测不到时输出 "||"(三段均为空)。
+# 说明: 索引定义记录在 system.tables.create_table_query 里, 因此按表 DDL 解析:
+#   * ClickHouse: INDEX <名> vector TYPE vector_similarity('hnsw', 'L2Distance', ...)
+#     索引类型是 vector_similarity, 查询函数必须与第 2 个参数 (度量) 一致,
+#     否则查询无法命中该索引;
+#   * MyScale:    VECTOR INDEX <名> vector TYPE MSTG('metric_type=Cosine', ...) /
+#     HNSWFLAT 等, 度量写在 metric_type 参数里 (可能为 Cosine / L2 / IP)。
+#   度量选项与 Step 2 的 1/2/3 对齐 (cosine=1, l2=2, ip/dot=3), 供自动选择使用。
+detect_table_index() {
+    local table="$1" ddl idx_type metric choice
+    ddl=$("$CLICKHOUSE" client \
+        --host "$HOST" \
+        --port "$PORT" \
+        --query "SELECT create_table_query FROM system.tables WHERE database='default' AND name='$table' FORMAT TSVRaw" 2>/dev/null) || true
+    if [ -z "$ddl" ]; then
+        echo "||"
+        return 0
+    fi
+
+    # 索引类型: "INDEX <名> vector TYPE <类型>" (ClickHouse 与 MyScale 的 DDL 同形)。
+    # 大小写两种写法 (VECTOR INDEX ... TYPE MSTG / vector index ... type ...) 都覆盖。
+    idx_type=$(printf '%s' "$ddl" | sed -nE \
+        's/.*[Ii][Nn][Dd][Ee][Xx][[:space:]]+[^[:space:]]+[[:space:]]+vector[[:space:]]+[Tt][Yy][Pp][Ee][[:space:]]+([A-Za-z0-9_]+).*/\1/p' \
+        | head -1)
+
+    # 度量: 先按 ClickHouse 的 vector_similarity 第 2 个参数取, 再按 MyScale 的
+    # metric_type 取; 两者都没有时留空, 调用方回落到 datasets.json。
+    metric=$(printf '%s' "$ddl" | sed -nE \
+        "s/.*vector_similarity[[:space:]]*\\([[:space:]]*'[^']*'[[:space:]]*,[[:space:]]*'([^']+)'.*/\\1/p" \
+        | head -1)
+    if [ -z "$metric" ]; then
+        metric=$(printf '%s' "$ddl" | sed -nE 's/.*metric_type=([A-Za-z0-9_]+).*/\1/p' | head -1)
+    fi
+
+    case "$(printf '%s' "$metric" | tr '[:upper:]' '[:lower:]')" in
+        cosinedistance|cosine|angular) choice=1 ;;
+        l2distance|l2)                 choice=2 ;;
+        dotproduct|dot|ip)             choice=3 ;;
+        *)                             choice="" ;;
+    esac
+    echo "${idx_type}|${choice}|${metric}"
+}
+
 # MyScale 的 distance() + 原生 benchmark loader 会把纯整数文本 "[3,2,8]" 解析为
 # UInt 数组并报 UNEXPECTED_DATA_TYPE; 只有 float 字面量能进 ANN 路径。该函数给
 # 整数 token 补 ".0", 使字面量解析为 Array(Float64) (与 query_forms.py 里
@@ -570,16 +614,27 @@ sys.stdout.write(struct.pack('<' + 'f' * len(vals), *(float(v) for v in vals)).h
 " "$1"
 }
 
-# 为一 (表, profile) 组合生成所有 SQL 形态的查询文件。
+# 判断某个 SQL 形态是否在本次 SQL_TYPES 列表中 (生成 SQL 文件只处理列出的形态)。
+# 参数: $1=形态名 (normal/cast/cast_array/type_hint/raw_bytes/raw_bytes_x)
+# 返回: 0 = 需要生成; 1 = 本次不生成
+sql_type_enabled() {
+    local needle="$1" t
+    for t in "${SQL_TYPES[@]}"; do
+        [ "$t" = "$needle" ] && return 0
+    done
+    return 1
+}
+
+# 为一 (表, profile) 组合生成 SQL_TYPES 中列出的各形态查询文件。
 # 参数:
 #   $1=表名  $2=向量列名  $3=距离函数 (MyScale 下会被覆盖为 distance)
 #   $4=排序方向 ASC/DESC  $5=profile 名  $6=内联 SETTINGS 子句 (含前导空格)
-# 副作用: 在 $SQL_DIR 下为 ROW_COUNTS 中每个 count 各写 13 个 .sql 文件;
-#   文件名固定为 <table>_<profile>_<sql_type>_<count>.sql。
+# 副作用: 在 $SQL_DIR 下为 ROW_COUNTS 中每个 count、SQL_TYPES 中每个形态各写
+#   1 个 .sql 文件; 文件名固定为 <table>_<profile>_<sql_type>_<count>.sql。
 #   采样结果与错误输出写在 mktemp 临时文件中, 正常结束/失败返回前都会删除。
 # 返回: 0 成功; 1 采样查询失败 (调用方在 set -e 下会因此终止脚本)。
-# 说明: 本函数会把 SQL_TYPES 里列出的所有形态都生成一遍 (即使某些形态不在本次
-#   SQL_TYPES 列表中); 真正跑哪些形态由主循环的 SQL_TYPES 决定。
+# 说明: 只生成 SQL_TYPES 中列出的形态, 未列出的形态不构建、也不写文件;
+#   真正跑哪些形态同样由主循环的 SQL_TYPES 决定。
 generate_sql_for_table() {
     local table="$1"
     local vec_col="$2"
@@ -594,6 +649,23 @@ generate_sql_for_table() {
     echo "  生成SQL文件 (表=$table, 引擎=$ENGINE, profile=$settings_profile, 列=$vec_col, 距离=$dist_func, 排序=$sort_dir)..."
 
     for count in "${ROW_COUNTS[@]}"; do
+        # auto 模式: n>1 且该 profile 下所有 sql_type 文件都存在、非空且含当前距离
+        # 函数时直接复用, 跳过抽样 (n=1 每次重新采样; SQL_REGEN=1 全部重新生成)。
+        if [ "$SQL_REGEN" != "1" ] && { [ "$SQL_REGEN" = "0" ] || [ "$count" -gt 1 ]; }; then
+            local files_ok sql_type sql_file
+            files_ok=true
+            for sql_type in "${SQL_TYPES[@]}"; do
+                sql_file="$SQL_DIR/${table}_${settings_profile}_${sql_type}_${count}.sql"
+                if [ ! -s "$sql_file" ] || ! grep -qF "${DISTANCE_FUNC}(" "$sql_file"; then
+                    files_ok=false
+                    break
+                fi
+            done
+            if [ "$files_ok" = true ]; then
+                echo "  表 $table profile=$settings_profile n=$count: 复用已有 SQL 文件 (跳过抽样)"
+                continue
+            fi
+        fi
         local tmp_vectors
         local tmp_error
         # mktemp 生成唯一临时文件; 错误输出单独存一份, 便于失败时只展示尾部
@@ -635,144 +707,81 @@ generate_sql_for_table() {
         # IFS=$'\t' 只为本次 read 指定制表符分隔; -r 禁止反斜杠转义。
         #   三个变量依次接收三列; 预先构造好查询文本再 echo, 避免把命令替换写进循环条件。
         # `[ -z "$vec_str" ] && continue` 跳过空行 (表为空时仍会留下空文件)。
-        local normal_file="$SQL_DIR/${table}_${settings_profile}_normal_${count}.sql"
-        > "$normal_file"
-        while IFS=$'\t' read -r _id vec_str _vec_hex; do
-            [ -z "$vec_str" ] && continue
-            local lit_vec="$vec_str"
-            if [ "$ENGINE" = "myscale" ]; then
-                lit_vec=$(floatify_vec_str "$vec_str")
-            fi
-            echo "SELECT id, $(build_dist_expr "$vec_col" "[${lit_vec}]") as dis FROM ${table} ORDER BY dis ${sort_dir} LIMIT ${TOP_K}${settings_clause};" >> "$normal_file"
-        done < "$tmp_vectors"
-        # 循环内 read 通过 < 重定向消费文件, 子 shell 不参与, 因此循环内的变量修改对外可见
-        echo "    已生成: $normal_file ($(wc -l < "$normal_file") 条查询)"
+        # 只生成 SQL_TYPES 中列出的形态 (见 sql_type_enabled); 各形态独立判断,
+        # 未列出的形态不构建、不写文件。
+        if sql_type_enabled normal; then
+            local normal_file="$SQL_DIR/${table}_${settings_profile}_normal_${count}.sql"
+            > "$normal_file"
+            while IFS=$'\t' read -r _id vec_str _vec_hex; do
+                [ -z "$vec_str" ] && continue
+                local lit_vec="$vec_str"
+                if [ "$ENGINE" = "myscale" ]; then
+                    lit_vec=$(floatify_vec_str "$vec_str")
+                fi
+                echo "SELECT id, $(build_dist_expr "$vec_col" "[${lit_vec}]") as dis FROM ${table} ORDER BY dis ${sort_dir} LIMIT ${TOP_K}${settings_clause};" >> "$normal_file"
+            done < "$tmp_vectors"
+            # 循环内 read 通过 < 重定向消费文件, 子 shell 不参与, 因此循环内的变量修改对外可见
+            echo "    已生成: $normal_file ($(wc -l < "$normal_file") 条查询)"
+        fi
 
-        local cast_file="$SQL_DIR/${table}_${settings_profile}_cast_${count}.sql"
-        > "$cast_file"
-        while IFS=$'\t' read -r _id vec_str _vec_hex; do
-            [ -z "$vec_str" ] && continue
-            echo "SELECT id, $(build_dist_expr "$vec_col" "cast('[${vec_str}]','Array(Float32)')") as dis FROM ${table} ORDER BY dis ${sort_dir} LIMIT ${TOP_K}${settings_clause};" >> "$cast_file"
-        done < "$tmp_vectors"
-        echo "    已生成: $cast_file ($(wc -l < "$cast_file") 条查询)"
+        if sql_type_enabled cast; then
+            local cast_file="$SQL_DIR/${table}_${settings_profile}_cast_${count}.sql"
+            > "$cast_file"
+            while IFS=$'\t' read -r _id vec_str _vec_hex; do
+                [ -z "$vec_str" ] && continue
+                echo "SELECT id, $(build_dist_expr "$vec_col" "cast('[${vec_str}]','Array(Float32)')") as dis FROM ${table} ORDER BY dis ${sort_dir} LIMIT ${TOP_K}${settings_clause};" >> "$cast_file"
+            done < "$tmp_vectors"
+            echo "    已生成: $cast_file ($(wc -l < "$cast_file") 条查询)"
+        fi
 
-        local cast_array_file="$SQL_DIR/${table}_${settings_profile}_cast_array_${count}.sql"
-        > "$cast_array_file"
-        while IFS=$'\t' read -r _id vec_str _vec_hex; do
-            [ -z "$vec_str" ] && continue
-            echo "SELECT id, $(build_dist_expr "$vec_col" "CAST([${vec_str}] AS Array(Float32))") as dis FROM ${table} ORDER BY dis ${sort_dir} LIMIT ${TOP_K}${settings_clause};" >> "$cast_array_file"
-        done < "$tmp_vectors"
-        echo "    已生成: $cast_array_file ($(wc -l < "$cast_array_file") 条查询)"
+        if sql_type_enabled cast_array; then
+            local cast_array_file="$SQL_DIR/${table}_${settings_profile}_cast_array_${count}.sql"
+            > "$cast_array_file"
+            while IFS=$'\t' read -r _id vec_str _vec_hex; do
+                [ -z "$vec_str" ] && continue
+                echo "SELECT id, $(build_dist_expr "$vec_col" "CAST([${vec_str}] AS Array(Float32))") as dis FROM ${table} ORDER BY dis ${sort_dir} LIMIT ${TOP_K}${settings_clause};" >> "$cast_array_file"
+            done < "$tmp_vectors"
+            echo "    已生成: $cast_array_file ($(wc -l < "$cast_array_file") 条查询)"
+        fi
 
-        local type_hint_file="$SQL_DIR/${table}_${settings_profile}_type_hint_${count}.sql"
-        > "$type_hint_file"
-        while IFS=$'\t' read -r _id vec_str _vec_hex; do
-            [ -z "$vec_str" ] && continue
-            echo "SELECT id, $(build_dist_expr "$vec_col" "[${vec_str}]::Array(Float32)") as dis FROM ${table} ORDER BY dis ${sort_dir} LIMIT ${TOP_K}${settings_clause};" >> "$type_hint_file"
-        done < "$tmp_vectors"
-        echo "    已生成: $type_hint_file ($(wc -l < "$type_hint_file") 条查询)"
+        if sql_type_enabled type_hint; then
+            local type_hint_file="$SQL_DIR/${table}_${settings_profile}_type_hint_${count}.sql"
+            > "$type_hint_file"
+            while IFS=$'\t' read -r _id vec_str _vec_hex; do
+                [ -z "$vec_str" ] && continue
+                echo "SELECT id, $(build_dist_expr "$vec_col" "[${vec_str}]::Array(Float32)") as dis FROM ${table} ORDER BY dis ${sort_dir} LIMIT ${TOP_K}${settings_clause};" >> "$type_hint_file"
+            done < "$tmp_vectors"
+            echo "    已生成: $type_hint_file ($(wc -l < "$type_hint_file") 条查询)"
+        fi
 
         # raw_bytes 形态直接用服务端算好的 hex (第三列); 若为空 (MyScale 只取两列),
         # 则在 bash 侧用 float_vec_to_hex 把 float 文本转成 IEEE754 小端 hex。
         # 注意这里第三个 read 变量名是 vec_hex (不带下划线), 与上面的 _vec_hex 写法不同。
-        local raw_bytes_file="$SQL_DIR/${table}_${settings_profile}_raw_bytes_${count}.sql"
-        > "$raw_bytes_file"
-        while IFS=$'\t' read -r _id vec_str vec_hex; do
-            [ -z "$vec_str" ] && continue
-            if [ -z "$vec_hex" ]; then
-                vec_hex=$(float_vec_to_hex "$vec_str")
-            fi
-            echo "SELECT id, $(build_dist_expr "$vec_col" "reinterpret(unhex('${vec_hex}'), 'Array(Float32)')") as dis FROM ${table} ORDER BY dis ${sort_dir} LIMIT ${TOP_K}${settings_clause};" >> "$raw_bytes_file"
-        done < "$tmp_vectors"
-        echo "    已生成: $raw_bytes_file ($(wc -l < "$raw_bytes_file") 条查询)"
+        if sql_type_enabled raw_bytes; then
+            local raw_bytes_file="$SQL_DIR/${table}_${settings_profile}_raw_bytes_${count}.sql"
+            > "$raw_bytes_file"
+            while IFS=$'\t' read -r _id vec_str vec_hex; do
+                [ -z "$vec_str" ] && continue
+                if [ -z "$vec_hex" ]; then
+                    vec_hex=$(float_vec_to_hex "$vec_str")
+                fi
+                echo "SELECT id, $(build_dist_expr "$vec_col" "reinterpret(unhex('${vec_hex}'), 'Array(Float32)')") as dis FROM ${table} ORDER BY dis ${sort_dir} LIMIT ${TOP_K}${settings_clause};" >> "$raw_bytes_file"
+            done < "$tmp_vectors"
+            echo "    已生成: $raw_bytes_file ($(wc -l < "$raw_bytes_file") 条查询)"
+        fi
 
-        local raw_bytes_x_file="$SQL_DIR/${table}_${settings_profile}_raw_bytes_x_${count}.sql"
-        > "$raw_bytes_x_file"
-        while IFS=$'\t' read -r _id vec_str vec_hex; do
-            [ -z "$vec_str" ] && continue
-            if [ -z "$vec_hex" ]; then
-                vec_hex=$(float_vec_to_hex "$vec_str")
-            fi
-            echo "SELECT id, $(build_dist_expr "$vec_col" "reinterpret(x'${vec_hex}', 'Array(Float32)')") as dis FROM ${table} ORDER BY dis ${sort_dir} LIMIT ${TOP_K}${settings_clause};" >> "$raw_bytes_x_file"
-        done < "$tmp_vectors"
-        echo "    已生成: $raw_bytes_x_file ($(wc -l < "$raw_bytes_x_file") 条查询)"
-
-        local with_file="$SQL_DIR/${table}_${settings_profile}_with_${count}.sql"
-        > "$with_file"
-        while IFS=$'\t' read -r _id vec_str _vec_hex; do
-            [ -z "$vec_str" ] && continue
-            local lit_vec="$vec_str"
-            if [ "$ENGINE" = "myscale" ]; then
-                lit_vec=$(floatify_vec_str "$vec_str")
-            fi
-            echo "WITH [${lit_vec}] AS query_vector SELECT id, $(build_dist_expr "$vec_col" "query_vector") as dis FROM ${table} ORDER BY dis ${sort_dir} LIMIT ${TOP_K}${settings_clause};" >> "$with_file"
-        done < "$tmp_vectors"
-        echo "    已生成: $with_file ($(wc -l < "$with_file") 条查询)"
-
-        local with_cast_file="$SQL_DIR/${table}_${settings_profile}_with_cast_${count}.sql"
-        > "$with_cast_file"
-        while IFS=$'\t' read -r _id vec_str _vec_hex; do
-            [ -z "$vec_str" ] && continue
-            echo "WITH cast('[${vec_str}]','Array(Float32)') AS query_vector SELECT id, $(build_dist_expr "$vec_col" "query_vector") as dis FROM ${table} ORDER BY dis ${sort_dir} LIMIT ${TOP_K}${settings_clause};" >> "$with_cast_file"
-        done < "$tmp_vectors"
-        echo "    已生成: $with_cast_file ($(wc -l < "$with_cast_file") 条查询)"
-
-        local with_cast_array_file="$SQL_DIR/${table}_${settings_profile}_with_cast_array_${count}.sql"
-        > "$with_cast_array_file"
-        while IFS=$'\t' read -r _id vec_str _vec_hex; do
-            [ -z "$vec_str" ] && continue
-            echo "WITH CAST([${vec_str}] AS Array(Float32)) AS query_vector SELECT id, $(build_dist_expr "$vec_col" "query_vector") as dis FROM ${table} ORDER BY dis ${sort_dir} LIMIT ${TOP_K}${settings_clause};" >> "$with_cast_array_file"
-        done < "$tmp_vectors"
-        echo "    已生成: $with_cast_array_file ($(wc -l < "$with_cast_array_file") 条查询)"
-
-        local with_type_hint_file="$SQL_DIR/${table}_${settings_profile}_with_type_hint_${count}.sql"
-        > "$with_type_hint_file"
-        while IFS=$'\t' read -r _id vec_str _vec_hex; do
-            [ -z "$vec_str" ] && continue
-            echo "WITH [${vec_str}]::Array(Float32) AS query_vector SELECT id, $(build_dist_expr "$vec_col" "query_vector") as dis FROM ${table} ORDER BY dis ${sort_dir} LIMIT ${TOP_K}${settings_clause};" >> "$with_type_hint_file"
-        done < "$tmp_vectors"
-        echo "    已生成: $with_type_hint_file ($(wc -l < "$with_type_hint_file") 条查询)"
-
-        local with_raw_bytes_file="$SQL_DIR/${table}_${settings_profile}_with_raw_bytes_${count}.sql"
-        > "$with_raw_bytes_file"
-        while IFS=$'\t' read -r _id vec_str vec_hex; do
-            [ -z "$vec_str" ] && continue
-            if [ -z "$vec_hex" ]; then
-                vec_hex=$(float_vec_to_hex "$vec_str")
-            fi
-            echo "WITH reinterpret(unhex('${vec_hex}'), 'Array(Float32)') AS query_vector SELECT id, $(build_dist_expr "$vec_col" "query_vector") as dis FROM ${table} ORDER BY dis ${sort_dir} LIMIT ${TOP_K}${settings_clause};" >> "$with_raw_bytes_file"
-        done < "$tmp_vectors"
-        echo "    已生成: $with_raw_bytes_file ($(wc -l < "$with_raw_bytes_file") 条查询)"
-
-        local with_raw_bytes_x_file="$SQL_DIR/${table}_${settings_profile}_with_raw_bytes_x_${count}.sql"
-        > "$with_raw_bytes_x_file"
-        while IFS=$'\t' read -r _id vec_str vec_hex; do
-            [ -z "$vec_str" ] && continue
-            if [ -z "$vec_hex" ]; then
-                vec_hex=$(float_vec_to_hex "$vec_str")
-            fi
-            echo "WITH reinterpret(x'${vec_hex}', 'Array(Float32)') AS query_vector SELECT id, $(build_dist_expr "$vec_col" "query_vector") as dis FROM ${table} ORDER BY dis ${sort_dir} LIMIT ${TOP_K}${settings_clause};" >> "$with_raw_bytes_x_file"
-        done < "$tmp_vectors"
-        echo "    已生成: $with_raw_bytes_x_file ($(wc -l < "$with_raw_bytes_x_file") 条查询)"
-
-        # 子查询形态不让向量出现在 SQL 文本里, 而是用样本行的 id 回表取向量;
-        # 因此只读取第一列 id, 后两列用 _vec_str/_vec_hex 占位忽略 (下划线只是命名习惯)。
-        # id 直接拼进 SQL, 要求样本表的 id 是数值类型 (不加引号)。
-        local subquery_id_file="$SQL_DIR/${table}_${settings_profile}_subquery_id_${count}.sql"
-        > "$subquery_id_file"
-        while IFS=$'\t' read -r id _vec_str _vec_hex; do
-            [ -z "$id" ] && continue
-            echo "SELECT id, $(build_dist_expr "$vec_col" "(SELECT ${vec_col} FROM ${table} WHERE id = ${id})") as dis FROM ${table} ORDER BY dis ${sort_dir} LIMIT ${TOP_K}${settings_clause};" >> "$subquery_id_file"
-        done < "$tmp_vectors"
-        echo "    已生成: $subquery_id_file ($(wc -l < "$subquery_id_file") 条查询)"
-
-        local with_subquery_id_file="$SQL_DIR/${table}_${settings_profile}_with_subquery_id_${count}.sql"
-        > "$with_subquery_id_file"
-        while IFS=$'\t' read -r id _vec_str _vec_hex; do
-            [ -z "$id" ] && continue
-            echo "WITH (SELECT ${vec_col} FROM ${table} WHERE id = ${id}) AS query_vector SELECT id, $(build_dist_expr "$vec_col" "query_vector") as dis FROM ${table} ORDER BY dis ${sort_dir} LIMIT ${TOP_K}${settings_clause};" >> "$with_subquery_id_file"
-        done < "$tmp_vectors"
-        echo "    已生成: $with_subquery_id_file ($(wc -l < "$with_subquery_id_file") 条查询)"
+        if sql_type_enabled raw_bytes_x; then
+            local raw_bytes_x_file="$SQL_DIR/${table}_${settings_profile}_raw_bytes_x_${count}.sql"
+            > "$raw_bytes_x_file"
+            while IFS=$'\t' read -r _id vec_str vec_hex; do
+                [ -z "$vec_str" ] && continue
+                if [ -z "$vec_hex" ]; then
+                    vec_hex=$(float_vec_to_hex "$vec_str")
+                fi
+                echo "SELECT id, $(build_dist_expr "$vec_col" "reinterpret(x'${vec_hex}', 'Array(Float32)')") as dis FROM ${table} ORDER BY dis ${sort_dir} LIMIT ${TOP_K}${settings_clause};" >> "$raw_bytes_x_file"
+            done < "$tmp_vectors"
+            echo "    已生成: $raw_bytes_x_file ($(wc -l < "$raw_bytes_x_file") 条查询)"
+        fi
 
         # 每个 count 用完即删临时文件; -f 忽略文件不存在
         rm -f "$tmp_vectors" "$tmp_error"
@@ -882,24 +891,33 @@ parse_total_qps() {
 }
 
 # 解析 `clickhouse benchmark` 结束报告里指定分位的延迟, 统一换算成毫秒。
-# 单连接的输出形如 (制表符分隔):
-#   95%		0.010 sec.
+# 单连接的输出形如 (制表符分隔, 上游 ClickHouse 与 MyScale fork 的写法不同):
+#   上游 ClickHouse:  95%		0.010 sec.
+#   MyScale fork:     95.000%		0.010 sec.      (百分比固定 3 位小数)
+# 两种写法都接受: 先剥掉首列的 "%", 再按数值与目标分位比较(容差 0.0005),
+# 因此 95% / 95.0% / 95.000% 都命中 95。
 # 多个 --host/--port 时同一行会有多列 (每连接一个值), 这里取各列平均;
 # 单位按值后面的 "sec."/"ms." 判断 (MyScale fork 支持 --use-millisecond-time)。
 # 解析失败时输出空串。
 # 参数: $1=stderr 文本, $2=分位数数字 (如 95)。返回: stdout 输出毫秒 (3 位小数) 或空串。
-# awk 说明: -v 传入 p="95%"; `$1 == p` 精确匹配该行首列; 行内是
-#   "数值 单位 数值 单位 ..." 成对出现, 故 i 每次 +2; 单位不以 ms 开头则按秒 ×1000。
+# awk 说明: 行内是 "数值 单位 数值 单位 ..." 成对出现, 故 i 每次 +2;
+#   单位不以 ms 开头则按秒 ×1000。
 #   空串与 0 不同: 调用方用 [ -n ... ] 判断本次是否纳入延迟统计。
 parse_percentile_ms() {
     local stderr_output="$1"
     local percentile="$2"
-    printf '%s\n' "$stderr_output" | awk -v p="${percentile}%" '
-        $1 == p {
-            for (i = 2; i + 1 <= NF; i += 2) {
-                v = $i;
-                if ($(i + 1) !~ /^ms/) v *= 1000;
-                sum += v; n++;
+    printf '%s\n' "$stderr_output" | awk -v p="${percentile}" '
+        $1 ~ /%$/ {
+            q = $1;
+            sub(/%$/, "", q);
+            d = (q + 0) - (p + 0);
+            if (d < 0) d = -d;
+            if (d < 0.0005) {
+                for (i = 2; i + 1 <= NF; i += 2) {
+                    v = $i;
+                    if ($(i + 1) !~ /^ms/) v *= 1000;
+                    sum += v; n++;
+                }
             }
         }
         END { if (n > 0) printf "%.3f", sum / n }
@@ -1149,39 +1167,158 @@ if [ ! -x "$CLICKHOUSE" ]; then
     exit 1
 fi
 
+# ---- 命令行参数解析 (数据表序号 / 随机抽样条数的数值输入) ----
+usage() {
+    local self; self=$(basename "$0")
+    cat >&2 <<EOF
+用法: $self [选项] [表名 ...]
+
+选项:
+  -t, --tables <序号序列>     数据表序号, 空格/逗号分隔 (如 "1 3 5" 或 "1,3,5")
+  -n, --row-counts <数值序列> 随机抽样向量条数, 空格/逗号分隔 (如 "100 1000")
+  -l, --list                 列出库中含向量列的表及序号后退出
+  -h, --help                 显示本帮助
+  位置参数                    表名 (与 -t 二选一, 可混用)
+
+示例:
+  $self -l
+  $self -t "1 2" -n "100 1000"
+  $self -n "100 1000" benchmark_1536_1m benchmark_768_1m
+EOF
+    exit "${1:-0}"
+}
+
+# 列出 default 库含向量列的表/字段/维度并带行号 (供 -l 与 -t 序号使用)。
+# stdout 只输出编号行, 便于 $(...) 捕获; -l 分支直接原样打印给用户。
+list_tables_numbered() {
+    local tables i=0 tname tcol dim
+    local -a pat_num=() pat_skip=()
+    tables=$("$CLICKHOUSE" client --host "$HOST" --port "$PORT" \
+        --query "SELECT DISTINCT table FROM system.columns WHERE database='default' AND type LIKE 'Array(Float%)' ORDER BY table SETTINGS use_query_cache=0" 2>/dev/null) || true
+    if [ -z "$tables" ]; then
+        echo "错误: 未找到任何含向量列 (Array(Float%)) 的表" >&2
+        return 1
+    fi
+    # 只对基准数据集表 (Benchmark_<维度>_<条数>[km]) 编号; 其余表 (如 MyScale 库里的
+    # 历史手工表 "Benchmark") 只提示不编号 —— 该表按字典序排在最前, 曾导致 -t 1
+    # 选中它而非 Benchmark_128_10m。被跳过的表仍可用表名作位置参数选择。
+    while IFS= read -r tname; do
+        [ -z "$tname" ] && continue
+        if printf '%s' "$tname" | grep -qiE '^Benchmark_[0-9]+_[0-9]+[km]$'; then
+            pat_num+=("$tname")
+        else
+            pat_skip+=("$tname")
+        fi
+    done <<< "$tables"
+    # 没有任何表匹配数据集命名时退回全量编号, 保留对任意表的 -t 可用性
+    if [ "${#pat_num[@]}" -eq 0 ]; then
+        pat_num=("${pat_skip[@]}")
+        pat_skip=()
+    fi
+    for tname in "${pat_num[@]}"; do
+        i=$((i+1))
+        tcol=$(detect_vector_column "$tname")
+        dim=$(detect_vector_dimension "$tname" "$tcol")
+        printf '%3d. %s (col=%s dim=%s)\n' "$i" "$tname" "$tcol" "${dim:-?}"
+    done
+    if [ "${#pat_skip[@]}" -gt 0 ]; then
+        echo "(已跳过非基准数据集表: ${pat_skip[*]}; 如需测试请用表名作位置参数)" >&2
+    fi
+}
+
+# 按序号序列解析出表名列表 (空格分隔写到 stdout); 序号不合法/越界时提示并忽略,
+# 无有效表时输出为空。与 pgvector-benchmark.sh 的 resolve_table_numbers 同一套规则。
+resolve_table_numbers() {
+    local tables_info="$1" nums="$2" out="" n line total
+    total=$(printf '%s\n' "$tables_info" | grep -c . || true)
+    [ "$total" -eq 0 ] && { echo "错误: 未找到任何含向量列的表" >&2; return 1; }
+    for n in $(echo "$nums" | tr ',' ' '); do
+        case "$n" in
+            ''|*[!0-9]*) echo "  ⚠ 忽略非法序号: '$n'" >&2 ;;
+            *)
+                if [ "$n" -ge 1 ] && [ "$n" -le "$total" ] 2>/dev/null; then
+                    line=$(printf '%s\n' "$tables_info" | awk -v n="$n" 'NR==n' | awk '{print $2}')
+                    [ -n "$line" ] && out="${out:+$out }$line"
+                else
+                    echo "  ⚠ 序号 $n 超出范围 (1-$total), 已忽略" >&2
+                fi ;;
+        esac
+    done
+    echo "$out"
+}
+
+TABLE_NUMS="" ROW_COUNTS_CLI="" DO_LIST=0
+POS_TABLES=()
+while [ "$#" -gt 0 ]; do
+    case "$1" in
+        -t|--tables)
+            if [ -z "${2:-}" ]; then echo "错误: -t 缺少序号序列" >&2; usage 1; fi
+            TABLE_NUMS="$2"; shift 2 ;;
+        -n|--row-counts)
+            if [ -z "${2:-}" ]; then echo "错误: -n 缺少数值序列" >&2; usage 1; fi
+            ROW_COUNTS_CLI="$2"; shift 2 ;;
+        -l|--list)   DO_LIST=1; shift ;;
+        -h|--help)   usage 0 ;;
+        --)          shift; POS_TABLES+=("$@"); break ;;
+        -*)          echo "未知选项: $1" >&2; usage 1 ;;
+        *)           POS_TABLES+=("$1"); shift ;;
+    esac
+done
+
+if [ "$DO_LIST" -eq 1 ]; then
+    echo "库中含向量列的表:" >&2
+    list_tables_numbered || exit 1
+    exit 0
+fi
+
+# 随机抽样条数数值输入 (-n): 优先级高于 ROW_COUNTS/ROW_COUNTS_OVERRIDE
+if [ -n "$ROW_COUNTS_CLI" ]; then
+    ROW_COUNTS=()
+    for n in $(echo "$ROW_COUNTS_CLI" | tr ',' ' '); do
+        case "$n" in
+            ''|*[!0-9]*) echo "  ⚠ 忽略非法抽样数量: '$n'" >&2 ;;
+            *) if [ "$n" -gt 0 ] 2>/dev/null; then ROW_COUNTS+=("$n"); else
+                   echo "  ⚠ 忽略非正整数抽样数量: '$n'" >&2
+               fi ;;
+        esac
+    done
+    [ "${#ROW_COUNTS[@]}" -eq 0 ] && { echo "错误: -n 未提供有效抽样条数" >&2; usage 1; }
+fi
+
+# 数据表序号数值输入 (-t): 解析为表名, 与位置参数表名可混用
+if [ -n "$TABLE_NUMS" ]; then
+    tables_info=$(list_tables_numbered) || exit 1
+    resolved=$(resolve_table_numbers "$tables_info" "$TABLE_NUMS")
+    if [ -z "$resolved" ]; then echo "错误: -t 未解析出任何有效表" >&2; exit 1; fi
+    for t in $resolved; do POS_TABLES+=("$t"); done
+fi
+
 # ---- Step 1: 输入表名 ----
 echo ">>> Step 1: 输入测试表名"
 echo ""
 
-# 表名统一收进数组: 有命令行参数就逐个追加, 否则交互式读取后按空白切分。
-# "$@" 加引号可保留每个参数原样 (含空格), 与 "$*" 不同。
+# 表名统一收进数组: -t 序号解析结果与位置参数表名合并 (见上方解析循环)。
 TABLES=()
 
-if [ $# -gt 0 ]; then
-    for t in "$@"; do
+if [ "${#POS_TABLES[@]}" -gt 0 ]; then
+    for t in "${POS_TABLES[@]}"; do
         TABLES+=("$t")
     done
     echo "从命令行参数获取表名: ${TABLES[*]}"
 else
-    echo "当前数据库中的表 (含 Array(Float) 列):"
-    # 先列出候选表帮助用户输入; sed 给每行加两个空格缩进
-    "$CLICKHOUSE" client --host "$HOST" --port "$PORT" \
-        --query "SELECT DISTINCT table FROM system.columns WHERE database='default' AND type LIKE 'Array(Float%)' ORDER BY table SETTINGS use_query_cache=0" 2>/dev/null | sed 's/^/  /'
-    echo ""
-    # read -p 打印提示并从 stdin 读一行; read -ra 把该行按空白切分进数组 (a=array)
-    read -p "请输入表名 (多个表用空格分隔): " table_input
-    if [ -z "$table_input" ]; then
-        echo "错误: 未输入表名"
-        exit 1
-    fi
-    read -ra TABLES <<< "$table_input"
+    echo "错误: 未指定任何表 (用 -t <序号> 或 <表名>, -l 查看序号, -h 帮助)" >&2
+    usage 1
 fi
 
 echo ""
 
-# 关联数组 (declare -A): 以表名为 key 缓存向量列名与维度, 避免后续反复查询 system 表
+# 关联数组 (declare -A): 以表名为 key 缓存向量列名/维度/索引类型/索引度量,
+# 避免后续反复查询 system 表; 索引信息供 Step 2 自动选择距离函数使用。
 declare -A TABLE_VEC_COL
 declare -A TABLE_DIM
+declare -A TABLE_INDEX_TYPE
+declare -A TABLE_INDEX_METRIC
+declare -A TABLE_INDEX_METRIC_NAME
 
 for table in "${TABLES[@]}"; do
     vec_col=$(detect_vector_column "$table")
@@ -1190,31 +1327,109 @@ for table in "${TABLES[@]}"; do
         exit 1
     fi
     dim=$(detect_vector_dimension "$table" "$vec_col")
+    IFS='|' read -r idx_type idx_metric_choice idx_metric_name <<< "$(detect_table_index "$table")"
     TABLE_VEC_COL["$table"]="$vec_col"
     TABLE_DIM["$table"]="$dim"
+    TABLE_INDEX_TYPE["$table"]="$idx_type"
+    TABLE_INDEX_METRIC["$table"]="$idx_metric_choice"
+    TABLE_INDEX_METRIC_NAME["$table"]="$idx_metric_name"
     echo "  表: $table  向量列: $vec_col  维度: $dim"
+    if [ -n "$idx_type" ]; then
+        echo "    索引类型: $idx_type  索引度量: ${idx_metric_name:-未识别}"
+    else
+        echo "    索引类型: 未检测到 (表上没有向量索引, 查询将全表扫描)"
+    fi
 done
 
 echo ""
 
 # ---- Step 2: 选择距离函数 ----
-# 交互选择 1/2/3; ${dist_choice:-1} 让直接回车时默认选 1。
-# case 的 *) 分支同时覆盖 "1" 和空值/非法输入, 统一退回 cosineDistance。
+# 自动选择: 按表名 Benchmark_<维度>_<条数> 到 datasets/datasets.json 匹配数据集,
+# 取其 distance 字段映射选项 (l2→2, cosine→1, ip→3); 未匹配到则回落默认 1。
+# 参数: $1=表名; 输出 "选项|数据集名|distance" 或空串。
+auto_dist_choice() {
+    local tbl="$1" tag dim_num cnt cnt_num out
+    tag=$(printf '%s' "$tbl" | grep -iEo 'Benchmark_[0-9]+_[0-9]+[km]' | head -1)
+    [ -n "$tag" ] || return 0
+    dim_num=${tag#Benchmark_}; dim_num=${dim_num%%_*}
+    cnt=${tag##*_}
+    case "$cnt" in
+        *[mM]) cnt_num=${cnt%[mM]}000000 ;;
+        *[kK]) cnt_num=${cnt%[kK]}000 ;;
+        *)     cnt_num=$cnt ;;
+    esac
+    out=$(python3 - "${SCRIPT_DIR}/../datasets/datasets.json" "$dim_num" "$cnt_num" <<'PY' 2>/dev/null
+import json, sys
+try:
+    ds = json.load(open(sys.argv[1]))
+    dim, cnt = int(sys.argv[2]), int(sys.argv[3])
+    cands = [d for d in ds if d.get("vector_size") == dim]
+    if not cands:
+        sys.exit(0)
+    best = next((d for d in cands if d.get("vector_count") == cnt), cands[0])
+    dist = (best.get("distance") or "").lower()
+    print({"l2": 2, "cosine": 1, "ip": 3}.get(dist, ""), best.get("name", ""), dist, sep="|")
+except Exception:
+    pass
+PY
+)
+    printf '%s' "$out"
+}
+
+# 交互选择 1/2/3; 直接回车时优先用"表索引里绑定的度量", 其次 datasets.json,
+# 都没有则默认 1。case 的 *) 分支同时覆盖 "1" 和空值/非法输入, 统一退回 cosineDistance。
 echo ">>> Step 2: 选择距离函数"
 echo ""
 if [ "$ENGINE" = "myscale" ]; then
     echo "  (MyScale: 检索统一走 distance('ef_s=…')(vector, q) 家族, 命中 ANN 索引;"
-    echo "   实际度量由建表时的向量索引 (HNSWFLAT) 决定, 下方选择仅用于标注与排序方向,"
+    echo "   实际度量由建表时的向量索引决定, 下方默认值已按所选表的索引自动选择,"
     echo "   与 benchmark/run.py 的 MyScale 客户端行为一致)"
 else
-    echo "  (ClickHouse: 使用 L2Distance/cosineDistance 等标量距离函数, 由向量查询计划缓存分支加速)"
+    echo "  (ClickHouse: 使用 L2Distance/cosineDistance 等标量距离函数, 由向量查询计划缓存分支加速;"
+    echo "   查询函数必须与索引 vector_similarity(...) 里绑定的度量一致, 下方默认值已按索引自动选择)"
 fi
 echo "  1) cosineDistance (余弦距离, 默认)"
 echo "  2) L2Distance (欧氏距离)"
 echo "  3) dotProduct (点积, 排序方向为 DESC)"
 echo ""
-read -p "请选择 (1/2/3, 默认 1): " dist_choice
-dist_choice=${dist_choice:-1}
+# 自动选择优先级: 所选表 DDL 里索引绑定的度量 (最可靠, 保证能命中索引)
+#                 > datasets.json 的 distance 字段 > 默认余弦。
+# 多表运行时脚本只有全局一个距离函数, 因此以第一张表为准; 其余表度量不同则告警。
+AUTO_CHOICE=""; AUTO_DS=""; AUTO_DIST=""
+first_tbl="${TABLES[0]:-}"
+if [ -n "$first_tbl" ]; then
+    if [ -n "${TABLE_INDEX_METRIC[$first_tbl]:-}" ]; then
+        AUTO_CHOICE="${TABLE_INDEX_METRIC[$first_tbl]}"
+        echo "  自动选择: $first_tbl ← 索引类型 ${TABLE_INDEX_TYPE[$first_tbl]} 的度量 ${TABLE_INDEX_METRIC_NAME[$first_tbl]} → 选项 $AUTO_CHOICE"
+        # 同时对照 datasets.json, 便于发现数据集元数据与实际索引不一致
+        if ds_out=$(auto_dist_choice "$first_tbl") && [ -n "$ds_out" ]; then
+            IFS='|' read -r ds_choice ds_name ds_dist <<< "$ds_out"
+            if [ -n "$ds_choice" ] && [ "$ds_choice" != "$AUTO_CHOICE" ]; then
+                echo "  ⚠ datasets.json 匹配 $ds_name (distance=$ds_dist, 选项 $ds_choice) 与索引度量不一致, 以索引为准"
+            fi
+        fi
+    elif ds_out=$(auto_dist_choice "$first_tbl") && [ -n "$ds_out" ]; then
+        IFS='|' read -r AUTO_CHOICE AUTO_DS AUTO_DIST <<< "$ds_out"
+        if [ -n "$AUTO_CHOICE" ]; then
+            echo "  自动选择: $first_tbl ← 数据集 $AUTO_DS (distance=$AUTO_DIST) → 选项 $AUTO_CHOICE"
+        fi
+    fi
+    # 多表: 其余表的索引度量与首表不一致时提示 (本次运行仍统一使用首表的距离函数)
+    for t in "${TABLES[@]:1}"; do
+        idx_choice="${TABLE_INDEX_METRIC[$t]:-}"
+        if [ -n "$AUTO_CHOICE" ] && [ -n "$idx_choice" ] && [ "$idx_choice" != "$AUTO_CHOICE" ]; then
+            echo "  ⚠ 表 $t 的索引度量 ${TABLE_INDEX_METRIC_NAME[$t]:-?} 与首表不同; 本次运行所有表统一使用选项 $AUTO_CHOICE"
+        fi
+    done
+fi
+# EOF 安全: 非交互运行 (stdin 关闭) 时回落自动/默认选项, 不中断脚本
+if [ -n "$AUTO_CHOICE" ]; then
+    read -p "请选择 (1/2/3, 回车=自动 $AUTO_CHOICE): " dist_choice || dist_choice=""
+    dist_choice=${dist_choice:-$AUTO_CHOICE}
+else
+    read -p "请选择 (1/2/3, 默认 1): " dist_choice || dist_choice=""
+    dist_choice=${dist_choice:-1}
+fi
 
 case "$dist_choice" in
     2) DISTANCE_FUNC="L2Distance"; SORT_DIR="ASC" ;;
@@ -1256,7 +1471,8 @@ if [ "$HAS_INDEX_ISSUE" = true ]; then
     echo ""
     echo "  ⚠ 部分表的向量索引未生效，查询将使用全表扫描，性能可能较差"
     # -n 非空; 正则 ^[Yy]$ 只接受单字符 y/Y, 其余 (含直接回车) 都算取消
-    read -p "  是否继续测试? (y/N): " continue_choice
+    # EOF 安全: 非交互运行时视为未确认, 沿用 y/N 的默认分支 (N=中止)
+    read -p "  是否继续测试? (y/N): " continue_choice || continue_choice=""
     if [[ ! "$continue_choice" =~ ^[Yy]$ ]]; then
         echo "已取消测试"
         exit 0
@@ -1297,22 +1513,35 @@ for settings_group in "${SETTINGS_GROUPS[@]}"; do
     for table in "${TABLES[@]}"; do
         vec_col="${TABLE_VEC_COL[$table]}"
 
-        # 只有该 (表, profile) 下所有 sql_type × row_count 的文件都存在时才跳过生成,
-        # 避免曾经用较小的 SQL_TYPES/ROW_COUNTS 跑过一遍后缺文件却误判为已生成。
-        # break 2 一次跳出 sql_type 与 row_count 两层循环, 回到 table 循环。
+        # SQL 文件生成策略由 SQL_REGEN 控制 (默认 auto):
+        #   * auto: 逐 row_count 粒度处理 —— n=1 每次重新采样生成 (单条查询保持
+        #     随机性, 多轮 QPS 有差异); n>1 复用已有文件 (大样本均值稳定, 免重复
+        #     采样), 具体校验在 generate_sql_for_table 内逐文件进行。
+        #   * SQL_REGEN=1: 不做校验, 全部重新采样生成, 确保查询与当前索引一致。
+        #   * SQL_REGEN=0: 仅当该 (表, profile) 下所有 sql_type × row_count 的文件
+        #     都存在、非空, 且距离函数与本次选择的 DISTANCE_FUNC 一致时才整表复用;
+        #     - 用较小的 SQL_TYPES/ROW_COUNTS 跑过一遍会缺文件, 不能算已生成;
+        #     - 同一张表若换了索引度量 (例如 cosine→L2), 旧文件仍是 cosineDistance,
+        #       直接复用会让查询命中不了索引、退化成全表扫描 (QPS 只有十几),
+        #       因此内容不一致时必须重新生成。
+        # MyScale 的表达式形如 distance(...)(...), 前缀匹配 "distance(" 即可。
         sql_files_exist=true
-        for sql_type in "${SQL_TYPES[@]}"; do
-            for row_count in "${ROW_COUNTS[@]}"; do
-                sql_file="$SQL_DIR/${table}_${profile_name}_${sql_type}_${row_count}.sql"
-                if [ ! -f "$sql_file" ]; then
-                    sql_files_exist=false
-                    break 2
-                fi
+        if [ "$SQL_REGEN" = "0" ]; then
+            for sql_type in "${SQL_TYPES[@]}"; do
+                for row_count in "${ROW_COUNTS[@]}"; do
+                    sql_file="$SQL_DIR/${table}_${profile_name}_${sql_type}_${row_count}.sql"
+                    if [ ! -s "$sql_file" ] || ! grep -qF "${DISTANCE_FUNC}(" "$sql_file"; then
+                        sql_files_exist=false
+                        break 2
+                    fi
+                done
             done
-        done
+        else
+            sql_files_exist=false
+        fi
 
         if [ "$sql_files_exist" = true ]; then
-            echo "  表 $table profile=$profile_name: SQL文件已存在，跳过生成"
+            echo "  表 $table profile=$profile_name: 复用已有 SQL 文件 (SQL_REGEN=0)"
         else
             generate_sql_for_table "$table" "$vec_col" "$DISTANCE_FUNC" "$SORT_DIR" "$profile_name" "$settings_clause"
         fi
@@ -1438,6 +1667,7 @@ for table in "${TABLES[@]}"; do
         --concurrency 1 \
         --timelimit "$warmup_timelimit" \
         --delay 0 \
+        "${BENCH_TIME_OPTS[@]}" \
         "${randomize_opts[@]}" \
         --iterations 0 \
         --precise_float_parsing "${PRECISE_FLOAT_PARSING_VALUES[0]}" \
@@ -1624,6 +1854,8 @@ for i in $(seq 1 $REPEAT); do
     NEW_HEADER="${NEW_HEADER},run_${i}"
 done
 NEW_HEADER="${NEW_HEADER},qps_avg,qps_min,qps_max,mean_time_ms,p95_time_ms,p99_time_ms"
+# 末列记录该组合的完成时间, 便于按时间区分多轮/多次运行的结果
+NEW_HEADER="${NEW_HEADER},timestamp"
 
 # 输出目录可能不存在 (默认相对路径 ../results/), 先建目录再写文件
 # dirname 取路径的目录部分; 命令替换嵌套时用双引号包住整体
@@ -1641,7 +1873,15 @@ else
         backup_file="${OUTPUT_CSV}.$(date '+%Y%m%d%H%M%S').bak"
         cp "$OUTPUT_CSV" "$backup_file"
         echo "CSV 表头不匹配，已备份旧文件到: $backup_file"
-        if echo "$existing_header" | grep -q ',precise_float_parsing,sql_type,row_count,concurrency'; then
+        if [ "$existing_header" = "${NEW_HEADER%,timestamp}" ]; then
+            # 上一版结构 (仅缺末尾 timestamp 列): 每行行尾补 not_recorded 占位。
+            echo "迁移旧数据: 为每行补 timestamp=not_recorded 列..."
+            tmp_csv=$(mktemp)
+            echo "$NEW_HEADER" > "$tmp_csv"
+            tail -n +2 "$OUTPUT_CSV" | sed 's/$/,not_recorded/' >> "$tmp_csv"
+            mv "$tmp_csv" "$OUTPUT_CSV"
+            echo "迁移完成"
+        elif echo "$existing_header" | grep -q ',precise_float_parsing,sql_type,row_count,concurrency'; then
             # 本次改动前的结构: 在 precise_float_parsing 之后补两列并行转换维度
             # 做法: 新建临时文件 -> 写新表头 -> 用 awk 在每行第 11 列后插入两个
             # not_recorded, 末尾再 sed 补三列延迟 -> mv 原子替换原文件。
@@ -1712,6 +1952,13 @@ echo ""
 
 echo "开始测试 ($(date '+%Y-%m-%d %H:%M:%S'))"
 echo ""
+
+# 首个组合标记: 每次调用可能测多张表, 每张表在本轮的第一个被测组合
+# (= 该表遇到的第一个 sql_type × profile × row_count) 正式记录前先跑一次同参数
+# 测量并丢弃。依据: 该组合的 run_1 常被计划缓存填充 / 8 线程首次访问索引页拖低
+# (MyScale 实测可低至后续次的 0.12 倍), 同表后续组合没有该现象; 该次不写 CSV、
+# 不计入均值, 成本约每表 +1 次 TIMELIMIT。
+discarded_tables="|"
 
 # mode / threads 只写进运行副本头部的会话级 SET 行, 不写进生成的 SQL。因此每个
 # profile (含 plan_cache 的 mode=1/2 变体) 各自是独立的计划缓存 key, 互不命中;
@@ -1804,12 +2051,48 @@ for sql_type in "${SQL_TYPES[@]}"; do
                     echo " 表: $table  Profile: $profile_name  precise_float_parsing=$precise_float_parsing  string_to_vector=mode${val_sv_mode}/threads${STRING_TO_VECTOR_THREADS}  SQL: ${sql_type}_${row_count}.sql ($actual_queries 条查询)"
                     echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 
+                    # 该表在本次调用中的第一个组合: 每个并发在正式记录前各做一次丢弃预热
+                    discard_warmup=0
+                    case "$discarded_tables" in
+                        *"|${table}|"*) ;;
+                        *) discard_warmup=1; discarded_tables="${discarded_tables}${table}|" ;;
+                    esac
+
                     for concurrency in "${CONCURRENCIES[@]}"; do
                         echo ""
                         echo "  并发数: $concurrency (重复 $REPEAT 次)"
 
+                        # 首个组合的丢弃预热: 参数与正式记录完全一致, 结果不解析、不写 CSV。
+                        # 失败不影响后续记录 (set -e 临时关闭)。
+                        if [ "$discard_warmup" -eq 1 ]; then
+                            echo -n "    预热首跑 (同参数, 不计入统计)... "
+                            set +e
+                            "$CLICKHOUSE" benchmark \
+                                --host "$HOST" \
+                                --port "$PORT" \
+                                --concurrency "$concurrency" \
+                                --timelimit "$TIMELIMIT" \
+                                --delay 0 \
+                                "${BENCH_TIME_OPTS[@]}" \
+                                "${randomize_opts[@]}" \
+                                --iterations 0 \
+                                --precise_float_parsing "$precise_float_parsing" \
+                                -- \
+                                < "$run_file" \
+                                2>"$TMPDIR/discard_${table}_${profile_name}_${sql_type}_${row_count}_${concurrency}.log" \
+                                > /dev/null
+                            discard_exit=$?
+                            set -e
+                            if [ "$discard_exit" -ne 0 ]; then
+                                echo "失败 (exit=$discard_exit), 继续正式记录"
+                            else
+                                echo "完成"
+                            fi
+                        fi
+
                         # 四组样本分别收集: 每次运行的 QPS 与三项延迟 (毫秒)。
-                        # 延迟数组只追加「成功解析出百分位」的那几次运行。
+                        # 延迟数组按指标各自追加: mean 每次成功运行都计入,
+                        # p95/p99 仅在解析成功时计入 (互不牵连)。
                         qps_values=()
                         mean_ms_values=()
                         p95_ms_values=()
@@ -1832,6 +2115,7 @@ for sql_type in "${SQL_TYPES[@]}"; do
                                 --concurrency "$concurrency" \
                                 --timelimit "$TIMELIMIT" \
                                 --delay 0 \
+                                "${BENCH_TIME_OPTS[@]}" \
                                 "${randomize_opts[@]}" \
                                 --iterations 0 \
                                 --precise_float_parsing "$precise_float_parsing" \
@@ -1862,13 +2146,13 @@ for sql_type in "${SQL_TYPES[@]}"; do
                                 mean_ms=$(parse_mean_time_ms "$stderr_output" "$concurrency" "$qps")
                                 p95_ms=$(parse_percentile_ms "$stderr_output" 95)
                                 p99_ms=$(parse_percentile_ms "$stderr_output" 99)
-                                # 只有 p95/p99 都解析成功才把三项延迟一起纳入统计,
-                                # 避免不同指标用了不同的样本集合
-                                if [ -n "$p95_ms" ] && [ -n "$p99_ms" ]; then
-                                    mean_ms_values+=("$mean_ms")
-                                    p95_ms_values+=("$p95_ms")
-                                    p99_ms_values+=("$p99_ms")
-                                fi
+                                # 三项延迟各自独立纳入统计: mean 总能算出 (MyScale 解析
+                                # Avg Latency 行, 上游 ClickHouse 按 concurrency/QPS 推导),
+                                # p95/p99 只有解析成功才计入; 不再因为某一项缺失就把
+                                # 三项一起丢弃(否则 MyScale 的 mean 也会被连带记成 0)。
+                                mean_ms_values+=("$mean_ms")
+                                if [ -n "$p95_ms" ]; then p95_ms_values+=("$p95_ms"); fi
+                                if [ -n "$p99_ms" ]; then p99_ms_values+=("$p99_ms"); fi
                                 # ${var:-?} 在变量为空时显示 ? (解析失败的情况)
                                 echo "QPS = $qps (mean=${mean_ms}ms, p95=${p95_ms:-?}ms, p99=${p99_ms:-?}ms)"
                                 qps_values+=("$qps")
@@ -1897,7 +2181,7 @@ for sql_type in "${SQL_TYPES[@]}"; do
 
                         echo "  ─────────────────────────────────────"
                         echo "  结果: 均值=$qps_avg  最小=$qps_min  最大=$qps_max"
-                        echo "  延迟 (ms): mean=$mean_time_ms  p95=$p95_time_ms  p99=$p99_time_ms  (有效 ${#p95_ms_values[@]}/${REPEAT} 次)"
+                        echo "  延迟 (ms): mean=$mean_time_ms  p95=$p95_time_ms  p99=$p99_time_ms  (有效: mean ${#mean_ms_values[@]}, p95 ${#p95_ms_values[@]}, p99 ${#p99_ms_values[@]} / ${REPEAT} 次)"
                         echo ""
 
                         # 说明: CSV 不再写 index_status 的检测结果。该列此前会把因索引进度
@@ -1922,6 +2206,8 @@ for sql_type in "${SQL_TYPES[@]}"; do
                             csv_line="${csv_line},"
                         done
                         csv_line="${csv_line},${qps_avg},${qps_min},${qps_max},${mean_time_ms},${p95_time_ms},${p99_time_ms}"
+                        # 末列: 本组合结果写入时间
+                        csv_line="${csv_line},$(date '+%Y-%m-%d %H:%M:%S')"
                         # 追加模式写 CSV; 表头已在此之前确保存在
                         echo "$csv_line" >> "$OUTPUT_CSV"
                     done    # for concurrency

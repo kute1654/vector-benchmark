@@ -15,7 +15,7 @@ from benchmark.cli_output import compact_kv, sql as sql_log, step
 from engine.base_client.configure import BaseConfigurator
 from engine.base_client.distances import Distance
 from engine.clients.polardb.config import (
-    DISTANCE_MAPPING, POLARDB_DATABASE_NAME, POLARDB_DEFAULT_PASSWD,
+    POLARDB_DATABASE_NAME, POLARDB_DEFAULT_PASSWD,
     POLARDB_DEFAULT_PORT, POLARDB_DEFAULT_USER, convert_H52PostgreSQLType,
     validate_table_name,
 )

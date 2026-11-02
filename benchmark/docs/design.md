@@ -310,6 +310,11 @@ CSV。缓存档位：
   以最近秩法计算 `mean_time_ms` / `p95_time_ms` / `p99_time_ms`。采样总量由
   `LATENCY_PROBE_STATEMENTS`（默认 1000，`0` 关闭并写 `not_recorded`）控制，
   吞吐由 `TIMELIMIT` / `WARMUP_TIMELIMIT` / `REPEAT` 控制。
+- 召回旋钮与查询规模一起记录在 CSV 的 `top_k` / `ef_s` 两列（紧随 `distance_func`）：
+  `TOP_K` 决定 `LIMIT`，`EF_S`（默认 100，与 pgvector 服务端默认一致）以会话级
+  `SET hnsw.ef_search` 下发到每份 pgbench 脚本与探针脚本头部——pgvector 的 `ef_search`
+  是 GUC，无法像 MyScale 的 `distance('ef_s=…')` 或 PASE 的 `…:ef:ds` 字面量那样写进 SQL，
+  因此只能走 `SET`；早期 CSV 无这两列，脚本会原地补 `not_recorded` 而不丢历史行。
 
 计划缓存 / 结果缓存档位的精确编码（以代码为准）见下表；`use_query_cache=1` 时 pgvector 打开
 `pgvector.result_cache*`、PolarDB 打开 `pase_result_cache*`，ClickHouse/MyScale 打开服务端查询缓存。

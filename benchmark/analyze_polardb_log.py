@@ -64,7 +64,6 @@ import json
 import csv
 import argparse
 from collections import OrderedDict
-from datetime import datetime
 
 # ---- 路径常量 ----
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))       # benchmark/ 目录
@@ -245,22 +244,6 @@ def _num(v):
 
 # config.json 路径(在函数之间定义, 不影响使用; 供 expected_groups/主流程读取)
 CONFIG_PATH = os.path.join(BASE_DIR, "configurations", "config.json")
-
-
-def _parse_ts(s):
-    """解析日志时间戳字符串; 仅用于诊断/辅助, 失败静默返回 None。
-
-    参数: s —— 形如 "YYYY-MM-DD HH:MM:SS[.ffffff]" 的字符串。
-    返回: datetime 或 None。依次尝试带/不带微秒两种格式(当前主流程不使用该值)。
-    """
-    if not s:
-        return None
-    for fmt in ("%Y-%m-%d %H:%M:%S.%f", "%Y-%m-%d %H:%M:%S"):
-        try:
-            return datetime.strptime(s, fmt)
-        except ValueError:
-            continue
-    return None
 
 
 def expected_groups(cfg_path, table_name):

@@ -9,7 +9,7 @@
 ``FieldValue`` 由基类保证类型，但拼 SQL 时仍需注意引号/转义。
 """
 
-from typing import Any, List, Optional, Dict
+from typing import Any, List, Optional
 
 from engine.base_client.parser import BaseConditionParser, FieldValue
 

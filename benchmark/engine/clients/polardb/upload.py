@@ -15,7 +15,7 @@ import math
 import os
 import threading
 import time
-from typing import Callable, List, Optional
+from typing import List, Optional
 
 import psycopg2
 from psycopg2.extras import execute_values

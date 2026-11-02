@@ -12,15 +12,13 @@
 import math
 import os
 import time
-import sys
 from typing import List, Optional
 
 import psycopg2
 from psycopg2.extras import execute_values
 
-from benchmark.cli_output import sql as sql_log, stage, status, step, set_live_line, warn
+from benchmark.cli_output import sql as sql_log, stage, step, warn
 from engine.base_client import BaseUploader
-from engine.base_client.utils import format_bytes
 from engine.clients.pgvector.config import *
 
 
@@ -326,8 +324,8 @@ class PGVectorUploader(BaseUploader):
                 # 避免"没有索引却继续测搜索"导致结果不可解释。
                 if cancelled[0]:
                     step(f"✗ Index creation failed: {e}")
-                else:
-                    raise
+                    return {"cancelled": True, "error": str(e)}
+                raise
 
             finally:
                 stop_spinner[0] = True
@@ -366,7 +364,6 @@ class PGVectorUploader(BaseUploader):
             operator_class = DISTANCE_TO_OPERATOR_CLASS.get(cls.distance_op, "vector_l2_ops")
             index_name = f"{cls.table_name}_ivfflat_idx"
             total = cls.command(f"SELECT count(*) FROM {cls.table_name}")[0][0]
-            import math
             lists = int(index_params.get("lists", max(1, int(math.sqrt(max(1, total)) / 10))))
             index_sql = (
                 f"CREATE INDEX {index_name} ON {cls.table_name} "

@@ -20,19 +20,37 @@ sql_type 的判定(用户要求: cache=0 无 PREPARE 名, >0 才有):
 动态性:
 - sql_type 的数量与顺序以日志实际出现的为准(cache>0 的 PREPARE 名), 不写死;
   只跑了一部分 sql_type(测试尚未结束)时也只输出已完成的块。
+- 布局自动检测: 日志里有名 PID 的 sql_type 序列按“前 1/3 与中 1/3 相同”判定为
+  cache_major(cache 外层、sql_type 内层), 这是 pgvector-benchmark.sh 的循环顺序;
+  否则为 sql_major(sql_type 外层、cache 内层), 对应 config/run.py 驱动的实验。
+  cache_major 时直接按日志实测反推网格(sql_type 取日志名、cache 固定 0/1/2/3、
+  每格 PID 数 = 搜索 PID 总数 / 格数), 忽略 config 的 search_params; 每格若有
+  多个 PID(pgbench 主跑 + 延迟探针), 只取记录最多的主跑, 一格格一行。
 - 被测表由三者共同判定: 日志 sql_type 集合、向量事件维度 dim(128/256/768/960)、
-  网格 PID 数; 若 config 的 search_params 与实际不符, 再按日志 PID 数反推 per_cell
-  与 searcher 数。日志中只有十余条记录的截断 PID 仍然保留(它占一个格位, 丢掉会
-  让后续所有块错位), 默认 --min-records=1。
+  网格 PID 数。恢复向量转换插桩后 dim 重新可得并参与表推断; 旧版(移除事件)
+  日志 dim 为 None, 表推断退化为 sql_type 集合 + PID 数 + 结果 CSV 消歧
+  (--engine 可显式指定)。
+  --engine 也可直接传 PG 表名(benchmark_1536_1m), 会按向量维度映射到 config 条目。
+  若 config 的 search_params 与实际不符, 再按日志 PID 数反推 per_cell
+  与 searcher 数。搜索执行单元(向量查询 PID)按向量转换事件判定: 含
+  vector_in/halfvec_in/array_to_vector 且事件数 >1; 连接初始化/整表预热/连跑
+  多条非向量语句的终端一律剔除, 不再依赖记录数启发式(--min-records 仅作显式
+  传入时的额外下限)。旧版无向量事件的日志自动回退记录数启发式。
 
 要点:
 - PID 即后端进程号, 每个测试执行单元新建连接 => 独立 PID; PGVECTOR_TIMING 行记账,
   PLAN_CACHE_TRACE 行只补充语句名/缓存动作, 不计入记录数。
-- 每次连接先跑若干 setup(SET...)非向量 simple_query, 在首个向量事件(vi/hv/atv/eq)
-  之前按实际条数剔除(cache 0 -> 4 条, 1/2/3 -> 6 条), 再统计余下向量查询。
-- 数组类 SQL 类型在 cache=0 走 array_to_vector, 耗时计入 vi 列。
+- 向量查询与非向量查询的区分: 每条向量查询后紧随一条向量转换事件
+  (vector_in/halfvec_in/array_to_vector), 非向量语句(SET/PREPARE/BEGIN/COMMIT)
+  没有; summarize 按 "simple_query 后紧跟向量事件" 配对, 只统计真正的向量查询
+  (setup 与间杂非向量语句一律剔除, 含延迟探针的 BEGIN/COMMIT)。
+- 旧日志(曾移除向量事件的版本)无该标记: 退回"首个向量事件之前的前导 sq 条数"
+  实测, 完全无向量事件的 PID(cache=0 旧日志)按经验值 sq_drop_count 兜底剥离。
+- 数组类 SQL 类型在 cache=0 走 array_to_vector, 耗时与 vector_in 同口径计入 vi 列。
 
 用法: python analyze_pgvector_log.py [--log ..] [--csv ..] [--out ..] [--engine ..]
+      [--batches last|all|N] [--aggregate]
+      多轮同负载日志(循环跑 N 次未清日志)用 --batches all --aggregate 按批次平均合并。
 
 输入日志格式假设(与 client 打印格式强绑定, 改打印格式必须同步改正则):
 - 行首为 "<日期> <时间>.<毫秒> <用户名> [PID]"; RE_TS 只取秒级时间戳, 毫秒丢弃。
@@ -40,7 +58,12 @@ sql_type 的判定(用户要求: cache=0 无 PREPARE 名, >0 才有):
     PGVECTOR_TIMING] simple_query parse=<p>ms analyze=<a>ms plan=<pl>ms exec=<e>ms
     PGVECTOR_TIMING] execute_query eval_params=<e>ms get_cached_plan=<g>ms name=<stmt>
     PGVECTOR_TIMING] vector_in|halfvec_in|array_to_vector ... dim=<d> ... ms=<v>
+  第三类(vector_in 系)为向量转换事件: 每条向量查询的计时行之后紧随一条,
+  非向量语句没有 —— 据此按事件配对区分向量查询与非向量查询, dim= 用于判定
+  被测表维度。旧版(移除该类)日志解析时自动回退条数启发式。
 - 追踪行形如: [PLAN_CACHE_TRACE] ACTION=<动作> ... query=PREPARE <名字>(
+  PREPARE 名后缀为 6 位及以上字母数字(client 用 6 位随机串, pgvector-benchmark.sh
+  用 8~10 位数字), 正则按 `[a-z0-9]{6,}` 兼容两种。
 - 依赖服务端开启 log_min_duration_statement(一般为 0)、log_statement 及
   auto_explain; 缺少某类行时只是对应列统计为空, 不会报错。
 
@@ -54,7 +77,9 @@ sql_type 的判定(用户要求: cache=0 无 PREPARE 名, >0 才有):
     eval_ms(get_cached_plan 前一步)/gcp_ms(get_cached_plan) 毫秒均值;
     vi# 向量转换次数; vi_ms 毫秒均值(vector_in 与 array_to_vector 合并);
     hv#/hv_ms halfvec_in 的次数与毫秒均值;
-    est_QPS 由日志 exec# / (时长×PID 数) 估算(次/秒); CSV_RPS 取结果 CSV rps(次/秒);
+    (旧版曾移除向量转换计时的日志下这四列为 0/"-", 恢复插桩后重新有值);
+    est_QPS 由单条查询总耗时(parse+analyze+plan+exec) 的倒数 1000/总ms 估算(次/秒);
+    CSV_RPS 取结果 CSV 的 rps(run.py)或 qps_avg(pgvector-benchmark.sh), 单位次/秒;
     run_date 该 searcher 首个 PID 的日期(仅 YYYY-MM-DD); plan_mode 由 trace 动作推断;
     search_cfg searcher 的 parallel/top/ef_s 摘要。
 - 所有 *_ms 均值都遵循 avg(): 去掉每个序列的第一条样本后再平均(去首次热路径)。
@@ -66,7 +91,10 @@ sql_type 的判定(用户要求: cache=0 无 PREPARE 名, >0 才有):
 - 日志未清空时含多轮历史; 只保留最后一个时间连续批次, 其余丢弃(有 stderr 提示)。
 - cache=0 的 PID 无 PREPARE 名, sql_type 依赖同块有名 PID 回填; 若无 config 且整块
   无名, 会退化为日志推断(默认 cache 0/1/2/3、每档 2 PID), 精度有限。
-- test_duration 未知时 est_QPS 输出 "-"; 与 CSV_RPS 偏差 >20% 只告警不修正。
+- est_QPS 是串行口径(单条总耗时的倒数); 多并发时实际吞吐会更高, 与 CSV_RPS
+  (并发下的实测值)偏差 >20% 只告警不修正。
+- 同一格在不同轮次的实际执行时长可能不同(实测有 10s/10000 条与 20s/20000 条),
+  故 exec# 跨轮平均后可能不是整数(如 13335.3); 这不影响耗时均值与 est_QPS。
 """
 import re
 import os
@@ -101,7 +129,11 @@ RE_EQ = re.compile(
     r"PGVECTOR_TIMING\] execute_query eval_params=([\d.]+)ms "
     r"get_cached_plan=([\d.]+)ms name=(\S+)"
 )
-# vector_in/halfvec_in: ".*?ms=" 非贪婪跳过中间的 dim= 等字段, 组1 为耗时 ms
+# vector_in/halfvec_in/array_to_vector: 向量转换事件, ".*?ms=" 非贪婪跳过中间的
+# dim= 等字段, 组1 为耗时 ms。每条向量查询之后紧随一条该类事件, 是区分向量查询
+# 与非向量查询(SET/PREPARE/BEGIN 等)的标记: summarize 按 "sq 后紧跟向量事件"
+# 配对筛选向量查询(split_vector_sq); dim= 同时用于判定被测表维度。旧版插桩曾
+# 移除这些事件, 正则与解析分支保留以兼容旧日志(无事件的 PID 走启发式兜底)。
 RE_VI = re.compile(r"PGVECTOR_TIMING\] vector_in .*?ms=([\d.]+)")
 RE_HV = re.compile(r"PGVECTOR_TIMING\] halfvec_in .*?ms=([\d.]+)")
 # array_int_cast / array_real_cast / array_cast / array_to_vector_fn / with_array_cast
@@ -110,7 +142,9 @@ RE_HV = re.compile(r"PGVECTOR_TIMING\] halfvec_in .*?ms=([\d.]+)")
 # 因此 cache=0 时应作为“向量转换耗时”计入 vi, 与 vector_in 列口径一致。
 # 组1 = array_to_vector 耗时 ms。
 RE_ATV = re.compile(r"PGVECTOR_TIMING\] array_to_vector .*?ms=([\d.]+)")
-# 向量解析事件都带 dim=<维度>; 组1 为维度, 用于按维度判定当前被测表(128/256/768/960...)。
+# 向量解析事件都带 dim=<维度>; 组1 为维度, 用于按维度判定被测表(128/256/768/960...)。
+# 恢复向量转换插桩后 dim 重新可得并参与 resolve_table 表推断; 旧版(移除事件)
+# 日志 dim 为 None, 表推断仅靠 --engine / 日志 sql_type / PID 数 / 结果 CSV 消歧。
 RE_DIM = re.compile(r"\bdim=(\d+)")
 
 # 计划缓存追踪: 动作计数用于校验 cache 档位, PREPARE 语句名用于判定 sql_type。
@@ -118,14 +152,16 @@ RE_DIM = re.compile(r"\bdim=(\d+)")
 RE_TRACE_ACTION = re.compile(r"\[PLAN_CACHE_TRACE\] ACTION=(\w+)")
 # 从 trace 行里抓 PREPARE 语句名; 组1 为名字, 末尾的 "("(参数列表起点)被吃掉。
 RE_TRACE_PREPARE = re.compile(r"query=PREPARE\s+(\S+?)\s*\(")
-# PREPARE 语句名: pgv_ps_<sql_type>_<6 位小写字母/数字随机后缀>
-# 组1 = sql_type。`.+` 贪婪匹配, 保证剥掉的是最后 6 位随机后缀; 名字不合格式返回 None。
-RE_PREPARED_NAME = re.compile(r"^(?:pgv_ps|polardb_ps)_(.+)_[a-z0-9]{6}$")
+# PREPARE 语句名: pgv_ps_<sql_type>_<随机后缀>
+# 后缀实测有两种: client 的 6 位小写字母/数字, 以及 pgvector-benchmark.sh 的
+# 8~10 位纯数字随机串(如 pgv_ps_text_literal_357327506), 故放宽为 6 位及以上。
+# 组1 = sql_type。`.+` 贪婪匹配, 保证剥掉的是最后一段随机后缀; 名字不合格式返回 None。
+RE_PREPARED_NAME = re.compile(r"^(?:pgv_ps|polardb_ps)_(.+)_[a-z0-9]{6,}$")
 
-# 单个 PID 至少应含的 PGVECTOR_TIMING 记录数。正常搜索 PID 有上千条记录, 但日志
-# 轮转/测试刚开始时首个(或末尾) PID 可能只留下十余条, 它仍然是网格中的合法单元。
-# 只有当 PID 完全没有计时记录(例如只剩连接初始化)时才剔除, 否则会少算一个格位并
-# 导致后续按 PID 数推断被测表失败。默认 1 = 不主动剔除有效 PID。
+# 单个 PID 至少应含的 PGVECTOR_TIMING 记录数。[兼容保留] 记录数不再是搜索/非搜索
+# PID 的判定依据(同一终端可能连跑多条非向量语句, 记录数无法区分), 判定改由向量
+# 转换事件数承担(见 MIN_VECTOR_EVENTS / is_search_pid); 本阈值仅在显式传入 >1 时
+# 作为额外的计时行数下限过滤, 默认 1 = 不按记录数过滤。
 MIN_PID_RECORDS = 1
 
 # 相邻 PID 开始时间差超过该秒数视为一次新的独立测试批次(日志因未清空会累积多轮
@@ -133,6 +169,50 @@ MIN_PID_RECORDS = 1
 # 5s, search_i -> search_{i+1} 约 test_duration), 故阈值取
 # max(GAP_MAX, 本配置最大 test_duration + 11), 见 gap_threshold()。
 GAP_MAX = 61
+
+# ---- 搜索执行单元(向量查询 PID)判定 ----
+# 向量转换事件类型(事件序列里的标记名): vector_in/halfvec_in/array_to_vector。
+# 每条向量查询之后服务端紧随一条该类事件; 非向量语句(SET/PREPARE/BEGIN/COMMIT、
+# 同一终端连跑的多条非向量语句等)没有 —— 据此区分向量查询与非向量查询。
+VECTOR_MARKS = ("vi", "hv", "atv")
+# 判定为搜索执行单元所需的最少向量转换事件数(用户口径: 含向量事件且数量不只
+# 一个, 即 >1)。连接初始化/整表预热/纯非向量终端的事件数为 0, 偶发单条向量
+# 查询的终端同样排除。
+MIN_VECTOR_EVENTS = 2
+
+# 判定 auto 档的判据: USE_CUSTOM 相对 BUILD_GENERIC 的比值(每个 PREPARE 平均被
+# PG 选为 custom plan 的次数)。实测(主跑 / 探针):
+#   auto 档:      USE_CUSTOM/BUILD_GENERIC ≈ 3.0  (18/6, 6/2)
+#   generic 档:   USE_CUSTOM/BUILD_GENERIC ≈ 0.5  (3/6, 1/2)
+#   custom 档:    USE_GENERIC=0, USE_CUSTOM≈1000+
+# 不能用 USE_CUSTOM 的绝对次数当判据: 执行时间短时 generic 档主跑每个事务也会
+# 留 1 次 USE_CUSTOM, 累积到 3 次就会越过">=3"阈值被误判成 auto (cache=3 消失)。
+AUTO_CUSTOM_PER_BUILD = 2.0
+
+
+def vector_event_count(rec):
+    """一个 PID 的向量转换事件(vector_in/halfvec_in/array_to_vector)条数。"""
+    return sum(1 for k in rec.get("events", ()) if k in VECTOR_MARKS)
+
+
+def is_search_pid(rec):
+    """判定 PID 是否向量搜索执行单元: 向量转换事件数 >= MIN_VECTOR_EVENTS(即 >1)。
+
+    取代旧的记录数/sq 条数启发式(MIN_PID_RECORDS、"sq<=1 且无 execute_query"、
+    头部 sq<100 预热跳过等): 同一终端可能连跑多条非向量语句, 记录数无法区分;
+    向量转换事件只随向量查询出现, 是可靠标记。
+    """
+    return vector_event_count(rec) >= MIN_VECTOR_EVENTS
+
+
+def vector_mode(pid_data):
+    """日志整体是否为带向量转换事件的插桩版本。
+
+    旧版插桩(曾移除 vector_in 系事件)的日志里任何 PID 都没有向量事件, 此时
+    is_search_pid 会把全部 PID 判为非搜索 —— 调用方需回退旧的记录数启发式。
+    返回: True = 新插桩日志(按向量事件判定); False = 旧日志(回退启发式)。
+    """
+    return any(vector_event_count(r) > 0 for r in pid_data.values())
 
 
 # --------------------------------------------------------------------------- #
@@ -157,17 +237,45 @@ def load_config(path=CONFIG_PATH):
         return []
 
 
+# 结果 CSV 有两种来源, 表头不同, 这里统一成日志侧的 cache/rc/qps:
+#   - run.py 客户端 -> pgvector_benchmark_results.csv(下划线):
+#       use_cache(0~3) / use_query_cache(0/1) / vector_in_parse_mode / rps
+#   - pgvector-benchmark.sh -> pgvector-benchmark-results.csv(连字符):
+#       plan_mode(raw/prepare_*) / result_mode(off/on) / (无 parse_mode) / qps_avg
+PLAN_MODE_TO_CACHE = {"raw": 0, "prepare_auto": 1,
+                      "prepare_custom": 2, "prepare_generic": 3}
+
+
+def _row_cache_rc(r):
+    """从结果 CSV 的一行取 (cache, rc); 兼容两种表头, 无法解析返回 (None, None)。
+
+    参数: r —— csv.DictReader 的一行。
+    返回: (cache, rc) 两个 int; 若既无 use_cache/use_query_cache 也无
+          plan_mode/result_mode(汇总行等), 返回 (None, None)。
+    """
+    try:
+        return (int((r.get("use_cache") or "").strip()),
+                int((r.get("use_query_cache") or "").strip()))
+    except (TypeError, ValueError):
+        pass
+    cache = PLAN_MODE_TO_CACHE.get((r.get("plan_mode") or "").strip().lower())
+    rc = {"on": 1, "off": 0}.get((r.get("result_mode") or "").strip().lower())
+    return cache, rc
+
+
 def read_combos(csv_path):
     """读取 pgvector 结果 CSV, 返回可按 (sql_type, cache, rc, parse_mode) 匹配的列表。
 
     参数:
-        csv_path: 结果 CSV 路径(默认 results/csv/pgvector_benchmark_results.csv)。
+        csv_path: 结果 CSV 路径(默认 results/csv/pgvector-benchmark-results.csv)。
     返回:
         list[dict], 每行一个 dict, 键为 table/dataset/vector_size/sql_type/cache/rc/
         parse_mode/qps/test_duration/parallel/top/ef_s/ts。
-        - qps 取自 CSV 的 rps 列, 单位次/秒; test_duration 保留原始字符串。
-        - sql_type 为空, 或 use_cache/use_query_cache 不能转 int 的行被静默跳过
-          (汇总行、残缺行), 不告警。
+        - 兼容两种表头(见 _row_cache_rc): run.py 与 pgvector-benchmark.sh 的结果
+          CSV 都能读; cache 由 use_cache 或 plan_mode 归一, rc 由 use_query_cache
+          或 result_mode 归一。
+        - qps 取自 rps 列(run.py)或 qps_avg 列(bash 脚本), 单位次/秒。
+        - sql_type 为空或 cache/rc 无法解析的行被静默跳过(汇总行、残缺行)。
         - 文件不存在时告警并返回空列表; 用 errors="replace" 避免编码问题中断。
     """
     combos = []
@@ -179,21 +287,23 @@ def read_combos(csv_path):
             sql = (r.get("sql_type") or "").strip()
             if not sql:
                 continue
-            try:
-                cache = int((r.get("use_cache") or "").strip())
-                rc = int((r.get("use_query_cache") or "").strip())
-            except (TypeError, ValueError):
+            cache, rc = _row_cache_rc(r)
+            if cache is None or rc is None:
                 continue
             combos.append({
-                "table": (r.get("experiment_name") or "").strip() or "pgvector",
+                "table": ((r.get("experiment_name") or r.get("table_name")
+                           or "").strip() or "pgvector"),
                 "dataset": (r.get("dataset") or "").strip(),
-                "vector_size": (r.get("vector_size") or "").strip(),
+                "vector_size": ((r.get("vector_size") or r.get("dimension")
+                                 or "").strip()),
                 "sql_type": sql, "cache": cache, "rc": rc,
                 "parse_mode": (r.get("vector_in_parse_mode") or "").strip(),
-                "qps": (r.get("rps") or "").strip(),
-                "test_duration": (r.get("test_duration") or "").strip(),
-                "parallel": (r.get("parallel") or "").strip(),
-                "top": (r.get("top") or "").strip(),
+                "qps": ((r.get("rps") or r.get("qps_avg") or "").strip()),
+                "test_duration": ((r.get("test_duration") or r.get("elapsed_avg_s")
+                                   or "").strip()),
+                "parallel": ((r.get("parallel") or r.get("concurrency")
+                              or "").strip()),
+                "top": ((r.get("top") or r.get("top_k") or "").strip()),
                 "ef_s": (r.get("ef_s") or "").strip(),
                 "ts": (r.get("timestamp") or "").strip(),
             })
@@ -375,24 +485,6 @@ def grid_pid_count(grid):
             * grid["per_cell"])
 
 
-def config_test_duration(cfg, table):
-    """取 config 中某 pgvector 表首个有值的 search test_duration(秒); 未知 None。
-
-    遍历该表展开后的 searcher, 返回第一个可转 float 的 test_duration; 全部非法或
-    表不存在时返回 None。单位: 秒。
-    """
-    for item in cfg:
-        if str(item.get("engine")) != "pgvector" or item.get("name") != table:
-            continue
-        for sp in expand_searchers(item.get("search_params")):
-            try:
-                return float(sp.get("test_duration"))
-            except (TypeError, ValueError):
-                continue
-        return None
-    return None
-
-
 def gap_threshold(cfg, base=GAP_MAX):
     """批次切分阈值: 至少 base, 且不小于 config 中最大 test_duration + 11s。
 
@@ -426,6 +518,68 @@ def dataset_dim(dataset):
     return int(m.group(1)) if m else None
 
 
+# --------------------------------------------------------------------------- #
+# --engine 传 PG 侧表名时的映射
+# --------------------------------------------------------------------------- #
+# gen_step_time_report.py 传的是 PG 里的表名(benchmark_1536_1m 等), 而 config 的
+# name 是 pgvector-dbpedia-openai-1000k-angular; 二者靠"向量维度"对应:
+#   benchmark_1536_1m -> 1536 -> datasets.json 中 dbpedia-openai-1000k-angular
+#   -> config 中 dataset 为该数据集名的 pgvector 条目。
+DATASETS_PATH = os.path.join(BASE_DIR, "datasets", "datasets.json")
+
+
+def load_datasets(path=DATASETS_PATH):
+    """读取 datasets/datasets.json(容错), 返回 list[dict]; 失败返回 []。"""
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        return data if isinstance(data, list) else []
+    except Exception:
+        return []
+
+
+def table_dim(table):
+    """从 PG 表名解析向量维度: benchmark_1536_1m -> 1536, benchmark_sift_128 -> 128。
+
+    参数: table —— PG 表名(benchmark_<维度>_<条数> 或 benchmark_sift_<维度>)。
+    返回: 维度 int; 名字不符合约定时返回 None。
+    """
+    m = re.match(r"benchmark_(?:sift_)?(\d+)", table or "", re.I)
+    return int(m.group(1)) if m else None
+
+
+def match_engine_by_table(cfg, table):
+    """把 PG 表名映射到 config 的 pgvector 条目 name。
+
+    匹配顺序:
+      1. 本身就是 config 的 name -> 原样返回;
+      2. 解析表名维度, 用 datasets.json 找同维度的数据集名, 再找 dataset 命中该
+         数据集的 pgvector 条目;
+      3. datasets.json 不可用时退回 dataset_dim() 解析条目 dataset 名里的维度。
+
+    参数: cfg —— config 条目列表; table —— --engine 传入的表名/引擎名。
+    返回: 命中的 config name; 无法映射时返回 None(调用方保持原值走日志推断)。
+    """
+    if not table:
+        return None
+    if any(i.get("name") == table for i in cfg):
+        return table
+    dim = table_dim(table)
+    if dim is None:
+        return None
+    ds_names = {d.get("name") for d in load_datasets()
+                if d.get("vector_size") == dim}
+    hits = [i.get("name") for i in cfg
+            if str(i.get("engine")) == "pgvector"
+            and (str(i.get("dataset")) in ds_names
+                 or dataset_dim(i.get("dataset")) == dim)]
+    if not hits:
+        return None
+    if len(hits) > 1:
+        print(f"  (warn) 表名 {table} 匹配到多个引擎: {hits}; 取首个", file=sys.stderr)
+    return hits[0]
+
+
 def resolve_table(cfg, n_pids, target=None, combos=None, observed_sqls=None, dim=None):
     """推断被测 pgvector 表。
 
@@ -433,7 +587,8 @@ def resolve_table(cfg, n_pids, target=None, combos=None, observed_sqls=None, dim
       1. 日志里出现的 sql_type 必须都能在该表 config 的 sql_type 中找到
          (config 多出的类型可容忍: 可能是本轮还没跑到的后续块);
       2. 日志向量事件的维度必须与表维度一致 —— 维度取结果 CSV 的 vector_size,
-         无 CSV 行时回退数据集名(128/256/768/960...);
+         无 CSV 行时回退数据集名(128/256/768/960...); 旧日志无向量事件
+         (dim=None) 时跳过维度校验, 仅靠其余条件消歧;
       3. 网格 PID 数优先精确匹配 n_pids; 若是测试尚未跑完的前缀, 取预期 PID 数
          最小且大于 n_pids 的候选;
       4. 仍多解时用结果 CSV 的 experiment_name 消歧。
@@ -443,11 +598,17 @@ def resolve_table(cfg, n_pids, target=None, combos=None, observed_sqls=None, dim
         target: --engine 显式指定的表名, 命中即直接返回;
         combos: read_combos() 的结果, 提供 vector_size/table 线索;
         observed_sqls: 日志实际出现的 sql_type 顺序;
-        dim: 日志向量事件中最常见的维度。
+        dim: 日志向量事件(vi/hv/atv)中最常见的维度; 旧版无向量事件的日志为 None。
     返回: 表名或 None(找不到任何候选)。
     """
     if target:
-        return target
+        # --engine 可能是 PG 表名(benchmark_1536_1m), 先映射到 config 条目名;
+        # 映射不到时保留原值(后续 config_grid 返回 None, 由日志推断兜底)。
+        mapped = match_engine_by_table(cfg, target)
+        if mapped and mapped != target:
+            print(f"  (info) --engine {target} 按向量维度映射到 config 条目: {mapped}",
+                  file=sys.stderr)
+        return mapped or target
     sqlset = set(observed_sqls or [])
     cands = []
     for item in cfg:
@@ -493,7 +654,8 @@ def resolve_table(cfg, n_pids, target=None, combos=None, observed_sqls=None, dim
             pool = same_n
     pool.sort(key=lambda c: c["npids"])
     if len(pool) > 1:
-        print(f"  (warn) 多张表同时匹配(pid={n_pids}, dim={dim}, "
+        print(f"  (warn) 多张表同时匹配(pid={n_pids}, "
+              f"dim={dim if dim is not None else '无(日志无向量事件)'}, "
               f"sql={len(observed_sqls or [])}): {[c['name'] for c in pool]}; 取首个",
               file=sys.stderr)
     return pool[0]["name"]
@@ -507,7 +669,7 @@ def stmt_sql_type(name):
 
     参数: name —— execute_query 的 name= 值或 trace 行 PREPARE 后的语句名。
     返回: sql_type 字符串; name 为空或不符合 RE_PREPARED_NAME(需 pgv_ps_/polardb_ps_
-          前缀, 且以 6 位小写字母数字随机后缀结尾)时返回 None。
+          前缀, 且以 6 位及以上字母数字随机后缀结尾)时返回 None。
     """
     if not name:
         return None
@@ -536,17 +698,18 @@ def parse_log(log_path=LOG_PATH, min_records=MIN_PID_RECORDS):
            eq:[(eval,gcp,name)...], vi:[ms...], hv:[ms...],
            stmt_name, prep_name, actions:Counter}
     仅保留含 PGVECTOR_TIMING / PLAN_CACHE_TRACE 的行,先做子串快速过滤再正则匹配。
-    统计每个 PID 的计时记录数 n, 记录数少于 min_records 的 PID 剔除(默认 1, 即只
-    剔除完全没有计时记录的 PID; 日志轮转/测试起始处只有十余条记录的 PID 仍是合法
-    格位, 不能按 40 之类的阈值丢弃, 否则 PID 总数与 config 网格对不上)。
+    统计每个 PID 的计时记录数 n。记录数不用于区分搜索/非搜索 PID(同一终端可能
+    连跑多条非向量语句): 判定由向量转换事件数承担(is_search_pid, vector_in/
+    halfvec_in/array_to_vector 事件数 >1); min_records 仅在显式 >1 时作额外下限。
     PLAN_CACHE_TRACE 行不计入 n。rec["dims"] 汇总向量解析事件的维度。
 
     参数:
         log_path: 服务端日志路径。
-        min_records: PID 保留阈值(计时行数), 默认 MIN_PID_RECORDS=1。
+        min_records: 额外的计时行数下限(仅在 >1 时生效), 默认 1 = 不按记录数过滤。
     返回:
         OrderedDict {str(pid): rec}, 按 PID 首次出现顺序; 所有耗时单位为 ms,
-        events 保留各计时事件的按行顺序(供 setup_len 判断首个向量事件之前的前导 sq)。
+        events 保留各计时事件的按行顺序(供 split_vector_sq 事件配对与 setup_len
+        前导判断)。
     异常:
         文件不存在/无读权限时直接向上抛 OSError, 由调用方事先检查。
     """
@@ -623,14 +786,18 @@ def parse_log(log_path=LOG_PATH, min_records=MIN_PID_RECORDS):
                     dm = RE_DIM.search(line)
                     if dm:
                         rec["dims"][int(dm.group(1))] += 1
-    # 剔除计时记录不足的 PID; 只带 trace 没有计时的 PID(n=0)也会被剔掉
-    dropped = [(pid, rec["n"]) for pid, rec in data.items() if rec["n"] < min_records]
-    for pid, _ in dropped:
-        del data[pid]
-    if dropped:
-        sample = ", ".join(f"{p}({n})" for p, n in sorted(dropped)[:6])
-        print(f"  (warn) 剔除记录数 <{min_records} 的残缺 PID: 共 {len(dropped)} 个 "
-              f"[{sample}]", file=sys.stderr)
+    # 记录数不再是搜索/非搜索的判定依据(同一终端可能连跑多条非向量语句);
+    # 默认 min_records=1 时不过滤, 搜索执行单元由调用方按向量转换事件数判定
+    # (见 is_search_pid)。仅当显式传入 >1 的阈值时作为额外的计时行数下限。
+    if min_records > 1:
+        dropped = [(pid, rec["n"]) for pid, rec in data.items()
+                   if rec["n"] < min_records]
+        for pid, _ in dropped:
+            del data[pid]
+        if dropped:
+            sample = ", ".join(f"{p}({n})" for p, n in sorted(dropped)[:6])
+            print(f"  (warn) 剔除记录数 <{min_records} 的残缺 PID: 共 {len(dropped)} 个 "
+                  f"[{sample}]", file=sys.stderr)
     return data
 
 
@@ -868,6 +1035,343 @@ def log_grid(pids, pid_data):
     }
 
 
+def detect_layout(pids, pid_data):
+    """判断日志的格子排列方式: "cache_major"(cache 外层) 或 "sql_major"(sql_type 外层)。
+
+    pgvector-benchmark.sh(pgvector-benchmark.sh 的主循环)是 cache 外层、sql_type
+    内层; config/run.py 驱动的实验则是 sql_type 外层、cache 内层。两种布局的日志
+    必须用不同切分方式, 否则所有格子都会错位。
+
+    判据: 折叠有名 PID 的连续同名段(同一格的 pgbench 主跑 + 探针、同档多连接)后,
+    cache_major 每跑完一整轮 sql_type 再进入下一档, 段序列是同一有序类型表的重复;
+    sql_major 同一 sql_type 的各 cache 档连续, 折叠后每个类型只出现一次。故若
+    段序列至少重复两轮且前两轮完全相同, 判 cache_major。这比旧的"前 1/3 与中 1/3
+    相同"稳健: 后者在日志含多轮测试或部分轮次时会被打乱。
+
+    参数: pids —— 当前批次 PID(按时间排序); pid_data —— {pid: rec}。
+    返回: "cache_major" / "sql_major"(序列太短或只有一轮有名块时保守返回 sql_major)。
+    """
+    seq = [rec_sql_type(pid_data[p]) for p in pids]
+    seq = [s for s in seq if s]
+    if len(seq) < 4:
+        return "sql_major"
+    runs = []
+    for s in seq:
+        if not runs or runs[-1] != s:
+            runs.append(s)
+    types = []
+    for s in runs:
+        if s not in types:
+            types.append(s)
+    t = len(types)
+    if t >= 2 and len(runs) >= 2 * t and runs[:t] == runs[t:2 * t]:
+        return "cache_major"
+    return "sql_major"
+
+
+def log_grid_cache_major(pids, pid_data):
+    """按 cache 外层 / sql_type 内层布局反推网格(pgvector-benchmark.sh 的日志)。
+
+    该脚本每个 (cache 档, sql_type) 组合产生 2 个 PID(pgbench 主跑 + 延迟探针),
+    cache 档位固定为 0/1/2/3(4 档), sql_type 取自日志里的 PREPARE 名。
+
+    参数: pids —— 当前批次 PID(按时间排序); pid_data —— {pid: rec}。
+    返回: grid(dict, layout="cache_major"); 无有名 PID 或搜索 PID 不足以切出
+          至少一格时返回 None(由调用方回退到 config 网格或旧兜底)。
+    """
+    sqls = []
+    for p in pids:
+        st = rec_sql_type(pid_data[p])
+        if st and st not in sqls:
+            sqls.append(st)
+    if not sqls:
+        return None
+    # 搜索 PID 按向量转换事件判定(事件数 >1); 旧版无向量事件的日志回退
+    # "连接初始化(sq<=1 且无 execute_query)不是搜索 PID"启发式
+    if vector_mode(pid_data):
+        search_pids = [p for p in pids if is_search_pid(pid_data[p])]
+    else:
+        search_pids = [p for p in pids
+                       if not (len(pid_data[p]["sq"]) <= 1 and not pid_data[p]["eq"])]
+    caches = [0, 1, 2, 3]
+    slots = len(caches) * len(sqls)
+    if not search_pids or len(search_pids) < slots:
+        return None
+    per_cell = len(search_pids) // slots
+    if per_cell < 1:
+        return None
+    if len(search_pids) % slots:
+        print(f"  (warn) cache_major 布局: {len(search_pids)} 个搜索 PID 不能被 "
+              f"{len(caches)}cache x {len(sqls)}sql 整除, 按每格 {per_cell} 个切分并"
+              f"丢弃余数", file=sys.stderr)
+    print(f"  (info) 检测到 cache_major 布局(pgvector-benchmark.sh 日志): "
+          f"{len(sqls)}sql x {len(caches)}cache x 每格 {per_cell} PID", file=sys.stderr)
+    return {
+        "layout": "cache_major",
+        "sql_types": sqls,
+        "caches": caches,
+        "result_caches": [0],
+        "parse_modes": [""],
+        "search_number": 1,
+        "searchers": [{"params": {}}],
+        "labels": ["-"],
+        "has_warmup": False,
+        "prewarm": 0,
+        "per_cell": per_cell,
+    }
+
+
+def build_cells_cache_major(pids, pid_data, grid):
+    """按 cache 外层 / sql_type 内层切格, 每格一行(适配 pgvector-benchmark.sh 日志)。
+
+    每格含 per_cell 个 PID(实测为 pgbench 主跑 + 延迟探针): 只取记录数最多的主跑
+    参与统计, 探针不混入均值, 保证每格恰好一行。cache=0 档无名, 按 grid 的
+    sql_type 顺序回填; 有名档用日志实际 sql_type 校验顺序。
+
+    参数: pids —— 当前批次 PID(按时间排序); pid_data —— {pid: rec}; grid ——
+          log_grid_cache_major() 返回的网格。
+    返回: OrderedDict: (sql_type, cache, 0, "") -> {"warmup": [], "searches": [[pid]]}
+    """
+    cells = OrderedDict()
+    per_cell = max(1, int(grid.get("per_cell") or 1))
+    # 搜索 PID 按向量转换事件判定; 旧版日志回退连接初始化启发式(同 log_grid_cache_major)
+    if vector_mode(pid_data):
+        pids = [p for p in pids if is_search_pid(pid_data[p])]
+    else:
+        pids = [p for p in pids
+                if not (len(pid_data[p]["sq"]) <= 1 and not pid_data[p]["eq"])]
+    idx, truncated, cache = 0, False, 0
+    for cache in grid["caches"]:
+        for cfg_sql in grid["sql_types"]:
+            group = pids[idx: idx + per_cell]
+            if len(group) < per_cell:
+                truncated = True
+                break
+            idx += per_cell
+            sql = block_sql_type(group, pid_data) or cfg_sql
+            if sql != cfg_sql:
+                print(f"  (warn) 日志块 sql_type={sql} 与推断顺序 {cfg_sql} 不符, "
+                      f"以日志为准", file=sys.stderr)
+            main_pid = max(group, key=lambda p: len(pid_data[p]["sq"]))
+            cells[(sql, cache, 0, "")] = {"warmup": [], "searches": [[main_pid]]}
+        if truncated:
+            break
+    if truncated:
+        print(f"  (info) cache_major 布局在 cache={cache} 处截断, 已保留 "
+              f"{len(cells)} 格", file=sys.stderr)
+    return cells
+
+
+def build_cells_sql_dynamic(pids, pid_data, raw_phase=None):
+    """完全日志驱动的动态切格(不依赖 config 网格)。
+
+    适用于残缺/中断的日志与 SQL_TYPES 动态变化的情况:
+      - sql_type 块按日志 PREPARE 名的实际出现顺序切分(数量/顺序动态);
+      - 搜索执行单元按向量转换事件判定(含 vector_in/halfvec_in/array_to_vector
+        且事件数 >1), 连接初始化/整表预热/非向量终端一律剔除;
+      - 块内每个 PID 按其 PLAN_CACHE_TRACE 动作(auto/custom/generic)分档,
+        动作映射 cache=1/2/3;
+      - 每格收编该 (sql_type, cache) 档实际跑过的全部 PID —— 执行次数(轮数)
+        完全由日志决定, 1 个 PID 也成格, 不要求与 config 网格对齐。
+
+    参数: raw_phase —— raw 档(无名 PID)的归属方式:
+      - None(sql_major 布局): 无名 PID 挂起, 由随后出现的同名块收编
+        (run.py 驱动时同一 sql_type 的 cache=0 档紧邻 cache>0 档);
+      - "head"(cache_major 布局, pgvector-benchmark.sh): raw 档(cache=0)没有
+        PREPARE 名, 全部无名 PID 都是它。位置可能是全部有名块之前, 也可能夹在
+        有名块中间(取决于 CACHE_PROFILES 顺序: prepare_auto_off 排在 raw_off
+        之前时, raw 的 sql_type 只能由前面的 auto 块提供), 日志未清空时还会混有
+        多轮测试。故按"连续无名段"收集, 每段独立对应一遍 sql_type 顺序: 首个是
+        整表预热(每表一次), 其余按 "主跑 + 探针" 两两一组(只跑 psql 探针时
+        1 个 PID 一格)按序对应到日志里出现的 sql_type。若不这样单独处理, 中间
+        那段会被随后第一个有名块整段收编, raw 只解析出一组并造成格子错位。
+    返回: (cells OrderedDict, 动态 grid dict)。
+    """
+    # 搜索执行单元按向量转换事件判定: 含 vector_in/halfvec_in/array_to_vector 且
+    # 事件数 >1。连接初始化/整表预热/连跑多条非向量语句的终端一律剔除, 不再依赖
+    # 记录数启发式(同一终端的非向量语句条数不定, 记录数无法区分)。
+    if vector_mode(pid_data):
+        ps = [p for p in pids if is_search_pid(pid_data[p])]
+        dropped = [p for p in pids if not is_search_pid(pid_data[p])]
+        if dropped:
+            print(f"  (info) 忽略 {len(dropped)} 个非向量查询 PID(无 vector_in/"
+                  f"halfvec_in/array_to_vector 或事件数 <=1): "
+                  f"{','.join(str(p) for p in dropped[:8])}"
+                  f"{'...' if len(dropped) > 8 else ''}", file=sys.stderr)
+    else:
+        # 旧版插桩日志(全无向量事件): 回退记录数启发式 —— 连接初始化
+        # (sq<=1 且无 execute_query)与头部无名低记录 PID(整表预热)剔除
+        def is_init(p):
+            r = pid_data[p]
+            return len(r["sq"]) <= 1 and not r["eq"]
+
+        ps = [p for p in pids if not is_init(p)]
+        k = 0
+        while (k < len(ps) and not rec_sql_type(pid_data[ps[k]])
+               and len(pid_data[ps[k]]["sq"]) < 100):
+            k += 1
+        if k:
+            print(f"  (info) 忽略整表前置预热 PID: {','.join(str(p) for p in ps[:k])}",
+                  file=sys.stderr)
+            ps = ps[k:]
+
+    # cache_major 布局下 raw 档(cache=0)没有 PREPARE 名, 所有无名 PID 都属于它。
+    # raw 档在日志里的位置随 CACHE_PROFILES 顺序而变: raw_off 第一个时在全部有名
+    # 块之前; prepare_auto_off 排在 raw_off 之前时(raw 的 sql_type 只能由它提供)
+    # 则夹在有名块中间。日志未清空时还会混有多轮测试, 每轮 raw 档是一段连续无名
+    # PID。因此按"连续无名段"收集, 每段独立按 sql_type 顺序对应, 而不是整段塞给
+    # 随后的第一个有名块(那会只解析出一组 raw 并造成格子错位)。
+    raw_runs = []
+    if raw_phase == "head":
+        # 用户口径: 从首次出现 prepare_* 有名块开始记录。之前的无名 PID 是连接
+        # 初始化与整表预热(如 WARMUP_TIMELIMIT 的预热 PID), 一律丢弃。
+        first_named = next((i for i, p in enumerate(ps)
+                            if rec_sql_type(pid_data[p])), None)
+        if first_named:
+            print(f"  (info) 丢弃首个有名块之前的 {first_named} 个无名 PID"
+                  f"(连接初始化/整表预热): "
+                  f"{','.join(str(p) for p in ps[:first_named])}", file=sys.stderr)
+            ps = ps[first_named:]
+        cur = []
+        for p in ps:
+            if rec_sql_type(pid_data[p]):
+                if cur:
+                    raw_runs.append(cur)
+                    cur = []
+            else:
+                cur.append(p)
+        if cur:
+            raw_runs.append(cur)
+        ps = [p for p in ps if rec_sql_type(pid_data[p])]
+
+    # 有名 PID 按名连续分段; sql_major 布局下无名 PID 挂起, 由随后出现的同名块
+    # 收编(同一 sql_type 的 raw 档紧邻其 prep 档)。
+    blocks = []            # {"sql": 名, "pids": [有名], "raw": [无名]}
+    pending_raw = []
+    for p in ps:
+        st = rec_sql_type(pid_data[p])
+        if st:
+            if blocks and blocks[-1]["sql"] == st:
+                blocks[-1]["pids"].append(p)
+            else:
+                blocks.append({"sql": st, "pids": [p], "raw": []})
+            if pending_raw:
+                blocks[-1]["raw"].extend(pending_raw)
+                pending_raw = []
+        else:
+            pending_raw.append(p)
+    if pending_raw:
+        blocks.append({"sql": "unknown", "pids": [], "raw": list(pending_raw)})
+        print(f"  (warn) {len(pending_raw)} 个无名 PID 后无同名块, 归入 unknown 块 "
+              f"(raw 档 sql_type 未知)", file=sys.stderr)
+
+    # 前导 raw 组按序对应日志中的 sql_type 顺序(raw 阶段与 prep 阶段都按
+    # SQL_TYPES 顺序执行); 超出部分归入 unknown 兜底格。需在 raw 分组之前算出,
+    # 因为"每组合 1 个 PID 还是 2 个"的判据要用到 sql_type 个数。
+    sql_order = []
+    for b in blocks:
+        if b["sql"] != "unknown" and b["sql"] not in sql_order:
+            sql_order.append(b["sql"])
+
+    # 每个连续无名段(raw 档一轮)分组: 主跑 + 探针每组合固定 2 个 PID, 按段内顺序
+    # 两两配对。整表预热(每次 pgvector-benchmark.sh 调用一次, 单连接)在搜索 PID
+    # 流里表现为长度为 1 的无名段, 按段长剔除; 日志尾部未跑完的 raw 段整段跳过。
+    raw_group_sets = []
+    cnt = {p: vector_event_count(pid_data[p]) for run in raw_runs for p in run}
+    # 每轮 raw 档应含 2 * sql_type 数 个 PID(主跑 + 探针, 每组合 2 个)。注意预热
+    # PID 不只出现在日志开头: 每次 pgvector-benchmark.sh 调用都会先做 WARMUP_TIMELIMIT
+    # 的整表预热(单连接, 只留 1 个无名搜索 PID), 它夹在各轮 raw 段之间, 段长为 1。
+    expected_raw = 2 * len(sql_order)
+    for ridx, run in enumerate(raw_runs):
+        if not run:
+            continue
+        if len(run) == 1:
+            print(f"  (info) 跳过 raw 段中的单 PID 整表预热 {run[0]}"
+                  f"({cnt[run[0]]} 条向量查询, 非主跑+探针组合), 不参与分格",
+                  file=sys.stderr)
+            continue
+        if ridx == len(raw_runs) - 1 and len(run) < expected_raw:
+            print(f"  (info) raw 档最后一轮仅 {len(run)}/{expected_raw} 个 PID"
+                  f"(尚未跑完), 整轮跳过", file=sys.stderr)
+            continue
+        groups = [run[i:i + 2] for i in range(0, len(run), 2)]
+        if len(run) % 2 == 1:
+            print("  (warn) raw 档 PID 数为奇数, 丢弃最后一个未配对 PID", file=sys.stderr)
+            groups = groups[:-1]
+        raw_group_sets.append(groups)
+
+    cells = OrderedDict()
+
+    def _add_raw(key_sql, grp):
+        """raw 档(cache=0)格子: 同名格已存在时并入, 避免 unknown 兜底格被覆盖。"""
+        key = (key_sql, 0, 0, "")
+        if key in cells:
+            cells[key]["searches"][0].extend(grp)
+        else:
+            cells[key] = {"warmup": [], "searches": [list(grp)]}
+
+    def _add_named(key_sql, cache, pids):
+        """prep 档格子: 同名同档位格已存在时并入(日志未清空时含多轮, 需按轮累加,
+        而不是用最后一轮的块覆盖前面的轮次)。"""
+        key = (key_sql, cache, 0, "")
+        if key in cells:
+            cells[key]["searches"][0].extend(pids)
+        else:
+            cells[key] = {"warmup": [], "searches": [list(pids)]}
+
+    mode_to_cache = {"auto": 1, "custom": 2, "generic": 3}
+    for b in blocks:
+        sql = b["sql"]
+        if b["raw"]:
+            _add_raw(sql, b["raw"])
+        # 同一块内(连续同名)的 PID 是同一档位的主跑 + 探针, 档位必须按整块
+        # 合并判定: 逐 PID 判时, 探针首次执行只留 1 次 USE_CUSTOM 会被误判成
+        # generic, 同一组被拆成 cache=1 与 cache=3 两行。
+        act = infer_plan_mode([pid_data[p] for p in b["pids"]])
+        if act in mode_to_cache:
+            _add_named(sql, mode_to_cache[act], b["pids"])
+        else:
+            print(f"  (warn) sql_type={sql}: {len(b['pids'])} 个 PID 无计划缓存动作"
+                  f"痕迹, 合并为一格(cache 标记为 1)", file=sys.stderr)
+            _add_named(sql, 1, b["pids"])
+
+    # 每段 raw 组都从 sql_order 头部开始对应(同一轮 raw 档按 SQL_TYPES 顺序执行);
+    # 超出部分(raw 阶段多跑/顺序不符)归入 unknown。
+    if raw_group_sets:
+        leftover, n_excess = [], 0
+        for groups in raw_group_sets:
+            for i, grp in enumerate(groups):
+                if i < len(sql_order):
+                    _add_raw(sql_order[i], grp)
+                else:
+                    n_excess += 1
+                    leftover.extend(grp)
+        if leftover:
+            print(f"  (warn) raw 档有 {n_excess} 组超出日志 sql_type 数"
+                  f"({len(sql_order)}), {len(leftover)} 个 PID 归入 unknown",
+                  file=sys.stderr)
+            _add_raw("unknown", leftover)
+
+    sqls = []
+    for (sql, _c, _r, _m) in cells:
+        if sql not in sqls:
+            sqls.append(sql)
+    dyn_grid = {
+        "layout": "dynamic",
+        "sql_types": sqls or ["unknown"],
+        "caches": sorted({c for (_s, c, _r, _m) in cells}) or [0],
+        "result_caches": [0],
+        "parse_modes": [""],
+        "search_number": 1,
+        "searchers": [{"params": {}}],
+        "labels": ["-"],
+        "has_warmup": False,
+        "prewarm": 0,
+        "per_cell": 1,
+    }
+    return cells, dyn_grid
+
+
 def split_contiguous(pids, pid_data, gap_max=GAP_MAX):
     """按时间连续性把已按 ts_first 排序的 pids 切成段。
 
@@ -917,23 +1421,42 @@ def _param_match(row, searcher):
     return True
 
 
-def combo_lookup(sql, cache, rc, pm, searcher, combos, table=None):
+def combo_lookup(sql, cache, rc, pm, searcher, combos, table=None, dim=None):
     """在结果 CSV 中按 (table?, sql_type, use_cache, use_query_cache, parse_mode) 匹配,
     优先取 parallel/top/ef_s 一致且时间戳最新的一行。
 
     参数:
         sql/cache/rc/pm: 日志侧推断出的组合键(cache 为 cache 档位, rc 为 0/1);
         searcher: 当前 searcher, 用于在候选里优先挑参数一致者(None 表示不筛);
-        combos: read_combos() 的结果; table: 限定表名(None 表示不限)。
+        combos: read_combos() 的结果; table: 限定表名(None 表示不限);
+        dim: 日志实测的向量维度, 用于跨表候选消歧(表名与维度缺一不可时最可靠)。
     返回: 命中的 CSV dict 或 None。时间戳为字符串 "YYYY-MM-DD HH:MM:SS", 按字典序
           取最大即最新; 同秒多条时取遍历到的最后一条。
     """
     cands = [
         c for c in combos
-        if (not table or c.get("table") == table)
-        and c.get("sql_type") == sql and c.get("cache") == cache
+        if c.get("sql_type") == sql and c.get("cache") == cache
         and c.get("rc") == rc and c.get("parse_mode") == pm
     ]
+    if not cands:
+        return None
+    # 维度消歧: 同一 (sql_type, cache, rc) 在结果 CSV 里会跨多张物理表出现
+    # (如 benchmark_960_1m 与 benchmark_sift_128 都有 text_literal/cache=1),
+    # 只用表名匹配会因 table 归一为引擎名而失效; 日志实测维度(128/256/768/960/
+    # 1536)与 CSV 的 vector_size 唯一对应, 先按它筛掉其它表。
+    if dim is not None:
+        hits = [c for c in cands if c.get("vector_size") == str(dim)]
+        if hits:
+            cands = hits
+    if table and cands:
+        # 表名可能对不上: pgvector-benchmark.sh 的 CSV 写的是物理表名
+        # (benchmark_1536_1m), 而日志侧 table 是按 config 归一后的引擎名。
+        # 精确匹配优先; 找不到时仅当候选都来自同一张表才降级, 避免跨表串味。
+        hits = [c for c in cands if c.get("table") == table]
+        if hits:
+            cands = hits
+        elif len({c.get("table") for c in cands}) > 1:
+            return None
     if not cands:
         return None
     if searcher is not None:
@@ -949,9 +1472,10 @@ def combo_lookup(sql, cache, rc, pm, searcher, combos, table=None):
 def sq_drop_count(cache):
     """setup 阶段非向量 simple_query 条数的经验回退值。
 
-    正常情况下由 setup_len() 从日志实测(首个子查询前导 sq): cache=0 -> 4 条,
-    cache=1/2/3 -> 5 条 SET + 1 条 PREPARE = 6 条。仅当整个 PID 没有向量事件
-    (空单元) 时无法实测, 用该回退值兜底。cache 未知时按 cache=0 处理。
+    仅在 PID 没有任何向量转换事件时使用(旧版曾移除 vector_in 系事件的日志):
+    cache=0 -> 4 条, cache=1/2/3 -> 5 条 SET + 1 条 PREPARE = 6 条。新日志每条
+    向量查询后紧跟 vector_in 系事件, summarize 按事件配对精确剥离, 不用本经验值。
+    cache 未知时按 cache=0 处理。
 
     参数: cache —— cache 档位(int 或 None)。
     返回: 4(cache=0 或未知) / 6(cache=1/2/3), 单位条。
@@ -962,10 +1486,12 @@ def sq_drop_count(cache):
 
 
 def setup_len(rec, cache=None):
-    """连接建立后、首个向量事件之前的非向量 simple_query 条数。
+    """[兜底口径] 无向量转换事件的 PID 的 setup 非向量 simple_query 条数。
 
-    实测优先: 数第一个 vi/hv/atv/eq 之前的 sq; 若该 PID 完全没有向量事件,
-    回退 sq_drop_count(cache) 并受 sq 总数约束。
+    仅当 PID 没有任何向量转换事件时才会被调用(旧版曾移除 vector_in 系事件的
+    日志、空单元等): 数首个非 sq 事件之前的 sq; events 全为 sq 时回退
+    sq_drop_count(cache) 经验值并受 sq 总数约束。新日志(每条向量查询后紧跟
+    vector_in 系事件)由 summarize 按事件配对精确区分, 不经过本函数。
 
     参数: rec —— 单个 PID 的记录(events 为按行顺序的事件类型序列);
           cache —— 兜底用的 cache 档位。
@@ -981,11 +1507,42 @@ def setup_len(rec, cache=None):
     return min(n, sq_drop_count(cache), len(rec.get("sq", [])))
 
 
+def split_vector_sq(rec):
+    """按事件配对一个 PID 的 simple_query, 精确区分向量查询与非向量查询。
+
+    新版插桩在每条向量查询的服务端日志里, 于其 PGVECTOR_TIMING simple_query 行
+    之后紧随一条向量转换事件(vector_in/halfvec_in/array_to_vector); 非向量语句
+    (SET/PREPARE/BEGIN/COMMIT 等)没有该事件。因此事件序列中 "sq 且下一个事件是
+    向量转换" 的即为向量查询, 其余 sq 为 setup 或间杂的非向量语句 —— 即使出现在
+    首个向量查询之后(如延迟探针的 BEGIN/COMMIT)也能被准确剔除。
+
+    参数: rec —— parse_log() 里单个 PID 的记录(events 与 sq 同源: 第 j 个 "sq"
+          事件对应 sq[j])。
+    返回: (vector_sq, other_sq) 两个 (p,a,pl,e) 元组列表; 该 PID 没有任何向量
+          转换事件(旧版日志)时返回 (None, None), 由调用方回退 setup_len 启发式。
+    """
+    events = rec.get("events") or []
+    if not any(k in VECTOR_MARKS for k in events):
+        return None, None
+    sq = rec.get("sq", [])
+    vector, other = [], []
+    j = 0                          # events 里第 j 个 "sq" 事件对应 sq[j]
+    for i, kind in enumerate(events):
+        if kind != "sq":
+            continue
+        nxt = events[i + 1] if i + 1 < len(events) else None
+        (vector if nxt in VECTOR_MARKS else other).append(sq[j])
+        j += 1
+    return vector, other
+
+
 def summarize(pid_recs, cache=None):
     """对一个 cell 的 1..N 个 PID 汇总(跨 PID 池化样本)。
 
-    先按 setup_len() 剔除每个 PID 前端非向量 simple_query, 再对余下向量查询做
-    耗时/次数统计; 各耗时均值沿用 avg() 的"去掉第一条"口径(去除首次热路径)。
+    向量查询筛选: 新日志按 split_vector_sq() 的 "sq 后紧跟向量转换事件" 配对,
+    精确区分向量查询与非向量查询(SET/PREPARE/BEGIN 等一律剔除); 旧日志(无向量
+    事件)回退 setup_len() 前导剥离。各耗时均值沿用 avg() 的"去掉第一条"口径
+    (去除首次热路径)。
 
     参数: pid_recs —— 单个 rec 或 rec 列表(同格多个 search PID 池化);
           cache —— 空单元时 setup 条数的兜底档位。
@@ -993,19 +1550,25 @@ def summarize(pid_recs, cache=None):
         exec_count 向量查询条数; parse_avg/analyze_avg/plan_avg/exec_avg 为 sq 的
         四段毫秒均值; eq_count 为 EXECUTE 条数; eval_avg/gcp_avg 为 execute_query
         的毫秒均值; vi_count/vi_avg 向量转换(含 array_to_vector)次数与毫秒均值;
-        hv_count/hv_avg halfvec_in 次数与毫秒均值。均值可能为 None(样本 <= 1)。
+        hv_count/hv_avg halfvec_in 次数与毫秒均值。均值可能为 None(样本 <= 1);
+        恢复向量转换插桩后 vi/hv 重新有值(旧版日志为 0/None)。
     """
     if isinstance(pid_recs, dict):
         pid_recs = [pid_recs]
     sq, eq, vi, hv = [], [], [], []
     for rec in pid_recs:
-        # 剔除前端 SET/PREPARE 等 setup simple_query, 只保留真正的向量查询
-        sq.extend(rec["sq"][setup_len(rec, cache):])
+        vsq, _ = split_vector_sq(rec)
+        if vsq is not None:
+            # 新日志: 事件配对筛选, setup 与间杂非向量语句(BEGIN/COMMIT 等)全部剔除
+            sq.extend(vsq)
+        else:
+            # 旧日志/无向量事件的 PID: 回退"首个向量事件前导 sq"启发式
+            sq.extend(rec["sq"][setup_len(rec, cache):])
         eq.extend(rec["eq"])
         vi.extend(rec["vi"])
         hv.extend(rec["hv"])
     return {
-        "exec_count": len(sq),                    # 剔除前端非向量语句后的向量查询条数
+        "exec_count": len(sq),                    # 配对筛出的向量查询条数
         "parse_avg": avg([x[0] for x in sq]),
         "analyze_avg": avg([x[1] for x in sq]),
         "plan_avg": avg([x[2] for x in sq]),
@@ -1023,28 +1586,34 @@ def summarize(pid_recs, cache=None):
 def infer_plan_mode(pid_recs):
     """由 PLAN_CACHE_TRACE 动作推断实际计划模式: auto / custom / generic。
 
-    参数: pid_recs —— 单个 rec 或 rec 列表(同格多个 search PID)。
-    返回: "auto"(custom 与 generic 动作都有) / "custom" / "generic" / "-"
-          (没有任何 trace 动作, 如 cache=0) / "mixed"(各 PID 推断结果不一致)。
-    说明: BUILD_GENERIC 与 USE_GENERIC 一起归入 generic。
+    参数: pid_recs —— 单个 rec 或 rec 列表(同一档位的主跑 + 探针等)。
+    返回: "auto" / "custom" / "generic" / "-"(没有任何 trace 动作, 如 cache=0)。
+    说明: BUILD_GENERIC 本身是 PREPARE 期的固有动作, 不直接参与判据, 但用作
+        分母: auto 档 PG 会先走若干次 custom plan 再转 generic, 每个 PREPARE
+        的 USE_CUSTOM/BUILD_GENERIC ≈ 3; generic 档强制走 generic, 只留 ≈0.5。
+        该比值在 TIMELIMIT 2s/10s、n=1/1000 下都稳定, 而绝对次数会随事务数增长
+        (短测试里 generic 主跑也能累积到 3 次 USE_CUSTOM), 故不用绝对阈值。
+        多个 rec 取比值最大者(主跑与探针各算各的, 任一方呈 auto 特征即判 auto)。
     """
     if isinstance(pid_recs, dict):
         pid_recs = [pid_recs]
-    modes = set()
+    ratio = 0.0
+    custom_max = 0
+    generic = 0
     for rec in pid_recs:
         a = rec.get("actions") or {}
-        if not a:
-            continue
-        custom = a.get("USE_CUSTOM", 0)
-        generic = a.get("USE_GENERIC", 0) + a.get("BUILD_GENERIC", 0)
-        # 两种动作在同一次会话都出现 => auto; 否则按出现的那种归类, 都没有记 "-"
-        modes.add("auto" if (custom and generic)
-                  else "custom" if custom
-                  else "generic" if generic else "-")
-    modes.discard("-")                 # "-" 不参与 mixed 判定
-    if not modes:
+        c = a.get("USE_CUSTOM", 0)
+        b = a.get("BUILD_GENERIC", 0)
+        custom_max = max(custom_max, c)
+        generic += a.get("USE_GENERIC", 0)
+        if b:
+            ratio = max(ratio, c / b)
+    if not (custom_max or generic):
         return "-"
-    return modes.pop() if len(modes) == 1 else "mixed"
+    # USE_GENERIC 一次都没有 => custom 档(每次执行都重新规划)
+    if not generic:
+        return "custom"
+    return "auto" if ratio >= AUTO_CUSTOM_PER_BUILD else "generic"
 
 
 def fmt(v, nd=3):
@@ -1052,6 +1621,148 @@ def fmt(v, nd=3):
     if v is None:
         return "-"
     return f"{v:.{nd}f}"
+
+
+# 输出 CSV 表头(main 与多批次聚合共用)
+HEADER = ["#", "PID", "sql_type", "cache", "res_cache", "parse_mode", "proto",
+          "exec#", "parse_ms", "analyze_ms", "plan_ms",
+          "exec_ms", "eval_ms", "gcp_ms", "vi#", "vi_ms",
+          "hv#", "hv_ms", "est_QPS", "CSV_RPS", "run_date",
+          "plan_mode", "search_cfg"]
+
+# 聚合时按均值合并的数值列: 列下标 -> 小数位(0 表示取整; exec#/vi#/hv# 为条数)
+_AVG_COLS = {7: 1, 8: 3, 9: 3, 10: 3, 11: 3, 12: 4, 13: 4, 14: 1, 15: 3, 16: 1, 17: 3, 18: 0, 19: 0}
+
+
+def _avg_str(vals, nd):
+    """均值格式化: 无有效值 -> "-"; 整数列(nd=0 或均值恰为整数)输出整数。"""
+    if not vals:
+        return "-"
+    a = sum(vals) / len(vals)
+    if nd == 0 or abs(a - round(a)) < 1e-9:
+        return f"{int(round(a))}"
+    return f"{a:.{nd}f}"
+
+
+def analyze_batch(pids, pid_data, grid, per_sql, combos, table, dim=None):
+    """对单个连续批次(一轮基准运行)构建格子并产出分析行, 返回 rows 列表(无效时为 [])。
+
+    从原 main 内联逻辑抽出, 供单批次与 --aggregate 多批次逐批分析共用。
+    """
+    if grid.get("layout") == "dynamic":
+        # 日志驱动: SQL_type 顺序/缓存档/执行次数均按日志动态切分(见函数 docstring);
+        # raw_phase="head" 表示 cache_major 的前导 raw 段(预热 + 各组合主跑/探针)。
+        cells, grid = build_cells_sql_dynamic(pids, pid_data, raw_phase=grid.get("raw_phase"))
+    elif grid.get("layout") == "cache_major":
+        cells = build_cells_cache_major(pids, pid_data, grid)
+    else:
+        cells = build_cells(pids, pid_data, grid, per_sql)
+    if not cells:
+        print("[WARN] 无有效格子, 未生成 CSV。", file=sys.stderr)
+        return []
+    if grid.get("layout") != "dynamic" and grid_pid_count(grid) != len(pids):
+        print(f"  (warn) 日志 PID 数 {len(pids)} 与 config 网格预期 "
+              f"{grid_pid_count(grid)} 不一致(截断/配置变更)", file=sys.stderr)
+
+    rows, i = [], 0
+    # 输出顺序按格子内首个 PID 的开始时间(chronological): raw(cache=0) 档在日志里
+    # 夹在 auto 与 custom 之间, 不能因为它后建格就统一排到末尾。
+    def _cell_ts(item):
+        cell = item[1]
+        ts = [pid_data[p]["ts_first"] for sp in cell["searches"] for p in sp]
+        return min(ts) if ts else ""
+
+    for key, cell in sorted(cells.items(), key=_cell_ts):
+        sql, cache, rc, pm = key        # pm 为 "" 表示未配置/未记录 parse_mode
+        # assigns_roles 已把每格的 PID 按 searcher 顺序切好; 一个 searcher 一行
+        for si, s_pids in enumerate(cell["searches"]):
+            if not s_pids:
+                continue                # 网格校正后可能留下空 searcher 槽位
+            s_recs = [pid_data[p] for p in s_pids]
+            ss = summarize(s_recs, cache)   # 跨该 searcher 的 search PID 池化统计
+            searcher = grid["searchers"][si] if si < len(grid["searchers"]) else None
+            s_mode = infer_plan_mode(s_recs)
+
+            # 缓存档位与 PLAN_CACHE_TRACE 动作交叉校验(cache=0 无 trace, 跳过)。
+            expected_mode = {1: "auto", 2: "custom", 3: "generic"}.get(int(cache))
+            if expected_mode and s_mode not in ("-", expected_mode):
+                print(f"  (warn) {sql} cache={cache}: 日志动作推断为 {s_mode}, "
+                      f"config 期望 {expected_mode}", file=sys.stderr)
+
+            info = combo_lookup(sql, cache, rc, pm, searcher, combos, table, dim)
+            rps = _num((info or {}).get("qps"))
+            # 单条查询的总执行耗时 = parse + analyze + plan + exec(毫秒, 各项取
+            # 去首样本均值); 串行执行时 QPS ≈ 1000 / 总耗时(ms)。
+            # 不再用 “条数 / 测试时长”: 条数与时长都受批次影响(实测同一格在两轮
+            # 里可能分别是 10s/10000 条与 20s/20000 条), 相除后各格会退化成同一个
+            # 数; 单条耗时与并发无关, 逐格可比。
+            total_ms = sum(v for v in (ss.get("parse_avg"), ss.get("analyze_avg"),
+                                       ss.get("plan_avg"), ss.get("exec_avg"))
+                           if v is not None)
+            est_qps = (1000.0 / total_ms) if total_ms else None
+
+            i += 1
+            if rps and est_qps and abs(est_qps - rps) / rps > 0.20:
+                print(f"  (warn) #{i} {sql} cache={cache} rc={rc} mode={pm or '-'}: "
+                      f"est_QPS={est_qps:.0f} 与 CSV_RPS={rps:.0f} 偏差 >20%",
+                      file=sys.stderr)
+            # 出现过 execute_query 即视为 prepared 协议; 否则为简单查询协议
+            proto = "prep" if ss.get("eq_count") else "simple"
+            rows.append([
+                i, ",".join(s_pids), sql, cache, rc, pm, proto,
+                ss.get("exec_count"),              # 向量查询条数
+                fmt(ss.get("parse_avg")),          # ms, 去首样本均值
+                fmt(ss.get("analyze_avg")),        # ms
+                fmt(ss.get("plan_avg")),           # ms
+                fmt(ss.get("exec_avg")),           # ms
+                fmt(ss.get("eval_avg"), 4),        # ms, 保留 4 位(通常很小)
+                fmt(ss.get("gcp_avg"), 4),         # ms, 保留 4 位
+                ss.get("vi_count"),                # 向量转换次数(vector_in/array_to_vector)
+                fmt(ss.get("vi_avg")),             # ms(旧版无向量事件日志恒 "-")
+                ss.get("hv_count"),                # halfvec_in 次数
+                fmt(ss.get("hv_avg")),             # ms(旧版无向量事件日志恒 "-")
+                f"{est_qps:.0f}" if est_qps else "-",   # 次/秒; 0/None 均输出 "-"
+                f"{rps:.0f}" if rps else "-",           # 次/秒(取自结果 CSV)
+                s_recs[0]["ts_first"][:10],        # 该 searcher 首 PID 的日期
+                s_mode,
+                grid["labels"][si] if si < len(grid["labels"]) else "-",
+            ])
+    return rows
+
+
+def merge_batch_rows(all_rows):
+    """跨批次(多轮同负载)合并分析行: 按格子键平均数值列, 其他列取最早批次值。
+
+    格子键 = (sql_type, cache, res_cache, parse_mode, plan_mode, search_cfg);
+    PID 列合并去重; proto 出现过 prep 即 prep; "#" 按合并后顺序重排。
+    """
+    buckets = {}
+    for rows in all_rows:
+        for row in rows:
+            key = (row[2], row[3], row[4], row[5], row[21], row[22])
+            buckets.setdefault(key, []).append(row)
+    merged = []
+    for key, rs in buckets.items():          # py3.7+ dict 保持首次出现顺序
+        first = rs[0]
+        out = [0, "", first[2], first[3], first[4], first[5],
+               "prep" if any(r[6] == "prep" for r in rs) else "simple"]
+        for c, nd in _AVG_COLS.items():
+            vals = []
+            for r in rs:
+                try:
+                    vals.append(float(r[c]))
+                except (TypeError, ValueError):
+                    pass
+            out.append(_avg_str(vals, nd))
+        out.append(first[20])                # run_date: 最早批次日期
+        out.append(first[21])
+        out.append(first[22])
+        # PID 列: 跨批次去重合并(数量大但仅为溯源信息)
+        out[1] = ",".join(dict.fromkeys(p for r in rs for p in r[1].split(",")))
+        merged.append(out)
+    for i, row in enumerate(merged, 1):
+        row[0] = i
+    return merged
 
 
 def main():
@@ -1063,25 +1774,32 @@ def main():
     ap = argparse.ArgumentParser(description="汇总 pgvector 时序日志并与结果 CSV 交叉验证。")
     ap.add_argument("--log", default=LOG_PATH, help="PostgreSQL 日志路径")
     ap.add_argument("--csv", default=None,
-                    help="pgvector 结果 CSV 路径(默认 results/csv/pgvector_benchmark_results.csv)")
+                    help="pgvector 结果 CSV 路径(默认 results/csv/"
+                         "pgvector-benchmark-results.csv, 也兼容 run.py 的"
+                         " pgvector_benchmark_results.csv)")
     ap.add_argument("--out", default=None, help="输出 CSV 路径")
     ap.add_argument("--config", default=CONFIG_PATH, help="configurations/config.json 路径")
     ap.add_argument("--engine", default=None,
                     help="被测 pgvector 引擎名(默认按 PID 数与 config 网格自动推断)")
-    ap.add_argument("--test-duration", type=float, default=None,
-                    help="search 时长(秒), 默认取 config/CSV; 用于 est_QPS")
     ap.add_argument("--min-records", type=int, default=MIN_PID_RECORDS,
-                    help="PID 最少计时记录数, 低于此值才剔除(默认 1, 即保留只有十余条"
-                         "记录的截断 PID; 切勿用 40 之类的阈值, 否则 PID 数对不上网格)")
+                    help="[兼容保留] 额外的 PID 计时行数下限, 仅在 >1 时生效; 搜索/"
+                         "非搜索 PID 的判定已改为按向量转换事件数(vector_in/halfvec_in/"
+                         "array_to_vector 事件数 >1), 不再依赖记录数")
     ap.add_argument("--gap-max", type=float, default=GAP_MAX,
                     help="相邻 PID 开始时间差超过该秒数视为新批次, 只取最后一组连续批次(默认 61)")
+    ap.add_argument("--batches", default="last",
+                    help="日志中连续批次的选取: last(默认=旧行为, 仅最后一组) / all(全部) / 正整数N(最后N组)")
+    ap.add_argument("--aggregate", action="store_true",
+                    help="把选中的多个批次(同一负载循环跑多轮的日志)按格子平均合并为一组输出")
     args = ap.parse_args()
 
     if not os.path.exists(args.log):
         print(f"[ERR] 日志不存在: {args.log}", file=sys.stderr)
         return 1
 
-    csv_path = args.csv or os.path.join(RESULTS_DIR, "pgvector_benchmark_results.csv")
+    # 默认用 pgvector-benchmark.sh 的结果 CSV(连字符); run.py 客户端的
+    # pgvector_benchmark_results.csv(下划线)可用 --csv 显式指定。
+    csv_path = args.csv or os.path.join(RESULTS_DIR, "pgvector-benchmark-results.csv")
     cfg = load_config(args.config)
     pid_data = parse_log(args.log, min_records=args.min_records)
     combos = read_combos(csv_path)
@@ -1100,11 +1818,37 @@ def main():
         print(f"  (info) 批次切分阈值按 config 的 test_duration 提高到 {gap_max:.0f}s",
               file=sys.stderr)
     groups = split_contiguous(pids, pid_data, gap_max)
-    pids = groups[-1] if groups else []        # 只分析最后一个连续批次
-    if len(groups) > 1:
-        print(f"  (info) 日志含 {len(groups)} 段时间连续批次, 仅取最后一组 "
-              f"{len(pids)} 个 PID, 丢弃前 {sum(len(g) for g in groups[:-1])} 个",
+    # 布局判定(用全部 PID, 与批次选取无关): sql_major 布局将走日志驱动的动态切格。
+    layout = detect_layout(pids, pid_data)
+    # 批次选取: last=旧行为(仅最后一组); all/N=多组; 多组仅在与 --aggregate 搭配时逐批分析。
+    # cache_major/sql_major 两种日志驱动布局都不依赖批次对齐(慢查询会把同一组合
+    # 的日志按 gap 切成碎片段, 并非真实批次边界), 因此合并全部连续批次再切格。
+    if layout in ("sql_major", "cache_major") and len(groups) > 1:
+        sel_groups = groups
+        print(f"  (info) {layout} 布局按日志动态切分: 合并全部 {len(groups)} 组"
+              f"连续批次(共 {sum(len(g) for g in groups)} 个 PID)", file=sys.stderr)
+    elif not groups:
+        sel_groups = []
+    elif args.batches == "last":
+        sel_groups = groups[-1:]
+    elif args.batches == "all":
+        sel_groups = groups
+    else:
+        sel_groups = groups[-max(1, int(args.batches)):]
+        if len(groups) > 1 and args.batches == "last":
+            print(f"  (info) 日志含 {len(groups)} 段时间连续批次, 仅取最后一组 "
+                  f"{len(sel_groups[-1])} 个 PID, 丢弃前 {sum(len(g) for g in groups[:-1])} 个",
+                  file=sys.stderr)
+    if (len(sel_groups) > 1 and not args.aggregate
+            and layout not in ("sql_major", "cache_major")):
+        print(f"  (warn) 选中 {len(sel_groups)} 组批次但未加 --aggregate, 仅分析最后一组",
               file=sys.stderr)
+        sel_groups = sel_groups[-1:]
+    if layout in ("sql_major", "cache_major"):
+        # 日志驱动切格用全部批次的 PID(表名/网格推断与切格都以全量为准)
+        pids = [p for g in sel_groups for p in g] if sel_groups else []
+    else:
+        pids = sel_groups[-1] if sel_groups else []   # 表/网格推断用最后一个连续批次
     if not pids:
         print("[ERR] 日志中未发现 PGVECTOR_TIMING 记录(日志可能已轮转/截断)。",
               file=sys.stderr)
@@ -1121,107 +1865,87 @@ def main():
         if table:
             print(f"  (warn) 未推断出与日志(sql_type={len(obs_sqls)}, dim={dim}) "
                   f"匹配的 pgvector 表, 复用 CSV 首表: {table}", file=sys.stderr)
-    grid = config_grid(cfg, table) if table else None
-    if not grid:
-        grid = log_grid(pids, pid_data)       # config 不可用: 用日志/约定兜底
-    # 以日志实际的 sql_type 数量/顺序为准, 并在必要时校正每格 PID 数。
-    grid, per_sql = adapt_grid(grid, len(pids), obs_sqls or grid["sql_types"])
+    # 两种布局都走日志驱动的动态切格: sql_type 的数量/顺序、缓存档位、每格执行
+    # 次数都以日志实测为准, config 只用于表名推断与 CSV_RPS 交叉验证。
+    # cache_major(pgvector-benchmark.sh) 的 raw 档集中在全部有名块之前(整表预热
+    # 一次, 再每个组合 主跑+延迟探针), 用 raw_phase="head" 让切格函数单独处理该
+    # 前导段; 旧的"按位置每格 N 个 PID 均分"在探针混入或组合失败时必然错位
+    # (83 个搜索 PID 分 44 格, 余数被丢弃), 已不再使用。
+    per_sql = None
+    grid = {
+        "layout": "dynamic",
+        "raw_phase": "head" if layout == "cache_major" else None,
+        "sql_types": obs_sqls or ["unknown"],
+        "caches": [0, 1, 2, 3],
+        "result_caches": [0],
+        "parse_modes": [""],
+        "search_number": 1,
+        "searchers": [{"params": {}}],
+        "labels": ["-"],
+        "prewarm": 0,
+        "per_cell": 1,
+    }
+    if layout == "cache_major":
+        print("  (info) 检测到 cache_major 布局(pgvector-benchmark.sh 日志): "
+              "raw 档按前导段分组, prep 档按 PLAN_CACHE_TRACE 动作分档", file=sys.stderr)
     # 输出文件名用数据集名: 优先 config 的 dataset, 其次表名, 最后 "unknown"
     dataset = next((i_.get("dataset") or i_.get("name") for i_ in cfg
                     if i_.get("name") == table), table or "unknown")
-    config_td = config_test_duration(cfg, table) if table else None
-    print(f"  table={table} dataset={dataset} dim={dim} "
-          f"grid={len(grid['sql_types'])}sql x {len(grid['caches'])}cache x "
-          f"{len(grid['result_caches'])}rc x {len(grid['parse_modes'])}mode "
-          f"x {len(grid['searchers'])}searcher(sn={grid['search_number']}) "
-          f"= {grid_pid_count(grid)} PID", file=sys.stderr)
+    if grid.get("layout") == "dynamic":
+        print(f"  table={table} dataset={dataset} dim={dim} "
+              f"grid=动态(sql_types={len(grid['sql_types'])}, 档位/轮数按日志切分)",
+              file=sys.stderr)
+    else:
+        print(f"  table={table} dataset={dataset} dim={dim} "
+              f"grid={len(grid['sql_types'])}sql x {len(grid['caches'])}cache x "
+              f"{len(grid['result_caches'])}rc x {len(grid['parse_modes'])}mode "
+              f"x {len(grid['searchers'])}searcher(sn={grid['search_number']}) "
+              f"= {grid_pid_count(grid)} PID", file=sys.stderr)
 
-    cells = build_cells(pids, pid_data, grid, per_sql)
-    if not cells:
-        print("[WARN] 无有效格子, 未生成 CSV。", file=sys.stderr)
-        return 1
-    if grid_pid_count(grid) != len(pids):
-        print(f"  (warn) 日志 PID 数 {len(pids)} 与 config 网格预期 "
-              f"{grid_pid_count(grid)} 不一致(截断/配置变更)", file=sys.stderr)
-
-    # 表头: 所有 *_ms 为毫秒均值; exec#/vi#/hv# 为条数; est_QPS/CSV_RPS 为次/秒;
-    # run_date 为 YYYY-MM-DD(取该 searcher 首个 PID 的日期, 不含时分秒)。
-    header = ["#", "PID", "sql_type", "cache", "res_cache", "parse_mode", "proto",
-              "exec#", "parse_ms", "analyze_ms", "plan_ms",
-              "exec_ms", "eval_ms", "gcp_ms", "vi#", "vi_ms",
-              "hv#", "hv_ms", "est_QPS", "CSV_RPS", "run_date",
-              "plan_mode", "search_cfg"]
-
-    rows, i = [], 0
-    for key, cell in cells.items():
-        sql, cache, rc, pm = key        # pm 为 "" 表示未配置/未记录 parse_mode
-        # assigns_roles 已把每格的 PID 按 searcher 顺序切好; 一个 searcher 一行
-        for si, s_pids in enumerate(cell["searches"]):
-            if not s_pids:
-                continue                # 网格校正后可能留下空 searcher 槽位
-            s_recs = [pid_data[p] for p in s_pids]
-            ss = summarize(s_recs, cache)   # 跨该 searcher 的 search PID 池化统计
-            searcher = grid["searchers"][si] if si < len(grid["searchers"]) else None
-            s_mode = infer_plan_mode(s_recs)
-
-            # 缓存档位与 PLAN_CACHE_TRACE 动作交叉校验(cache=0 无 trace, 跳过)。
-            expected_mode = {1: "auto", 2: "custom", 3: "generic"}.get(int(cache))
-            if expected_mode and s_mode not in ("-", expected_mode):
-                print(f"  (warn) {sql} cache={cache}: 日志动作推断为 {s_mode}, "
-                      f"config 期望 {expected_mode}", file=sys.stderr)
-
-            info = combo_lookup(sql, cache, rc, pm, searcher, combos, table)
-            # 测试时长(秒)优先级: searcher 自身 -> 命令行/config -> 结果 CSV
-            dur = _num((searcher or {}).get("test_duration"))
-            if dur is None:
-                dur = args.test_duration or config_td
-            if dur is None:
-                dur = _num((info or {}).get("test_duration"))
-            rps = _num((info or {}).get("qps"))
-            # search_number 个查询 PID 顺序执行, 每个各跑 dur 秒。
-            est_qps = (ss.get("exec_count") or 0) / (dur * len(s_pids)) if dur else None
-
-            i += 1
-            if rps and est_qps and abs(est_qps - rps) / rps > 0.20:
-                print(f"  (warn) #{i} {sql} cache={cache} rc={rc} mode={pm or '-'}: "
-                      f"est_QPS={est_qps:.0f} 与 CSV_RPS={rps:.0f} 偏差 >20%",
+    if (args.aggregate and len(sel_groups) > 1
+            and grid.get("layout") not in ("dynamic", "cache_major")):
+        # 多批次(同一负载循环跑多轮)聚合: 每批独立建格分析, 再按格子平均合并。
+        # 动态/cache_major 切格不走此路径: pids 已拍平全部批次, 单次切格即为全局收编。
+        all_rows = []
+        for gi, g in enumerate(sel_groups, 1):
+            if layout == "cache_major":
+                # 网格已按日志实测反推(cache 外层), 各轮布局一致, 直接复用
+                grid_g, per_sql_g = grid, per_sql
+            else:
+                grid_g = config_grid(cfg, table) if table else None
+                if not grid_g:
+                    grid_g = log_grid(g, pid_data)    # config 不可用: 用日志/约定兜底
+                grid_g, per_sql_g = adapt_grid(grid_g, len(g),
+                                               obs_sqls or grid_g["sql_types"])
+            rows_g = analyze_batch(g, pid_data, grid_g, per_sql_g, combos, table, dim)
+            if rows_g:
+                print(f"  (info) 批次 {gi}/{len(sel_groups)}: {len(rows_g)} 行",
                       file=sys.stderr)
-            # 出现过 execute_query 即视为 prepared 协议; 否则为简单查询协议
-            proto = "prep" if ss.get("eq_count") else "simple"
-            rows.append([
-                i, ",".join(s_pids), sql, cache, rc, pm, proto,
-                ss.get("exec_count"),              # 向量查询条数
-                fmt(ss.get("parse_avg")),          # ms, 去首样本均值
-                fmt(ss.get("analyze_avg")),        # ms
-                fmt(ss.get("plan_avg")),           # ms
-                fmt(ss.get("exec_avg")),           # ms
-                fmt(ss.get("eval_avg"), 4),        # ms, 保留 4 位(通常很小)
-                fmt(ss.get("gcp_avg"), 4),         # ms, 保留 4 位
-                ss.get("vi_count"),                # 向量转换次数(含 array_to_vector)
-                fmt(ss.get("vi_avg")),             # ms
-                ss.get("hv_count"),                # halfvec_in 次数
-                fmt(ss.get("hv_avg")),             # ms
-                f"{est_qps:.0f}" if est_qps else "-",   # 次/秒; 0/None 均输出 "-"
-                f"{rps:.0f}" if rps else "-",           # 次/秒(取自结果 CSV)
-                s_recs[0]["ts_first"][:10],        # 该 searcher 首 PID 的日期
-                s_mode,
-                grid["labels"][si] if si < len(grid["labels"]) else "-",
-            ])
-
-    if not rows:
-        print("[WARN] 无有效格子, 未生成 CSV。", file=sys.stderr)
-        return 1
+                all_rows.append(rows_g)
+        if not all_rows:
+            print("[WARN] 无有效格子, 未生成 CSV。", file=sys.stderr)
+            return 1
+        rows = merge_batch_rows(all_rows)
+    else:
+        rows = analyze_batch(pids, pid_data, grid, per_sql, combos, table, dim)
+        if not rows:
+            print("[WARN] 无有效格子, 未生成 CSV。", file=sys.stderr)
+            return 1
 
     out_path = args.out or os.path.join(RESULTS_DIR, f"pgvector_log_analysis-{dataset}.csv")
     # newline="" 交给 csv 模块自行处理换行, 避免 Windows 风格空行; 所有字段转字符串
     with open(out_path, "w", encoding="utf-8", newline="") as f:
         w = csv.writer(f)
-        w.writerow(header)
+        w.writerow(HEADER)
         for row in rows:
             w.writerow([str(x) for x in row])
 
-    # 预期行数 = 格子数 × 每格 searcher 数; 不等通常意味着日志前缀/截断
-    expected = grid_cell_count(grid) * len(grid["searchers"])
+    # 预期行数 = 格子数 × 每格 searcher 数; 不等通常意味着日志前缀/截断。
+    # 动态切格下行数即格子数, 无需对齐提示。
+    if grid.get("layout") == "dynamic":
+        expected = len(rows)
+    else:
+        expected = grid_cell_count(grid) * len(grid["searchers"])
     msg = f"[OK] 已保存: {out_path}  表={table}  {len(rows)} 行"
     if len(rows) != expected:
         msg += f"  (预期 {expected} 行, 前缀/截断所致)"

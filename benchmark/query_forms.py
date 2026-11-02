@@ -44,7 +44,7 @@ import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any
 
 from .generate_sql_files import (
     CLICKHOUSE_SQL_TYPES,
@@ -59,15 +59,6 @@ from .generate_sql_files import (
 
 
 # ---- 参数解析与配置加载 ----
-
-def _int_list(value: str) -> list[int]:
-    """把 ``"1,2,3"`` 形式的参数解析为 ``[1, 2, 3]``。
-
-    设计为 argparse 的 ``type`` 回调；空片段会被忽略，非法整数由 ``int``
-    自行抛错。
-    """
-    return [int(x.strip()) for x in value.split(",") if x.strip()]
-
 
 def _load_targets(path: str) -> list[dict[str, Any]]:
     """读取目标配置，返回带 ``engine`` 字段的字典列表。

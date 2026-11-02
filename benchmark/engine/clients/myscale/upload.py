@@ -18,16 +18,14 @@ MyScale 兼容 ClickHouse 协议，因此这里有两套客户端：
 
 import time
 import sys
+import json
 from typing import List, Optional
 
 import clickhouse_connect
-from clickhouse_connect.driver.client import Client
 from clickhouse_driver import Client as DriverClient
-import json
 
 from benchmark.cli_output import sql, stage, status, step, set_live_line, warn
 from engine.base_client import BaseUploader
-from engine.base_client.utils import format_bytes
 from engine.clients.myscale.config import *
 
 
@@ -135,10 +133,7 @@ class MyScaleUploader(BaseUploader):
                 for col_name in list(metadata[i].keys()):
                     value = metadata[i][col_name]
                     # Determining if the data is a dictionary type of latitude and longitude.
-                    # 注意：``('lon' and 'lat')`` 先求值成 ``'lat'``，所以实际只校验了
-                    # 是否含 'lat'；含 'lat' 但缺 'lon' 时会取到 None。保持现状以免
-                    # 改变现有行为，这里仅作说明。
-                    if isinstance(value, dict) and ('lon' and 'lat') in list(value.keys()):
+                    if isinstance(value, dict) and 'lon' in value and 'lat' in value:
                         # Keep the correct order of longitude and latitude.
                         temp_list.append(tuple([value.get('lon'), value.get('lat')]))
                     else:
@@ -175,9 +170,7 @@ class MyScaleUploader(BaseUploader):
         """
         stage("POST UPLOAD")
 
-        # 注意这里 get 的默认值是隐式 None（多写了一个逗号），等价于
-        # upload_params.get("_only_text_search")，即缺省视为 False。
-        only_text_search = cls.upload_params.get("_only_text_search",)
+        only_text_search = cls.upload_params.get("_only_text_search", False)
         result_group = str(cls.upload_params.get("_result_group", "") or "")
         # hybrid_search 数据集本应带索引配置；如果 ClientFactory 判定为纯文本，
         # 说明配置里没给 index_type，明确告警而不是静默少建一个索引。

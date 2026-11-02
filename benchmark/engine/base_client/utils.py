@@ -4,7 +4,6 @@
 告警）共同使用。
 """
 
-import math
 from typing import Any, Iterable, List, Optional
 import os
 from benchmark.dataset_reader.base_reader import Record
@@ -48,56 +47,6 @@ def intersect_precision(actual_ids: List[int], expected_ids: List[int], limit: i
     actual_set = set(actual_ids[:limit])
     intersect_len = len(actual_set.intersection(expected_set))
     return intersect_len / ans_len
-
-
-# Average Precision, AP
-def average_precision(actual_ids: List[int], expected_ids: List[int], limit: int):
-    """平均精度 AP：在每个命中位置累加当时的前缀精度，最后除以可比较条数。
-
-    与传统 AP 的差异在于分母固定为 ``ans_len``（而非 ground truth 总数），
-    便于在不同样本量之间横向比较；无命中时返回 0。
-    """
-    ans_len = min(len(actual_ids), len(expected_ids), limit)
-    expected_set = set(expected_ids[:limit])
-
-    precision_sum = 0
-    num_hits = 0
-
-    for i, id in enumerate(actual_ids[:limit]):
-        if id in expected_set:
-            num_hits += 1
-            precision_sum += num_hits / (i + 1)
-
-    if num_hits == 0:
-        return 0
-
-    return precision_sum / ans_len
-
-
-# Discounted Cumulative Gain, DCG
-def dcg(actual_ids: List[int], expected_ids: List[int], limit: int, expected_scores: List[Any] = None):
-    """折扣累积增益：命中位置的贡献为 ``1 / log2(rank + 1)``。
-
-    注意当前实现把相关性统一记为 1，``expected_scores`` 形参保留但未使用
-    （原按分数加权的写法被注释掉了），因此只反映"是否命中"与"排名先后"。
-    """
-    dcg_score = 0
-    for i, id in enumerate(actual_ids[:limit]):
-        if id in expected_ids[:limit]:
-            # rel_score = expected_scores[expected_ids.index(id)]
-            rel_score = 1
-            dcg_score += rel_score / math.log2(i + 2)
-    return dcg_score
-
-
-# Normalized Discounted Cumulative Gain, NDCG
-def ndcg(actual_ids: List[int], expected_ids: List[int], limit: int):
-    """归一化 DCG：用"完美排序"的 DCG 作分母；分母为 0 时返回 0 防除零。"""
-    idcg_score = dcg(expected_ids, expected_ids, limit)
-    dcg_score = dcg(actual_ids, expected_ids, limit)
-    if idcg_score == 0:
-        return 0
-    return dcg_score / idcg_score
 
 
 # MRR

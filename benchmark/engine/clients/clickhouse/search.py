@@ -16,7 +16,6 @@ import json
 import struct
 from typing import List, Optional, Tuple
 import clickhouse_connect
-from clickhouse_connect.driver.client import Client
 from clickhouse_driver import Client as DriverClient
 
 from benchmark.dataset_reader.base_reader import Query

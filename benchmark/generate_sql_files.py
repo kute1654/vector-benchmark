@@ -54,7 +54,6 @@ Python QPS 对比与这里写出的 .sql 文件使用完全相同的 SQL 形态�
 import argparse
 import json
 import sys
-import random
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 

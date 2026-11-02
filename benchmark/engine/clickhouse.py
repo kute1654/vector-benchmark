@@ -12,7 +12,7 @@
 基础上覆盖索引创建与查询形态。
 """
 
-from typing import Any, Dict, List, Optional, Tuple
+from typing import List, Optional, Tuple
 
 from .base import BaseEngine
 

@@ -9,7 +9,7 @@
 即当前 JSON 中该字段通常仍是原始 dict 列表。
 """
 
-from typing import Optional, Dict, Any, List
+from typing import Optional, Dict, List
 from dataclasses import dataclass, field
 
 

@@ -6,13 +6,18 @@
 # Examples:
 #   ENGINE=polardb ./polardb-pase-query-forms-benchmark.sh Benchmark_768_1m
 #
-# 手动选择测试对象 (优先级: 环境变量 > 位置参数 > 交互选择):
-#   * 数据表: 第一个位置参数, 或用 TABLE=Benchmark_768_1m
+# 手动选择测试对象 (优先级: 环境变量 > 位置参数/-t 序号 > 交互选择):
+#   * 数据表: 位置参数表名 (可多个), 或 -t <序号序列> 按 `-l` 列出的编号选择,
+#     或用 TABLE=Benchmark_768_1m (单表, 优先级最高)
+#   * 随机抽样条数: -n <数值序列> 覆盖 ROW_COUNTS/ROW_COUNTS_OVERRIDE
 #   * 索引类型: INDEX_TYPE=hnsw (默认) 或 INDEX_TYPE=ivfflat。
 #     两者都省略且为标准终端时, 会弹出菜单让你手选。
 #   例如:
 #     TABLE=Benchmark_768_1m INDEX_TYPE=hnsw ./polardb-pase-query-forms-benchmark.sh
 #     ./polardb-pase-query-forms-benchmark.sh Benchmark_768_1m   # 表用位置参数, 索引类型交互/默认 hnsw
+#     ./polardb-pase-query-forms-benchmark.sh -l                 # 列出含向量列的表及序号
+#     ./polardb-pase-query-forms-benchmark.sh -t "1 2" -n "10 100"
+#     ./polardb-pase-query-forms-benchmark.sh -h                 # 完整帮助
 #
 # Useful overrides:
 #   PSQL=/path/to/psql PGBENCH=/path/to/pgbench HOST=127.0.0.1 PORT=5432 \
@@ -375,24 +380,91 @@ pick_index_type_by_prompt() {
     done
 }
 
+# ---- 命令行参数帮助与数值输入 (与 pgvector-benchmark.sh 同一套规则) ----
+usage() {
+    local self; self=$(basename "$0")
+    cat >&2 <<EOF
+用法: $self [选项] [表名 ...]
+
+选项:
+  -t, --tables <序号序列>     数据表序号, 空格/逗号分隔 (如 "1 3 5" 或 "1,3,5")
+  -n, --row-counts <数值序列> 随机抽样向量条数, 空格/逗号分隔 (如 "10 100")
+  -l, --list                 列出库中含向量列的表及序号后退出
+  -h, --help                 显示本帮助
+  位置参数                    表名 (与 -t 二选一, 可混用; TABLE= 环境变量优先)
+
+索引类型仍由 INDEX_TYPE= 指定 (hnsw|ivfflat), 未指定且为标准终端时交互选择。
+
+示例:
+  $self -l
+  $self -t "1 2" -n "10 100"
+  $self -n "10 100" Benchmark_768_1m
+EOF
+    exit "${1:-0}"
+}
+
+# 列出 public 下含 float4[]/real[] 向量列的表/字段/维度并带行号 (供 -l 与 -t 序号使用)
+list_tables_numbered() {
+    local names i=0 tname tcol dim
+    names=$(list_vector_tables)
+    if [ -z "$names" ]; then
+        echo "错误: 未找到任何含向量列 (float4[]/real[]) 的表 (public)" >&2
+        return 1
+    fi
+    while IFS= read -r tname; do
+        [ -z "$tname" ] && continue
+        i=$((i+1))
+        tcol=$(detect_vector_column "$tname" 2>/dev/null || echo "")
+        dim=$(detect_vector_dimension "$tname" "$tcol")
+        printf '%3d. %s (col=%s dim=%s)\n' "$i" "$tname" "${tcol:-?}" "${dim:-?}"
+    done <<< "$names"
+}
+
+# 按序号序列解析出表名列表 (空格分隔写到 stdout); 序号不合法/越界时提示并忽略,
+# 无有效表时输出为空。
+resolve_table_numbers() {
+    local tables_info="$1" nums="$2" out="" n line total
+    total=$(printf '%s\n' "$tables_info" | grep -c . || true)
+    [ "$total" -eq 0 ] && { echo "错误: 未找到任何含向量列的表" >&2; return 1; }
+    for n in $(echo "$nums" | tr ',' ' '); do
+        case "$n" in
+            ''|*[!0-9]*) echo "  ⚠ 忽略非法序号: '$n'" >&2 ;;
+            *)
+                if [ "$n" -ge 1 ] && [ "$n" -le "$total" ] 2>/dev/null; then
+                    line=$(printf '%s\n' "$tables_info" | awk -v n="$n" 'NR==n' | awk '{print $2}')
+                    [ -n "$line" ] && out="${out:+$out }$line"
+                else
+                    echo "  ⚠ 序号 $n 超出范围 (1-$total), 已忽略" >&2
+                fi ;;
+        esac
+    done
+    echo "$out"
+}
+
 # 统一解析"数据表 + 索引类型":
-#   优先级: 环境变量 TABLE/INDEX_TYPE > 位置参数 > 交互选择(tty) / 报错退出。
+#   优先级: 环境变量 TABLE/INDEX_TYPE > 位置参数/-t 序号 (可多表) > 交互选择(tty) / 报错退出。
 # 并把 TABLES 数组与 (HASH)DISTANCE_OP 默认值按索引类型调整好。后续主循环
 # 一律遍历 ${TABLES[@]}。
 resolve_tables_and_index_type() {
-    local tbl="${TABLE:-}"
-    if [ -z "$tbl" ] && [ $# -ge 1 ]; then
-        tbl="$1"
-    fi
-    if [ -z "$tbl" ]; then
+    if [ -n "${TABLE:-}" ]; then
+        TABLES=( "$TABLE" )
+    elif [ $# -gt 0 ]; then
+        # 位置参数/-t 序号解析出的表名, 支持多表 (索引类型对全部表生效)
+        TABLES=()
+        local t
+        for t in "$@"; do
+            TABLES+=("$t")
+        done
+    else
         if [ -t 0 ]; then
+            local tbl
             tbl="$(pick_table_by_prompt)" || exit 1
+            TABLES=( "$tbl" )
         else
-            echo "错误: 请用第一个参数或 TABLE= 指定数据表, 并用 INDEX_TYPE= 指定索引类型 (hnsw|ivfflat)" >&2
-            exit 1
+            echo "错误: 请用位置参数/-t 序号或 TABLE= 指定数据表, 并用 INDEX_TYPE= 指定索引类型 (hnsw|ivfflat)" >&2
+            usage 1
         fi
     fi
-    TABLES=( "$tbl" )
 
     local itype="${INDEX_TYPE:-}"
     if [ -z "$itype" ]; then
@@ -1194,8 +1266,25 @@ if ! command -v "$PGBENCH" >/dev/null 2>&1; then
     exit 1
 fi
 
-# 解析数据表 + 索引类型 (TABLE/INDEX_TYPE 环境变量 > 位置参数 > 交互选择/报错)
-resolve_tables_and_index_type "$@"
+# ---- 命令行参数解析 (-t/-n/-l/-h + 位置表名; 仅语法解析, 不访问数据库) ----
+ORIGINAL_ARGS="$*"
+TABLE_NUMS="" ROW_COUNTS_CLI="" DO_LIST=0
+POS_TABLES=()
+while [ "$#" -gt 0 ]; do
+    case "$1" in
+        -t|--tables)
+            if [ -z "${2:-}" ]; then echo "错误: -t 缺少序号序列" >&2; usage 1; fi
+            TABLE_NUMS="$2"; shift 2 ;;
+        -n|--row-counts)
+            if [ -z "${2:-}" ]; then echo "错误: -n 缺少数值序列" >&2; usage 1; fi
+            ROW_COUNTS_CLI="$2"; shift 2 ;;
+        -l|--list)   DO_LIST=1; shift ;;
+        -h|--help)   usage 0 ;;
+        --)          shift; POS_TABLES+=("$@"); break ;;
+        -*)          echo "未知选项: $1" >&2; usage 1 ;;
+        *)           POS_TABLES+=("$1"); shift ;;
+    esac
+done
 
 CONN_TEST="$(timeout 5 env PGPASSWORD="$PASSWORD" "$PSQL" -h "$HOST" -p "$PORT" -U "$USER" -d "$DATABASE" -t -A -c "SELECT 1" 2>&1)"
 conn_exit=$?
@@ -1210,9 +1299,40 @@ if [ "$CONN_TEST" != "1" ]; then
     echo "  psql 路径: $(command -v "$PSQL" 2>/dev/null || echo "$PSQL (未找到)")" >&2
     echo "  错误详情: $CONN_TEST" >&2
     echo "  提示: 如果 PolarDB 自带的 psql 与系统 psql 不同, 请设置 PSQL 和 PGBENCH 环境变量, 例如:" >&2
-    echo "        PSQL=\$HOME/tmp_polardb_pg_17_base/bin/psql PGBENCH=\$HOME/tmp_polardb_pg_17_base/bin/pgbench $0 $*" >&2
+    echo "        PSQL=\$HOME/tmp_polardb_pg_17_base/bin/psql PGBENCH=\$HOME/tmp_polardb_pg_17_base/bin/pgbench $0 ${ORIGINAL_ARGS:-<表名>}" >&2
     exit 1
 fi
+
+if [ "$DO_LIST" -eq 1 ]; then
+    echo "库中含向量列的表:" >&2
+    list_tables_numbered || exit 1
+    exit 0
+fi
+
+# 随机抽样条数数值输入 (-n): 优先级高于 ROW_COUNTS/ROW_COUNTS_OVERRIDE
+if [ -n "$ROW_COUNTS_CLI" ]; then
+    ROW_COUNTS=()
+    for n in $(echo "$ROW_COUNTS_CLI" | tr ',' ' '); do
+        case "$n" in
+            ''|*[!0-9]*) echo "  ⚠ 忽略非法抽样数量: '$n'" >&2 ;;
+            *) if [ "$n" -gt 0 ] 2>/dev/null; then ROW_COUNTS+=("$n"); else
+                   echo "  ⚠ 忽略非正整数抽样数量: '$n'" >&2
+               fi ;;
+        esac
+    done
+    [ "${#ROW_COUNTS[@]}" -eq 0 ] && { echo "错误: -n 未提供有效抽样条数" >&2; usage 1; }
+fi
+
+# 数据表序号数值输入 (-t): 解析为表名, 与位置参数表名可混用 (TABLE= 环境变量优先级更高)
+if [ -n "$TABLE_NUMS" ]; then
+    tables_info=$(list_tables_numbered) || exit 1
+    resolved=$(resolve_table_numbers "$tables_info" "$TABLE_NUMS")
+    if [ -z "$resolved" ]; then echo "错误: -t 未解析出任何有效表" >&2; exit 1; fi
+    for t in $resolved; do POS_TABLES+=("$t"); done
+fi
+
+# 解析数据表 + 索引类型 (TABLE/INDEX_TYPE 环境变量 > 位置参数/-t 序号 > 交互选择/报错)
+resolve_tables_and_index_type "${POS_TABLES[@]}"
 
 SERVER_VERSION="$(client_query "SELECT current_setting('server_version')")"
 

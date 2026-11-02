@@ -15,15 +15,14 @@
         "normal",
         "cast",
         "cast_array",
-        "raw_bytes",
-        "raw_bytes_x"
+        "raw_bytes"
       ],
-      "search_number": 1
+      "search_number": 5
     },
     "search_params": {
-      "parallel": 1,
+      "parallel": [1,8],
       "top": [10],
-      "test_duration": 1,
+      "test_duration": 10,
       "params": {
         "ef_s": [
           100
@@ -47,15 +46,14 @@
         "normal",
         "cast",
         "cast_array",
-        "raw_bytes",
-        "raw_bytes_x"
+        "raw_bytes"
       ],
-      "search_number": 1
+      "search_number": 5
     },
     "search_params": {
-      "parallel": 1,
+      "parallel": [1,8],
       "top": [10],
-      "test_duration": 1,
+      "test_duration": 10,
       "params": {
         "ef_s": [
           100
@@ -79,15 +77,14 @@
         "normal",
         "cast",
         "cast_array",
-        "raw_bytes",
-        "raw_bytes_x"
+        "raw_bytes"
       ],
-      "search_number": 1
+      "search_number": 5
     },
     "search_params": {
-      "parallel": 1,
+      "parallel": [1,8],
       "top": [10],
-      "test_duration": 1,
+      "test_duration": 10,
       "params": {
         "ef_s": [
           100
@@ -111,15 +108,14 @@
         "normal",
         "cast",
         "cast_array",
-        "raw_bytes",
-        "raw_bytes_x"
+        "raw_bytes"
       ],
-      "search_number": 1
+      "search_number": 5
     },
     "search_params": {
-      "parallel": 1,
+      "parallel": [1,8],
       "top": [10],
-      "test_duration": 1,
+      "test_duration": 10,
       "params": {
         "ef_s": [
           100
@@ -143,15 +139,14 @@
         "normal",
         "cast",
         "cast_array",
-        "raw_bytes",
-        "raw_bytes_x"
+        "raw_bytes"
       ],
-      "search_number": 1
+      "search_number": 5
     },
     "search_params": {
-      "parallel": 1,
+      "parallel": [1,8],
       "top": [10],
-      "test_duration": 1,
+      "test_duration": 10,
       "params": {
         "ef_s": [
           100
@@ -175,15 +170,14 @@
         "normal",
         "cast",
         "cast_array",
-        "raw_bytes",
-        "raw_bytes_x"
+        "raw_bytes"
       ],
-      "search_number": 1
+      "search_number": 5
     },
     "search_params": {
-      "parallel": 1,
+      "parallel": [1,8],
       "top": [10],
-      "test_duration": 1,
+      "test_duration": 10,
       "params": {
         "ef_s": [
           100
@@ -207,15 +201,14 @@
         "normal",
         "cast",
         "cast_array",
-        "raw_bytes",
-        "raw_bytes_x"
+        "raw_bytes"
       ],
-      "search_number": 1
+      "search_number": 5
     },
     "search_params": {
-      "parallel": 1,
+      "parallel": [1,8],
       "top": [10],
-      "test_duration": 1,
+      "test_duration": 10,
       "params": {
         "ef_s": [
           100
@@ -239,15 +232,14 @@
         "normal",
         "cast",
         "cast_array",
-        "raw_bytes",
-        "raw_bytes_x"
+        "raw_bytes"
       ],
-      "search_number": 1
+      "search_number": 5
     },
     "search_params": {
-      "parallel": 1,
+      "parallel": [1,8],
       "top": [10],
-      "test_duration": 1,
+      "test_duration": 10,
       "params": {
         "ef_s": [
           100
@@ -271,15 +263,14 @@
         "normal",
         "cast",
         "cast_array",
-        "raw_bytes",
-        "raw_bytes_x"
+        "raw_bytes"
       ],
-      "search_number": 1
+      "search_number": 5
     },
     "search_params": {
-      "parallel": 1,
+      "parallel": [1,8],
       "top": [10],
-      "test_duration": 1,
+      "test_duration": 10,
       "params": {
         "ef_s": [
           100
@@ -303,15 +294,14 @@
         "normal",
         "cast",
         "cast_array",
-        "raw_bytes",
-        "raw_bytes_x"
+        "raw_bytes"
       ],
-      "search_number": 1
+      "search_number": 5
     },
     "search_params": {
-      "parallel": 1,
+      "parallel": [1,8],
       "top": [10],
-      "test_duration": 1,
+      "test_duration": 10,
       "params": {
         "ef_s": [
           100
@@ -343,18 +333,17 @@
         "text_literal",
         "array_int_cast",
         "array_real_cast",
-        "halfvec_literal",
         "with_array_cast"
       ],
-      "search_number": 1
+      "search_number": 5
     },
     "search_params": {
-      "parallel": [1],
-      "top": [1,2,5,10,20,50,100],
-      "test_duration": 1,
+      "parallel": [1,8],
+      "top": [10],
+      "test_duration": 10,
       "params": {
         "ef_s": [
-          20,50,100,200,500,1000
+          100
         ]
       }
     }
@@ -380,18 +369,17 @@
         "text_literal",
         "array_int_cast",
         "array_real_cast",
-        "halfvec_literal",
         "with_array_cast"
       ],
-      "search_number": 1
+      "search_number": 5
     },
     "search_params": {
-      "parallel": [1],
-      "top": [1,2,5,10,20,50,100],
-      "test_duration": 1,
+      "parallel": [1,8],
+      "top": [10],
+      "test_duration": 10,
       "params": {
         "ef_s": [
-          20,50,100,200,500,1000
+          100
         ]
       }
     }
@@ -417,18 +405,17 @@
         "text_literal",
         "array_int_cast",
         "array_real_cast",
-        "halfvec_literal",
         "with_array_cast"
       ],
-      "search_number": 1
+      "search_number": 5
     },
     "search_params": {
-      "parallel": [1],
-      "top": [1,2,5,10,20,50,100],
-      "test_duration": 1,
+      "parallel": [1,8],
+      "top": [10],
+      "test_duration": 10,
       "params": {
         "ef_s": [
-          20,50,100,200,500,1000
+          100
         ]
       }
     }
@@ -454,18 +441,17 @@
         "text_literal",
         "array_int_cast",
         "array_real_cast",
-        "halfvec_literal",
         "with_array_cast"
       ],
-      "search_number": 1
+      "search_number": 5
     },
     "search_params": {
-      "parallel": [1],
-      "top": [1,2,5,10,20,50,100],
-      "test_duration": 1,
+      "parallel": [1,8],
+      "top": [10],
+      "test_duration": 10,
       "params": {
         "ef_s": [
-          20,50,100,200,500,1000
+          100
         ]
       }
     }
@@ -491,18 +477,17 @@
         "text_literal",
         "array_int_cast",
         "array_real_cast",
-        "halfvec_literal",
         "with_array_cast"
       ],
-      "search_number": 1
+      "search_number": 5
     },
     "search_params": {
-      "parallel": [1],
-      "top": [1,2,5,10,20,50,100],
-      "test_duration": 1,
+      "parallel": [1,8],
+      "top": [10],
+      "test_duration": 10,
       "params": {
         "ef_s": [
-          20,50,100,200,500,1000
+          100
         ]
       }
     }

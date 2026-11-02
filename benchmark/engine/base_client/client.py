@@ -312,38 +312,6 @@ class BaseClient:
                 json.dumps(payload, indent=2)
             )
 
-    def save_upload_results(self, results: dict, upload_params: dict, result_group: str):
-        """单独保存写入阶段的统计（跳过搜索的实验，或排障时使用）。"""
-        now = datetime.now()
-        timestamp = now.strftime("%Y-%m-%d-%H-%M-%S")
-        experiments_file = f"{self.name}-upload-{timestamp}.json"
-        step(f"saved upload results: results/json/{experiments_file}")
-        with open(JSON_DIR / experiments_file, "w") as out:
-            run_date = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-            meta = {**self.meta, "run_date": run_date}
-            index_create_parameter_output = {}
-            for key, value in (self.index_create_parameter or {}).items():
-                if value is None:
-                    continue
-                if isinstance(value, dict) and not value:
-                    continue
-                index_create_parameter_output[key] = value
-            parallel_val = upload_params.get("parallel", 16)
-            batch_size_val = upload_params.get("batch_size", 256)
-            upload_stats = {
-                "result_group": result_group,  # single search or hybrid search
-                "meta": meta,
-                "results": results,
-            }
-            if index_create_parameter_output:
-                upload_stats["index_create_parameter"] = index_create_parameter_output
-            if not (parallel_val == 16 and batch_size_val == 256):
-                upload_stats["data_upload_parameter"] = {
-                    "parallel": parallel_val,
-                    "batch_size": batch_size_val
-                }
-            out.write(json.dumps(upload_stats, indent=2))
-
     def save_recall_only_results(self, results: list[dict]):
         """保存仅召回模式的逐条结果（列表而非单条汇总，便于定位漏召回样本）。"""
         now = datetime.now()
@@ -1422,15 +1390,7 @@ class BaseClient:
                 extra_columns_name=extra_columns_name,
                 extra_columns_type=extra_columns_type,
             )
-            # self.save_upload_results(
-            #     upload_stats,
-            #     upload_params={
-            #         **self.uploader.upload_params,
-            #         **self.configurator.collection_params,
-            #     },
-            #     result_group=dataset.config.result_group
-            # )
-        
+
         if skip_search:
             stage("SKIP SEARCH")
             step("--skip-search: table + index built; skipping SEARCH phase (use the bash QPS scripts against this table)")
@@ -1445,6 +1405,4 @@ class BaseClient:
             self._run_pgvector_experiment(dataset, skip_upload, recall_only, upload_stats, reader)
         elif is_clickhouse:
             self._run_clickhouse_experiment(dataset, skip_upload, recall_only, upload_stats, reader)
-        else:
-            pass
         stage("DONE")

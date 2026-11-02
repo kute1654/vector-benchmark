@@ -10,17 +10,13 @@ clickhouse_connect）。
 """
 
 import time
-import sys
 from typing import List, Optional
 
 import clickhouse_connect
-from clickhouse_connect.driver.client import Client
 from clickhouse_driver import Client as DriverClient
-import json
 
-from benchmark.cli_output import sql, stage, status, step, set_live_line, warn
+from benchmark.cli_output import sql, stage, step, warn
 from engine.base_client import BaseUploader
-from engine.base_client.utils import format_bytes
 from engine.clients.clickhouse.config import *
 
 
@@ -108,9 +104,7 @@ class ClickHouseUploader(BaseUploader):
                 for col_name in list(metadata[i].keys()):
                     value = metadata[i][col_name]
                     # Determining if the data is a dictionary type of latitude and longitude.
-                    # 注意：``('lon' and 'lat')`` 实际只等价于 ``'lat'``，所以这里
-                    # 只校验是否含 'lat'，缺 'lon' 时会取到 None（保持现状）。
-                    if isinstance(value, dict) and ('lon' and 'lat') in list(value.keys()):
+                    if isinstance(value, dict) and 'lon' in value and 'lat' in value:
                         # Keep the correct order of longitude and latitude.
                         temp_list.append(tuple([value.get('lon'), value.get('lat')]))
                     else:
@@ -175,9 +169,6 @@ class ClickHouseUploader(BaseUploader):
         # 距离函数：cls.distance 已经通过 DISTANCE_MAPPING 转换为 ClickHouse 函数名
         # （L2Distance, cosineDistance, dotProduct）
         distance_func = cls.distance
-        # 调试输出：把本轮 upload_params 打到 stdout，便于事后核对实际生效的
-        # 索引参数（这一行是既有的调试打印，保留以备排查）。
-        print(cls.upload_params)
         # 构建索引参数（位置参数，不是键值对）
         index_params = cls.upload_params.get("index_params") or {}
         # 获取向量维度（从 configure 阶段设置的 vector_size）

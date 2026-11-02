@@ -1,40 +1,82 @@
 # -*- coding: utf-8 -*-
 """
-向量数据库耗时分析：读 CSV -> 按口径折算 -> 生成各数据库的耗时图 PNG（仅图，无文字报告）。
+向量数据库耗时分析：读 run-benchmark-loop.sh 产出的 log-analysis CSV -> 生成阶段耗时占比图。
 
-每个数据库只输出三张图：
-  ClickHouse   ：不使用结果缓存融合图 / 使用结果缓存融合图 / 总耗时对比图
-  MyScale      ：不使用结果缓存融合图 / 使用结果缓存融合图 / 总耗时对比图
-  pgvector     ：不使用结果缓存融合图 / 使用结果缓存融合图 / 总耗时对比图
-pgvector 因需要在一张图上放置全部 11 类 SQL 语句类型，故采用横向柱状图
-（纵轴为 sql_type，横轴为耗时；每条 sql_type 行内再按 profile 分组、按步骤堆叠）。
+默认只输出第一组图（不使用查询计划缓存，阶段只取核心耗时；sql_type 只画内置清单）：
+  clickhouse_share_off.png       ClickHouse 5 张表 × 默认 sql_type，profile=ck_off;
+                                 阶段 build_ast/check_qp/prep_plan/build_plan/pipe/after_pipe
+  myscale_share_off.png          MyScale   同上，profile=off（口径同 ck_off）
+  pgvector_1000_share_off.png    pgvector  5 张表 × 默认 sql_type，cache=0;
+                                 阶段 parse/analyze/plan/exec
+  pgvector_1_share_off.png       pgvector  同上，1 条 SQL 的负载
+单表模式（-t/-n）对应：<engine>_share_off_<表名>-<条数>.png / pgvector_share_off_<...>.png
 
-数据源（results/csv/，由 analyze_*_log.py 生成）：
-  clickhouse-Benchmark_256_290k-log-analysis-1000.csv   （CK，6 profile × 5 sql_type）
-  myscale-Benchmark_256_290k-log-analysis-1000.csv      （MyScale，profile 名与 CK 不同，口径相同）
-  pgvector_log_analysis-nytimes-256-angular-1000.csv    （pgvector 1000 条 SQL，11 类 sql_type）
-  pgvector_log_analysis-nytimes-256-angular-1.csv       （pgvector 1 条 SQL，11 类 sql_type）
-输入先在 results/csv/ 查找，缺失时回退到 results/bak/（表头迁移或覆盖前的历史结果）。
+第二组（仅 --cache-charts 时输出）：显示各计划缓存档位（阶段额外包含缓存相关耗时）
+  CK/MS 3 档: ck_off / ck_only_plan_cache / ck_plan_cache，阶段在 6 段基础上加
+  reuse_ast/reuse_plan/normalized_ast；全量模式按档出图
+  clickhouse_share_cache_<profile>.png / myscale_share_cache_<profile>.png
+  pgvector 4 档: cache=0/1/2/3，阶段 parse/analyze/plan/exec/eval/gcp；
+  全量模式按档出图 pgvector_{1000,1}_share_cache_{0,1,2,3}.png；
+  单表模式在同一张图内并排显示 4 档：pgvector_share_cache_<表名>-<条数>.png，
+  CK/MS 单表模式为 <engine>_share_cache_<表名>-<条数>.png（并排 3 档）。
+
+每张图：横轴按 sql_type 分组，组内每根柱对应一张表（全量模式）或一个缓存档
+（单表模式），柱内按阶段堆叠并归一化为 100%（段内标注占比），柱顶标注 ms/query。
+
+数据源（results/csv/，缺失时回退 results/bak/；文件名与 run-benchmark-loop.sh 一致）：
+  clickhouse-<表名>-log-analysis-1000.csv            CK（n=1 组合循环脚本跳过）
+  myscale-<表名>-log-analysis-1000.csv               MyScale
+  pgvector_log_analysis-<表名>-{1,1000}.csv           pgvector，cache/res_cache 列
+缺失的表自动跳过；全量模式不会因某张表还没跑完而报错。
 
 用法：
-  python gen_step_time_report.py                 # 生成全部图表
-
-可配置项（按需修改后重跑）：
-  PV_PARSE_MODE   pgvector 的向量文本解析器：strtof / inline / fast_float
-  PV_SQL_TYPES    参与绘图的 sql_type 列表（CSV 共 11 种）
+  python gen_step_time_report.py                      # 只画默认图(第一组)
+  python gen_step_time_report.py --cache-charts       # 默认图 + 各缓存档位图
+  python gen_step_time_report.py -t <表名> -n <条数>  # 解析 PG 日志模式:
+      解析 /usr/local/pgsql/data/log/postgresql.log 中累计的多轮运行
+      (循环跑 N 次基准未清日志), 按批次平均合并, 输出
+      results/csv/pgvector_log_analysis-<表名>-<条数>.csv 并画占比图
+      (results/charts/pgvector_share_off_<表名>-<条数>.png;
+       加 --cache-charts 再输出 pgvector_share_cache_<表名>-<条数>.png)
+  python gen_step_time_report.py --engine clickhouse -t <表名> -n <条数>   # CK/MS 模式:
+      读循环脚本产出的 results/csv/<engine>-<表名>-log-analysis-<条数>.csv
+      (每轮基准一组数据, 默认 10 组), 同一 sql_type 的各组按阶段取算术平均后
+      画占比图 (results/charts/<engine>_share_off_<表名>-<条数>.png;
+       加 --cache-charts 再输出 <engine>_share_cache_<表名>-<条数>.png);
+      无缓存档 profile (clickhouse=ck_off / myscale=off)
+可选: --pglog <路径> 指定日志; --runs all|N 指定合并的批次数; --no-chart 只出 CSV;
+      --sql-types "a b" 指定要画的 sql_type(空格/逗号分隔, 顺序即横轴顺序;
+      默认空=各引擎内置默认清单, CSV 中其余形态不画; 不存在的形态自动跳过)。
 """
+import argparse
 import csv
-import math
 import os
-
-import matplotlib
-matplotlib.use('Agg')
-import matplotlib.pyplot as plt
+import re
+import subprocess
+import sys
 
 BASE = os.path.dirname(os.path.abspath(__file__))                            # 脚本目录
 RAW = os.path.join(BASE, 'results', 'csv')                                   # 数据目录
 BAK = os.path.join(BASE, 'results', 'bak')                                   # 表头迁移/覆盖前的备份目录
 CHART_DIR = os.path.join(BASE, 'results', 'charts')                          # 图输出目录
+
+
+def load_mpl():
+    """延迟加载 matplotlib(容器内常未安装); 成功返回 True, 失败提示并返回 False。
+
+    画图不是 CSV 汇总的前置条件, 因此把 import 推迟到画图时, 保证日志解析
+    模式在没有 matplotlib 的环境下也能写出报告 CSV。
+    """
+    try:
+        import matplotlib
+        matplotlib.use('Agg')
+        globals()['plt'] = __import__('matplotlib.pyplot', fromlist=['pyplot'])
+        globals()['Patch'] = __import__('matplotlib.patches', fromlist=['patches']).Patch
+        return True
+    except ImportError:
+        print('(warn) 未安装 matplotlib, 跳过画图; CSV 报告不受影响 '
+              '(如需图表: pip3 install matplotlib)', file=sys.stderr)
+        return False
 
 
 def resolve_input(name):
@@ -47,75 +89,85 @@ def resolve_input(name):
         return path
     raise FileNotFoundError('missing log-analysis CSV: %s (looked in results/csv and results/bak)' % name)
 
-# ---------------- 可配置项 ----------------
-PV_PARSE_MODE = 'strtof'                                                  # strtof / inline / fast_float
-PV_SQL_TYPES = ['text_literal', 'text_cast', 'vector_fn',
-                'array_int_cast', 'array_real_cast',
-                'array_cast', 'array_to_vector_fn', 'halfvec_literal',
-                'with_text_literal', 'with_array_cast', 'with_vector_fn']  # CSV 共 11 种
 
-# ---------------- CK / MyScale 口径 ----------------
-# CK/MyScale 12 个耗时步骤列；增删步骤需同步 FORMULA12 / STEP_COLOR12 / LIGHT12
+def resolve_optional(name):
+    """同 resolve_input, 但文件不存在时返回 None(全量模式跳过尚未跑完的表)。"""
+    try:
+        return resolve_input(name)
+    except FileNotFoundError:
+        return None
+
+# ---------------- 数据文件（文件名与 run-benchmark-loop.sh 的产出保持一致） ----------------
+# CK/MS 循环脚本产出 <engine>-<表名>-log-analysis-<条数>.csv（n=1 组合跳过，固定 1000）；
+# pgvector 循环脚本产出 pgvector_log_analysis-<表名>-<条数>.csv。
+CK_TABLES = ['Benchmark_128_10m', 'Benchmark_256_290k', 'Benchmark_768_1m',
+             'Benchmark_960_1m', 'Benchmark_1536_1m']
+PG_TABLES = ['benchmark_sift_128', 'benchmark_256_290k', 'benchmark_768_1m',
+             'benchmark_960_1m', 'benchmark_1536_1m']
+CK_ROW_COUNT = 1000            # CK/MS 循环只跑 n=1000 组合
+
+
+def loop_csv(engine, table, n):
+    """run-benchmark-loop.sh 产出的日志分析 CSV 文件名。"""
+    if engine == 'pgvector':
+        return 'pgvector_log_analysis-%s-%s.csv' % (table, n)
+    return '%s-%s-log-analysis-%s.csv' % (engine, table, n)
+
+
+def table_dim(name):
+    """从表名解析向量维度: benchmark_1536_1m / Benchmark_128_10m -> 1536 / 128。"""
+    m = re.match(r'benchmark_(?:sift_)?(\d+)', name or '', re.I)
+    return m.group(1) if m else None
+
+
+def table_color(name, fallback):
+    """表名 -> 柱色(按维度取 DIM_COLOR, 未知维度用 fallback)。"""
+    return DIM_COLOR.get(table_dim(name) or '', fallback)
+
+# sql_type 的默认绘制清单（题设指定）：默认图只画这里列出的形态。可用命令行
+# --sql-types 覆盖（传了就按参数清单/顺序画），CSV 中没跑到的形态自动跳过。
+CK_SQL_TYPES = ['normal', 'cast', 'cast_array', 'raw_bytes']
+PG_SQL_TYPES = ['text_literal', 'array_int_cast', 'array_real_cast', 'with_array_cast']
+
+# MyScale profile 名 -> CK 口径名（本脚本只用无计划缓存那一档：off ≈ ck_off）
+MS_PMAP = {'off': 'ck_off', 'only_plan_cache': 'ck_only_plan_cache', 'plan_cache': 'ck_plan_cache'}
+OFF_PROF = 'ck_off'                       # CK/MyScale 不使用查询计划缓存的 profile（折算公式全为 one）
+
+# CK/MyScale 12 个耗时步骤列；ck_off 形态下只有 CK_OFF_STEPS 六列参与折算
 STEPS12 = ['build_ast', 'check_qp', 'prep_plan', 'build_plan', 'pipe', 'after_pipe',
            'reuse_ast', 'reuse_plan', 'reuse_result', 'set_ast', 'set_plan', 'normalized_ast']
-# CK/MyScale sql_type 的读取/显示顺序（不在列表中的类型自动追加到末尾）
-SQL_ORDER = ['cast', 'cast_array', 'normal', 'raw_bytes', 'raw_bytes_x']
-
-# MyScale profile 名 -> CK 口径名
-MS_PMAP = {'off': 'ck_off', 'only_plan_cache': 'ck_only_plan_cache', 'plan_cache': 'ck_plan_cache',
-           'query_off': 'result_off', 'query_only_plan_cache': 'result_only_plan_cache',
-           'query_plan_cache': 'result_plan_cache'}
-# 6 个 profile：前 3 个=无结果缓存(off/only_plan_cache/plan_cache)，后 3 个=有结果缓存
-CK_PROFILES = ['ck_off', 'ck_only_plan_cache', 'ck_plan_cache',
-               'result_off', 'result_only_plan_cache', 'result_plan_cache']
-
-# 折算公式矩阵（与 CK 报告一致）：
-#   one=每次执行均发生; inv=按 1/select_n 均摊; planhit=按 (select_n-plan_miss_n)/select_n;
-#   miss=仅结果未命中时发生，按 result_miss_n/select_n; hit=按 result_hit_n/select_n
-FORMULA12 = {
-    'ck_off': {'build_ast': 'one', 'check_qp': 'one', 'prep_plan': 'one', 'build_plan': 'one',
-               'pipe': 'one', 'after_pipe': 'one'},
-    'ck_only_plan_cache': {'build_ast': 'one', 'pipe': 'one', 'after_pipe': 'one',
-                           'normalized_ast': 'one', 'check_qp': 'inv', 'prep_plan': 'inv',
-                           'build_plan': 'inv', 'set_plan': 'inv', 'reuse_plan': 'planhit'},
-    'ck_plan_cache': {'pipe': 'one', 'after_pipe': 'one', 'build_ast': 'inv', 'check_qp': 'inv',
-                      'prep_plan': 'inv', 'build_plan': 'inv', 'set_ast': 'inv', 'set_plan': 'inv',
-                      'reuse_ast': 'planhit', 'reuse_plan': 'planhit'},
-    'result_off': {'build_ast': 'one', 'check_qp': 'one', 'after_pipe': 'one', 'prep_plan': 'miss',
-                   'build_plan': 'miss', 'pipe': 'miss', 'reuse_result': 'hit'},
-    'result_only_plan_cache': {'build_ast': 'one', 'check_qp': 'one', 'after_pipe': 'one',
-                               'prep_plan': 'inv', 'build_plan': 'inv', 'pipe': 'miss',
-                               'reuse_plan': 'miss', 'set_plan': 'miss', 'normalized_ast': 'miss',
-                               'reuse_result': 'hit'},
-    'result_plan_cache': {'after_pipe': 'one', 'reuse_ast': 'one', 'build_ast': 'inv',
-                          'check_qp': 'inv', 'prep_plan': 'inv', 'build_plan': 'inv',
-                          'set_ast': 'inv', 'set_plan': 'inv', 'pipe': 'miss',
-                          'reuse_plan': 'miss', 'reuse_result': 'hit'},
-}
-
+CK_OFF_STEPS = ['build_ast', 'check_qp', 'prep_plan', 'build_plan', 'pipe', 'after_pipe']
 STEP_COLOR12 = {'build_ast': '#4e79a7', 'check_qp': '#f28e2b', 'prep_plan': '#e15759',
                 'build_plan': '#76b7b2', 'pipe': '#2c5fc4', 'after_pipe': '#59a14f',
                 'reuse_ast': '#edc948', 'reuse_plan': '#b07aa1', 'reuse_result': '#ff9da7',
-                'set_ast': '#9c755f', 'set_plan': '#bab0ac', 'normalized_ast': '#86bcb6'}   # 12 步骤柱颜色(key=STEPS12)
-LIGHT12 = {'build_plan', 'reuse_ast', 'reuse_result', 'set_plan', 'normalized_ast', 'after_pipe'}   # 这些步骤的字用深色(否则白字)
-PROF_COLOR6 = {'ck_off': '#9aa5b1', 'ck_only_plan_cache': '#8fb3e8', 'ck_plan_cache': '#2c5fc4',
-               'result_off': '#f2a65e', 'result_only_plan_cache': '#7fd0cb',
-               'result_plan_cache': '#0ea5a4'}   # 6 个 profile 的柱颜色
+                'set_ast': '#9c755f', 'set_plan': '#bab0ac', 'normalized_ast': '#86bcb6'}
+LIGHT12 = {'build_plan', 'reuse_ast', 'reuse_result', 'set_plan', 'normalized_ast', 'after_pipe'}
 
-# ---------------- pgvector 口径 ----------------
-STEPS7 = ['parse', 'analyze', 'plan', 'eval', 'gcp', 'exec', 'vin']   # pgvector 7 个耗时步骤列
-# cache: 0=不使用查询计划缓存 1=查询计划缓存+auto 2=查询计划缓存+force_generic_plan+文本类型参数
-#        （一条 SQL 产生 k+1=11 条 vector_in，k=10 为 top-k） 3=查询计划缓存+force_generic_plan+vector 类型参数
-PROF8 = ['off', 'pc_auto', 'pc_gen_t', 'pc_gen_v', 'r_off', 'r_auto', 'r_gen_t', 'r_gen_v']   # 8 个 profile：前4=无结果缓存，后4=有结果缓存
-PROF8_LABEL = {'off': 'off', 'pc_auto': 'pc·auto', 'pc_gen_t': 'pc·gen_t', 'pc_gen_v': 'pc·gen_v',
-               'r_off': 'rc·off', 'r_auto': 'rc·auto', 'r_gen_t': 'rc·gen_t', 'r_gen_v': 'rc·gen_v'}   # 图例中显示名
-PROF8_COLOR = {'off': '#9aa5b1', 'pc_auto': '#8fb3e8', 'pc_gen_t': '#f2a65e', 'pc_gen_v': '#2c5fc4',
-               'r_off': '#d97706', 'r_auto': '#7fd0cb', 'r_gen_t': '#0ea5a4', 'r_gen_v': '#0b7285'}   # 8 个 profile 柱颜色
+# pgvector 7 个耗时步骤列（cache=0 时 eval/gcp 一般为空，绘图前按非空过滤）
+STEPS7 = ['parse', 'analyze', 'plan', 'eval', 'gcp', 'exec', 'vin']
 STEP_COLOR7 = {'parse': '#b07aa1', 'analyze': '#f28e2b', 'plan': '#e15759', 'eval': '#76b7b2',
-               'gcp': '#9c755f', 'exec': '#2c5fc4', 'vin': '#edc948'}   # 7 步骤柱颜色(key=STEPS7)
-LIGHT7 = {'vin', 'eval'}   # 这些步骤的字用深色(否则白字)
-PV_SHORT4 = {'off': 'off', 'pc_auto': 'auto', 'pc_gen_t': 'gen_t', 'pc_gen_v': 'gen_v',
-             'r_off': 'off', 'r_auto': 'auto', 'r_gen_t': 'gen_t', 'r_gen_v': 'gen_v'}   # 柱尾短名（横向图用）
+               'gcp': '#9c755f', 'exec': '#2c5fc4', 'vin': '#edc948'}
+LIGHT7 = {'vin', 'eval'}
+# pgvector 占比图只画 4 个核心阶段: 不再显示 eval/gcp/vin 的占比, 柱顶总耗时也
+# 只按这 4 段求和(否则柱子占比合计不足 100%)。
+PG_CHART_STEPS = ['parse', 'analyze', 'plan', 'exec']
+# 第二组图: 横向比较 4 种计划缓存档(cache=0/1/2/3); 计划缓存开启后多出 eval
+# (参数求值, 未命中缓存) 与 gcp(get_cached_plan, 命中缓存), 因此阶段取这 6 段。
+PG_CACHE_STEPS = ['parse', 'analyze', 'plan', 'exec', 'eval', 'gcp']
+PG_CACHE_ORDER = ['0', '1', '2', '3']
+
+# CK/MyScale 第二组图: 3 种计划缓存档(ck_off / ck_only_plan_cache / ck_plan_cache),
+# 在无缓存 6 段基础上加入计划复用阶段。
+CK_CACHE_STEPS = ['build_ast', 'check_qp', 'prep_plan', 'build_plan', 'pipe', 'after_pipe',
+                  'reuse_ast', 'reuse_plan', 'normalized_ast']
+CK_CACHE_ORDER = ['ck_off', 'ck_only_plan_cache', 'ck_plan_cache']
+
+# 第二组图的柱色: pg 按 cache 档位, CK/MS 按 profile 名
+CACHE_COLORS = {'0': '#9aa5b1', '1': '#8fb3e8', '2': '#f2a65e', '3': '#0ea5a4',
+                'ck_off': '#9aa5b1', 'ck_only_plan_cache': '#8fb3e8', 'ck_plan_cache': '#0ea5a4'}
+
+# 5 个维度（组内柱）的颜色
+DIM_COLOR = {'128': '#9aa5b1', '256': '#8fb3e8', '768': '#2c5fc4', '960': '#f2a65e', '1536': '#0ea5a4'}
 
 
 def to_float(x):
@@ -135,103 +187,189 @@ def steady(x):
 
 
 def steady_exec_n(x):
-    """从 ``"<次数> / s=<秒>"`` 形态里取 steady 段的秒数；缺失返回 None。
-
-    原始 CSV 同时记录执行次数与稳态耗时，绘图只关心后者，因此按
-    ``/ s=`` 切分取尾部。
-    """
+    """从 ``"<次数> / s=<秒>"`` 形态里取 steady 段的秒数；缺失返回 None。"""
     x = (x or '').strip()
     if '/ s=' in x:
         x = x.split('/ s=')[-1].strip()
     return None if x in ('', '-') else float(x)
 
 
-def load_cklike(path, pmap):
-    """读 CK/MyScale CSV 并按公式矩阵折算。返回 (sqlTypes, rows{ (profile,sql)->dict }, raws)"""
-    rows, raws, seen = {}, {}, []
-    with open(path, encoding='utf-8-sig') as f:
-        for r in csv.DictReader(f):
-            st = r['sql_type'].strip()
-            prof = pmap.get(r['profile'].strip(), r['profile'].strip())
-            if st not in seen:
-                seen.append(st)
-            sel = to_float(r['select_n']) or 0.0
-            rh = to_float(r['result_hit_n']) or 0.0
-            rm = to_float(r['result_miss_n']) or 0.0
-            pm = to_float(r['plan_miss_n']) or 0.0
-            raw = {}
-            for s in STEPS12:
-                raw[s] = to_float(r[s])
-            raws[(prof, st)] = {'raw': raw, 'select_n': sel, 'result_hit_n': rh,
-                                'result_miss_n': rm, 'plan_miss_n': pm}
-    sql_types = [s for s in SQL_ORDER if s in seen] + [s for s in seen if s not in SQL_ORDER]
-    for (prof, st), d in raws.items():
-        sel, rh, rm, pm = d['select_n'], d['result_hit_n'], d['result_miss_n'], d['plan_miss_n']
-        fac = {'one': 1.0, 'inv': 1.0 / sel if sel else 0.0,
-               'planhit': (sel - pm) / sel if sel else 0.0,
-               'miss': rm / sel if sel else 0.0, 'hit': rh / sel if sel else 0.0}
-        vals = {}
-        for s in STEPS12:
-            f_mode = FORMULA12[prof].get(s)
-            vals[s] = round(d['raw'][s] * fac[f_mode], 6) if (f_mode and d['raw'][s] is not None) else 0.0
-        rows[(prof, st)] = {'values': vals, 'total': round(sum(vals.values()), 6)}
-    return sql_types, rows, raws
+def split_sql_types(s):
+    """把 --sql-types 的输入(空格/逗号/中文逗号分隔)拆成清单; 空串 -> []。"""
+    return [x for x in s.replace('，', ',').replace(',', ' ').split() if x]
 
 
-def load_pgvector(path, parse_mode, sql_types):
-    """读 pgvector CSV（取 steady 值），vin = vi_ms × vi# / exec#。返回 rows{ (prof,sql)->dict }"""
-    rows = {}
-    with open(path, encoding='utf-8-sig') as f:
-        for r in csv.DictReader(f):
-            if r['parse_mode'].strip() != parse_mode:
-                continue
-            st = r['sql_type'].strip()
-            cache = int(r['cache'])
-            rc = int(r['res_cache'])
-            prof = ({0: 'r_off', 1: 'r_auto', 2: 'r_gen_t', 3: 'r_gen_v'} if rc else
-                    {0: 'off', 1: 'pc_auto', 2: 'pc_gen_t', 3: 'pc_gen_v'})[cache]
-            en = steady_exec_n(r['exec#(w/s)']) or 0.0
-            vn = steady(r['vi#(w/s)']) or 0.0
-            vi_ms = steady(r['vi_ms(w/s)'])
-            vals = {
-                'parse': steady(r['parse_ms(w/s)']) or 0.0,
-                'analyze': steady(r['analyze_ms(w/s)']) or 0.0,
-                'plan': steady(r['plan_ms(w/s)']) or 0.0,
-                'eval': steady(r['eval_ms(w/s)']) or 0.0,
-                'gcp': steady(r['gcp_ms(w/s)']) or 0.0,
-                'exec': steady(r['exec_ms(w/s)']) or 0.0,
-                'vin': round(vi_ms * vn / en, 6) if (vi_ms is not None and en and vn) else 0.0,
-            }
-            vals = {k: round(v, 6) for k, v in vals.items()}
-            rows[(prof, st)] = {'values': vals, 'total': round(sum(vals.values()), 6),
-                                'exec_n': en, 'vi_n': vn}
-    missing = [(p, s) for p in PROF8 for s in sql_types if (p, s) not in rows]
+def ordered_sql_types(found, preferred, wanted=None):
+    """按 CSV 实际出现的 sql_type 生成绘制清单。
+
+    wanted: --sql-types 传入的形态清单; 非空时只画其中的形态(顺序以 wanted 为准)。
+    默认(wanted 为空)只画 preferred 内置清单里的形态, CSV 里其它形态不再追加,
+    保证默认图形态固定; CSV 中没有的形态自动跳过。
+    """
+    seen = list(found)
+    wanted = wanted or preferred
+    types = [s for s in wanted if s in seen]
+    dropped = [s for s in seen if s not in types]
+    missing = [s for s in wanted if s not in seen]
+    if dropped:
+        print('  (info) 未在绘制清单中、已过滤: %s' % dropped, file=sys.stderr)
     if missing:
-        raise RuntimeError('pgvector 数据缺失: %s' % missing)
-    return rows
+        print('  (info) 清单中无数据、已跳过: %s' % missing, file=sys.stderr)
+    return types
+
+
+def union_sql_types(datas, preferred, wanted=None):
+    """多个维度数据的 sql_type 并集(按首次出现顺序去重)后套用 ordered_sql_types。"""
+    found = []
+    for data in datas:
+        for st in data:
+            if st not in found:
+                found.append(st)
+    return ordered_sql_types(found, preferred, wanted)
+
+
+def load_ck_off(path, prof):
+    """读 CK/MyScale 某维度 CSV 的 ck_off（或映射后的 off）行。
+
+    返回 {sql_type: {'values': {step: ms}, 'total': ms}}；ck_off 折算公式全为 one，
+    直接使用原始列值。仅保留 CK_OFF_STEPS 中该形态下不为空（非 '-'）的步骤。
+    sql_type 以 CSV 实际存在的为准(不写死全量列表), 缺失形态不报错。
+    """
+    want = set(CK_OFF_STEPS)
+    out = {}
+    with open(path, encoding='utf-8-sig') as f:
+        for r in csv.DictReader(f):
+            p = MS_PMAP.get(r['profile'].strip(), r['profile'].strip())
+            st = r['sql_type'].strip()
+            if p != prof or not st:
+                continue
+            vals, present = {}, set()
+            for s in CK_OFF_STEPS:
+                v = to_float(r.get(s))
+                vals[s] = v if v is not None else 0.0
+                if v is not None:
+                    present.add(s)
+            out[st] = {'values': vals, 'total': round(sum(vals.values()), 6), 'present': present}
+    return out
+
+
+def load_ck_profiles_avg(path, steps):
+    """读 CK/MyScale 分析 CSV 的全部计划缓存档行, 多轮数据按 (profile, sql_type) 平均。
+
+    循环脚本每轮基准对同一 (profile, sql_type) 各产生一行, R 轮共 R 组数据; 本函数把
+    同一组合的各行按阶段列取算术平均 (某轮缺失的阶段 '-' 不参与该阶段均值)。
+    profile 经 MS_PMAP 统一成 CK 口径名(off->ck_off 等)。
+    返回 {profile: {sql_type: {'values','total','present','rounds'}}}。
+    """
+    acc = {}
+    with open(path, encoding='utf-8-sig') as f:
+        for r in csv.DictReader(f):
+            p = MS_PMAP.get(r['profile'].strip(), r['profile'].strip())
+            st = r['sql_type'].strip()
+            if not p or not st:
+                continue
+            per = acc.setdefault(p, {}).setdefault(st, {s: [] for s in steps})
+            for s in steps:
+                v = to_float(r.get(s))
+                if v is not None:
+                    per[s].append(v)
+    out = {}
+    for p, by_sql in acc.items():
+        out[p] = {}
+        for st, per in by_sql.items():
+            vals = {s: (round(sum(v) / len(v), 6) if v else 0.0) for s, v in per.items()}
+            present = {s for s, v in per.items() if v}
+            out[p][st] = {'values': vals, 'total': round(sum(vals.values()), 6),
+                          'present': present, 'rounds': max(len(v) for v in per.values())}
+    return out
+
+
+def load_ck_off_avg(path, prof):
+    """读 CK/MyScale 某表分析 CSV 的指定 profile (off 档) 行, 多轮数据按 sql_type 平均。
+
+    返回 {sql_type: {'values','total','present','rounds'}}; 只取 CK_OFF_STEPS 六列。
+    """
+    return load_ck_profiles_avg(path, CK_OFF_STEPS).get(prof, {})
+
+
+def _pg_row(r):
+    """把 pgvector 分析 CSV 的一行转成 {'values','total','present'}。
+
+    vin 为按次数摊到每次执行的输入解析耗时: vector_in(vi_ms × vi# / exec#) +
+    halfvec_in(hv_ms × hv# / exec#)。文本/数组路径只有 vi 计数, halfvec_literal
+    只有 hv 计数, 两者互斥、直接相加。
+    """
+    en = steady_exec_n(r['exec#']) or 0.0
+    raw = {s: steady(r['%s_ms' % s]) for s in STEPS7 if s != 'vin'}
+
+    def per_exec(ms_col, n_col):
+        ms, n = steady(r[ms_col]), steady(r[n_col])
+        return ms * n / en if (ms is not None and en and n) else 0.0
+
+    vin = round(per_exec('vi_ms', 'vi#') + per_exec('hv_ms', 'hv#'), 6)
+    raw['vin'] = vin if vin > 0 else None
+    present = {s for s, v in raw.items() if v is not None}
+    vals = {s: (raw[s] if raw[s] is not None else 0.0) for s in STEPS7}
+    return {'values': vals, 'total': round(sum(vals.values()), 6), 'present': present}
+
+
+def load_pg_off(path):
+    """读 pgvector 某数据集 CSV 的 cache=0 & res_cache=0（simple 协议）行。
+
+    返回 {sql_type: {'values','total','present'}}。
+    """
+    out = {}
+    with open(path, encoding='utf-8-sig') as f:
+        for r in csv.DictReader(f):
+            st = r['sql_type'].strip()
+            if not st or int(r['cache']) != 0 or int(r['res_cache']) != 0:
+                continue
+            out[st] = _pg_row(r)
+    return out
+
+
+def load_pg_caches(path):
+    """读 pgvector 某数据集 CSV 的全部计划缓存档(cache=0/1/2/3, res_cache=0)行。
+
+    返回 {cache(字符串): {sql_type: row}}; row 字段同 load_pg_off。用于第二组
+    "4 种 cache 情况"占比图。
+    """
+    out = {}
+    with open(path, encoding='utf-8-sig') as f:
+        for r in csv.DictReader(f):
+            st = r['sql_type'].strip()
+            if not st or int(r['res_cache']) != 0:
+                continue
+            out.setdefault(str(int(r['cache'])), {})[st] = _pg_row(r)
+    return out
+
+
+def types_in_all(types, by_series):
+    """只保留在所有 series(各 cache 档)里都有数据的 sql_type, 避免绘图 KeyError。"""
+    out = [st for st in types if all(st in data for data in by_series.values())]
+    dropped = [st for st in types if st not in out]
+    if dropped:
+        print('  (info) 部分 cache 档缺数据、已跳过: %s' % dropped, file=sys.stderr)
+    return out
+
+
+def restrict_steps(data, steps):
+    """把每行 total 改为仅所选阶段之和。
+
+    draw_share 用 row['total'] 作 100% 堆叠的分母; 只画部分阶段时必须同步重算
+    分母, 否则柱内占比合计不到 100%, 柱顶的 ms/query 也会把未画的阶段算进去。
+    """
+    for row in data.values():
+        row['total'] = round(sum(row['values'].get(s, 0.0) for s in steps), 6)
+    return data
 
 
 # ---------------- 绘图 ----------------
-INK, MUTED, RULE = '#182230', '#5f6f84', '#dfe6f0'   # 正文/轴标签文字色、弱化文字(数值等)色、网格线/轴线色
-
-
-def nice_max(x):
-    """把最大值向上取整到预置刻度档位，让 y 轴顶端留有少量余量。
-
-    档位表比纯数学取整更符合"人能读"的刻度；超出表尾时退回 ``ceil``。
-    """
-    # x 轴刻度档位表：向上取最接近档位；需更细/更粗刻度可增删这里的数值
-    for s in [0.05, 0.1, 0.15, 0.2, 0.25, 0.3, 0.4, 0.5, 0.6, 0.8, 1, 1.5, 2, 2.5, 3, 4, 5, 6, 8, 9, 10, 12, 15]:
-        if x <= s:
-            return s
-    return math.ceil(x)
+INK, MUTED, RULE = '#182230', '#5f6f84', '#dfe6f0'   # 正文/轴标签文字色、弱化文字色、网格线/轴线色
 
 
 def fmt_val(v):
-    """按数值量级选择小数位：越大越粗（>=1 两位，>=0.1 三位，其余四位）。
-
-    目的是让柱顶标注在 0.0x~10 的跨度内都保持同样的有效数字观感。
-    """
+    """按数值量级选择小数位：越大越粗（>=1 两位，>=0.1 三位，其余四位）。"""
     if v >= 1:
         return '%.2f' % v
     if v >= 0.1:
@@ -239,90 +377,58 @@ def fmt_val(v):
     return '%.4f' % v
 
 
-# CK/MyScale 竖版融合图（每步耗时柱+占比标注），绘制后递减输出：ck_fusion_*.png / myscale_fusion_*.png
-def draw_fusion(rows, prof_ids, shorts, prof_colors, sql_types, steps, step_colors, light_set,
-                title, out_path, figw=13.0):
-    """画 CK/MyScale 的堆叠柱状融合图：
-    每组 SQL 类型内按 profile 并排，柱内按阶段分段。
+def draw_share(by_dim, sql_types, steps, step_colors, light_set, dim_labels,
+               title, out_path, figw=13.0, dims=None, dim_colors=None):
+    """阶段耗时占比图（100% 堆叠）：横轴=sql_type 分组，组内每根柱=一个维度。
 
-    每个阶段一个颜色块，柱顶标注总耗时；``light_set`` 里的阶段颜色浅，
-    改用深色文字以保证可读性。
+    柱内按阶段堆叠并归一化到 100%，段内标注占比；柱顶标注 ms/query 总耗时；
+    柱底短横条标出该柱对应的维度颜色（维度图例在图下方）。
+    dims/dim_colors: 组内柱的清单与颜色; 默认取 by_dim 的键 / DIM_COLOR(未知键用灰色)。
     """
-    nprof, nsql = len(prof_ids), len(sql_types)
-    ymax = nice_max(max(rows[(p, s)]['total'] for p in prof_ids for s in sql_types))
-    w = 0.86 / nprof                    # 柱宽：profile 越多单根越窄；0.86 可整体放大/缩小柱宽
-    fig, ax = plt.subplots(figsize=(figw, 6.6), dpi=200)   # figw 由调用方传(默认 13.0)，6.6=图高
-    from matplotlib.patches import Patch
-    handles = [Patch(facecolor=step_colors[s], label=s) for s in steps]
-    for j, p in enumerate(prof_ids):
-        xj = [i + (j - (nprof - 1) / 2.0) * (w * 1.04) for i in range(nsql)]   # *1.04=profile 组间留缝，改大组间隔更宽
+    dims = dims if dims is not None else list(by_dim)
+    dim_colors = dim_colors if dim_colors is not None else {d: DIM_COLOR.get(d, '#9aa5b1') for d in dims}
+    ndim, nsql = len(dims), len(sql_types)
+    fig, ax = plt.subplots(figsize=(figw, 6.8), dpi=200)
+    step_handles = [Patch(facecolor=step_colors[s], label=s) for s in steps]
+    dim_handles = [Patch(facecolor=dim_colors[d], label=dim_labels[d]) for d in dims]
+    w = 0.84 / ndim                     # 柱宽：组内 5 根
+    for j, d in enumerate(dims):
+        xj = [i + (j - (ndim - 1) / 2.0) * (w * 1.04) for i in range(nsql)]   # *1.04=组内柱间留缝
         bottom = [0.0] * nsql
         for s in steps:
-            vals = [rows[(p, st)]['values'][s] for st in sql_types]
-            ax.bar(xj, vals, bottom=bottom, width=w, color=step_colors[s],
-                   edgecolor='white', linewidth=0.4, zorder=3)
-            for xi, v, b, st in zip(xj, vals, bottom, sql_types):
-                tot = rows[(p, st)]['total']
-                # 只在占比>=4.5% 且 占y轴>=2.8% 时标注百分比，避免过密；调大则标注更少
-                if v > 0 and tot > 0 and v / tot >= 0.045 and v / ymax >= 0.028:
-                    ax.text(xi, b + v / 2.0, '%d%%' % round(v / tot * 100), ha='center', va='center',
-                            fontsize=7.2, color=INK if s in light_set else 'white', zorder=4)
-            bottom = [b + v for b, v in zip(bottom, vals)]
+            shares, bottoms = [], list(bottom)
+            for xi, st in zip(xj, sql_types):
+                row = by_dim.get(d, {}).get(st)
+                share = row['values'][s] / row['total'] * 100.0 if row and row['total'] > 0 else 0.0
+                if share > 0:
+                    ax.bar(xi, share, bottom=bottoms[sql_types.index(st)], width=w,
+                           color=step_colors[s], edgecolor='white', linewidth=0.4, zorder=3)
+                shares.append(share)
+            for xi, share, b in zip(xj, shares, bottoms):
+                # 段内占比标注：>=4% 才画，避免过密；浅色段用深色字
+                if share >= 4.0:
+                    ax.text(xi, b + share / 2.0, '%d%%' % round(share), ha='center', va='center',
+                            fontsize=7.0, color=INK if s in light_set else 'white', zorder=4)
+            bottom = [b + sh for b, sh in zip(bottom, shares)]
         for xi, st in zip(xj, sql_types):
-            tot = rows[(p, st)]['total']
-            ax.text(xi, tot + ymax * 0.012, fmt_val(tot), ha='center', va='bottom',   # 柱顶耗时数值，0.012=与柱顶间距
-                    fontsize=7.3, color=INK, zorder=5)
-            ax.text(xi, tot + ymax * 0.062, shorts[p], ha='center', va='bottom',   # profile 名，0.062=与数值间距
-                    fontsize=8, fontweight='bold', color=prof_colors[p], zorder=5)
-    for i in range(0, nsql, 2):
-        ax.axvspan(i - 0.5, i + 0.5, color='#2f6fed', alpha=0.045, zorder=0)   # 隔列底色条，alpha 加深/减淡
-    ax.set_xlim(-0.5, nsql - 0.5)
-    ax.set_ylim(0, ymax * 1.17)   # y 轴上限：峰值×1.17，改大顶部更空
-    ax.set_xticks(range(nsql))
-    ax.set_xticklabels(sql_types, fontsize=9.5, color=INK)
-    ax.set_ylabel('ms / query', fontsize=10, color=MUTED)
-    ax.tick_params(axis='y', labelsize=8.5, colors=MUTED)
-    ax.grid(axis='y', color=RULE, linewidth=0.7, zorder=0)
-    ax.set_axisbelow(True)
-    for sp in ('top', 'right'):
-        ax.spines[sp].set_visible(False)
-    for sp in ('left', 'bottom'):
-        ax.spines[sp].set_color(RULE)
-    ax.legend(handles=handles, loc='lower center', bbox_to_anchor=(0.5, 1.002),
-              ncol=min(len(steps), 12), fontsize=8, frameon=False, columnspacing=1.2,
-              handlelength=1.2, handleheight=0.9)   # 步骤图例：ncol 控制每行个数，1.002 使图例贴顶
-    ax.set_title(title, loc='left', fontsize=11.5, color=INK, pad=30)   # pad=标题距图顶部距离，改大标题下移
-    fig.tight_layout()
-    fig.savefig(out_path, bbox_inches='tight', facecolor='white')
-    plt.close(fig)
-
-
-# CK/MyScale 竖版总耗时图（仅 total 总柱+数值标注），绘制后递减输出：ck_total.png / myscale_total.png
-def draw_total(rows, prof_ids, legend_labels, prof_colors, sql_types, out_path, title, figw=13.0):
-    """画 CK/MyScale 总耗时对比图：每个 profile 一根单色柱，柱顶标注总耗时。
-
-    与 ``draw_fusion`` 共用配色和分组布局，但不做阶段拆分，便于先看
-    "总量差异"再看"差异来自哪一步"。
-    """
-    nprof, nsql = len(prof_ids), len(sql_types)
-    ymax = nice_max(max(rows[(p, s)]['total'] for p in prof_ids for s in sql_types))
-    w = 0.82 / nprof                    # 柱宽：profile 越多单根越窄；0.82 可整体放大/缩小
-    fig, ax = plt.subplots(figsize=(figw, 6.0), dpi=200)   # figw 由调用方传(默认 13.0)，6.0=图高
-    for j, p in enumerate(prof_ids):
-        xj = [i + (j - (nprof - 1) / 2.0) * (w * 1.05) for i in range(nsql)]   # *1.05=profile 组间留缝
-        vals = [rows[(p, st)]['total'] for st in sql_types]
-        ax.bar(xj, vals, width=w, color=prof_colors[p], edgecolor='white', linewidth=0.4,
-               label=legend_labels[p], zorder=3)
-        for xi, v in zip(xj, vals):
-            ax.text(xi, v + ymax * 0.012, fmt_val(v), ha='center', va='bottom',   # 柱顶数值，0.012=间距，rotation=90 竖排
-                    fontsize=6.6, color=MUTED, rotation=90, zorder=4)
+            row = by_dim.get(d, {}).get(st)
+            if not row:      # 该维度缺这个 sql_type(分析 CSV 无数据), 不画柱顶总耗时
+                continue
+            tot = row['total']
+            ax.text(xi, 101.5, fmt_val(tot), ha='center', va='bottom',   # 柱顶 ms/query 总耗时
+                    fontsize=6.6, color=INK, zorder=5)
+            # 柱底维度色条（画在轴下方，clip_on=False），与下方维度图例对应；
+            # y=-5.5 让色条落在 sql_type 刻度文字下方，避免与刻度名重叠
+            ax.plot([xi - w * 0.38, xi + w * 0.38], [-5.5, -5.5], color=dim_colors[d],
+                    lw=3.0, solid_capstyle='butt', clip_on=False, zorder=5)
     for i in range(0, nsql, 2):
         ax.axvspan(i - 0.5, i + 0.5, color='#2f6fed', alpha=0.045, zorder=0)   # 隔列底色条
     ax.set_xlim(-0.5, nsql - 0.5)
-    ax.set_ylim(0, ymax * 1.15)   # y 轴上限：峰值×1.15
+    ax.set_ylim(0, 108)   # 顶部留出总耗时标注空间
+    ax.set_yticks([0, 20, 40, 60, 80, 100])
     ax.set_xticks(range(nsql))
     ax.set_xticklabels(sql_types, fontsize=9.5, color=INK)
-    ax.set_ylabel('ms / query', fontsize=10, color=MUTED)
+    ax.set_ylabel('share of per-query time (%)', fontsize=10, color=MUTED)
     ax.tick_params(axis='y', labelsize=8.5, colors=MUTED)
     ax.grid(axis='y', color=RULE, linewidth=0.7, zorder=0)
     ax.set_axisbelow(True)
@@ -330,200 +436,300 @@ def draw_total(rows, prof_ids, legend_labels, prof_colors, sql_types, out_path, 
         ax.spines[sp].set_visible(False)
     for sp in ('left', 'bottom'):
         ax.spines[sp].set_color(RULE)
-    ax.legend(loc='lower center', bbox_to_anchor=(0.5, 1.002), ncol=nprof,
-              fontsize=8 if nprof <= 6 else 7.3, frameon=False, columnspacing=1.0,
-              handlelength=1.1, handleheight=0.9)   # profile 图例：ncol 每行个数，profile 多时字号自动变小
-    ax.set_title(title, loc='left', fontsize=11.5, color=INK, pad=30)   # pad=标题距顶部距离
+    ax.legend(handles=step_handles, loc='lower center', bbox_to_anchor=(0.5, 1.002),
+              ncol=min(len(steps), 12), fontsize=8, frameon=False, columnspacing=1.2,
+              handlelength=1.2, handleheight=0.9)   # 阶段图例：贴顶
+    fig.legend(handles=dim_handles, loc='lower center', bbox_to_anchor=(0.5, -0.075), ncol=len(dims),
+               fontsize=8, frameon=False, columnspacing=1.4, handlelength=1.2,
+               handleheight=0.9)                   # 维度图例：贴底（与柱底色条对应，留出刻度文字空间）
+    ax.set_title(title, loc='left', fontsize=11.5, color=INK, pad=30)
     fig.tight_layout()
-    fig.savefig(out_path, bbox_inches='tight', facecolor='white')
-    plt.close(fig)
-
-
-# pg 横向融合图（每行一 SQL 类型、行内步骤堆叠+占 j 标注），绘制后递减输出：pgvector*_fusion_*.png
-def draw_fusion_h(rows, prof_ids, shorts, prof_colors, sql_types, steps, step_colors, light_set,
-                  title, out_path, figw=13.5):
-    """横向融合图：纵轴=sql_type（可容纳 11 类），每行内按 profile 分组、按步骤堆叠。"""
-    from matplotlib.patches import Patch
-    nprof, nsql = len(prof_ids), len(sql_types)
-    ymax = nice_max(max(rows[(p, s)]['total'] for p in prof_ids for s in sql_types))
-    bar_h, os_ = 0.5, 0.53              # 单根横柱高度 0.5；os_=组内相邻 profile 的纵向间距，改大行内更空
-    group_span = (nprof - 1) * os_
-    slot = max(1.0, group_span + 1.0)   # 相邻 sql_type 行中心距
-    fig_h = nsql * slot * 0.5 + 1.6     # 画布高度：随行数自动；1.6 为标题/图例预留高度
-    fig, ax = plt.subplots(figsize=(figw, fig_h), dpi=200)
-    step_handles = [Patch(facecolor=step_colors[s], label=s) for s in steps]
-
-    labels_y, labels_txt = [], []
-    for i, st in enumerate(sql_types):
-        center = i * slot
-        for j, p in enumerate(prof_ids):
-            yj = center + (j - (nprof - 1) / 2.0) * os_
-            bottom = 0.0
-            for s in steps:
-                v = rows[(p, st)]['values'][s]
-                tot = rows[(p, st)]['total']
-                if v > 0:
-                    ax.barh(yj, v, left=bottom, height=bar_h, color=step_colors[s],
-                            edgecolor='white', linewidth=0.3, zorder=3)
-                    # 只在占比>=5% 且 占x轴>=3% 时标注百分比，调大则标注更少
-                    if tot > 0 and v / tot >= 0.05 and v / ymax >= 0.03:
-                        ax.text(bottom + v / 2.0, yj, '%d%%' % round(v / tot * 100),
-                                ha='center', va='center', fontsize=6.0,
-                                color=INK if s in light_set else 'white', zorder=4)
-                bottom += v
-            ax.text(bottom + ymax * 0.02, yj, '%s %s' % (shorts[p], fmt_val(tot)),
-                    ha='left', va='center', fontsize=6.6, color=prof_colors[p],
-                    fontweight='bold', zorder=4)   # 行尾合计：'profile 数值'，0.02=距柱尾留白
-        labels_y.append(center)
-        labels_txt.append(st)
-
-    ax.set_yticks(labels_y)
-    ax.set_yticklabels(labels_txt, fontsize=8.5, color=INK)
-    pady = group_span * 0.5 + 0.2
-    ax.set_ylim(labels_y[0] - pady, labels_y[-1] + pady + 0.5)
-    ax.set_xlim(0, ymax * 1.22)
-    ax.set_xlabel('ms / query', fontsize=10, color=MUTED)
-    ax.tick_params(axis='y', labelsize=8.5)
-    ax.tick_params(axis='x', labelsize=8.5, colors=MUTED)
-    ax.grid(axis='x', color=RULE, linewidth=0.7, zorder=0)
-    ax.set_axisbelow(True)
-    for sp in ('top', 'right'):
-        ax.spines[sp].set_visible(False)
-    for sp in ('left', 'bottom'):
-        ax.spines[sp].set_color(RULE)
-    leg_steps = ax.legend(handles=step_handles, loc='upper center', bbox_to_anchor=(0.5, 1.008),
-                          ncol=min(len(steps), 14), fontsize=8, frameon=False,
-                          columnspacing=1.1, handlelength=1.2, handleheight=0.9)   # 步骤图例：ncol 每行个数
-    ax.set_title(title, loc='left', fontsize=11.5, color=INK, pad=16)
-    fig.tight_layout()
-    fig.savefig(out_path, bbox_inches='tight', pad_inches=0.5, facecolor='white')   # pad_inches=四周留白，改大则顶部更空(用于显示图例)
-    plt.close(fig)
-
-
-# pg 横向总耗时图（仅 total 总柱+数值标注），绘制后递减输出：pgvector*_total.png
-def draw_total_h(rows, prof_ids, legend_labels, prof_colors, sql_types, out_path, title, figw=13.5):
-    """横向总耗时对比图：纵轴=sql_type（可容纳 11 类），每行内按 profile 分组。"""
-    nprof, nsql = len(prof_ids), len(sql_types)
-    ymax = nice_max(max(rows[(p, s)]['total'] for p in prof_ids for s in sql_types))
-    bar_h, os_ = 0.5, 0.53          # 单根横柱高度 0.5；os_=组内相邻 profile 纵向间距
-    group_span = (nprof - 1) * os_
-    slot = max(1.0, group_span + 1.0)
-    fig_h = nsql * slot * 0.5 + 1.6   # 画布高度：随行数自动；1.6 标题/图例预留
-    fig, ax = plt.subplots(figsize=(figw, fig_h), dpi=200)
-
-    labels_y, labels_txt = [], []
-    for i, st in enumerate(sql_types):
-        center = i * slot
-        for j, p in enumerate(prof_ids):
-            yj = center + (j - (nprof - 1) / 2.0) * os_
-            v = rows[(p, st)]['total']
-            ax.barh(yj, v, height=bar_h, color=prof_colors[p], edgecolor='white',
-                    linewidth=0.3, zorder=3)
-            ax.text(v + ymax * 0.02, yj, '%s %s' % (legend_labels[p], fmt_val(v)),
-                    ha='left', va='center', fontsize=5.6, color=prof_colors[p],
-                    fontweight='bold', zorder=4)   # 行内 profile 合计，0.02=距柱尾留白
-        labels_y.append(center)
-        labels_txt.append(st)
-
-    ax.set_yticks(labels_y)
-    ax.set_yticklabels(labels_txt, fontsize=8.5, color=INK)
-    pady = group_span * 0.5 + 0.2   # 顶部/底部首末行外留白
-    ax.set_ylim(labels_y[0] - pady, labels_y[-1] + pady)
-    ax.set_xlim(0, ymax * 1.3)   # x 轴上限：峰值×1.3，右侧为行内 profile 合计留空间
-    ax.set_xlabel('ms / query', fontsize=10, color=MUTED)
-    ax.tick_params(axis='y', labelsize=8.5)
-    ax.tick_params(axis='x', labelsize=8.5, colors=MUTED)
-    ax.grid(axis='x', color=RULE, linewidth=0.7, zorder=0)
-    ax.set_axisbelow(True)
-    for sp in ('top', 'right'):
-        ax.spines[sp].set_visible(False)
-    for sp in ('left', 'bottom'):
-        ax.spines[sp].set_color(RULE)
-    ax.set_title(title, loc='left', fontsize=11.5, color=INK, pad=16)
-    fig.tight_layout()
-    fig.savefig(out_path, bbox_inches='tight', pad_inches=0.5, facecolor='white')   # pad_inches=四周留白，改大则顶部更空(用于显示标题)
+    fig.savefig(out_path, bbox_inches='tight', pad_inches=0.35, facecolor='white')
     plt.close(fig)
 
 
 # ---------------- main ----------------
-def prepare(charts=True):
-    """加载数据并绘制图表（仅图表，不生成文字报告）。返回 G（各图表路径）。
-    输出图：ck/myscale_fusion_norc·rc.png、ck/myscale_total.png、pgvector*_fusion_norc·rc.png、pgvector*_total.png"""
+def pick_steps(frames, all_steps):
+    """跨维度取并集：只保留"无计划缓存"形态下至少在一个维度不为空的步骤。"""
+    present = set().union(*(row['present'] for f in frames.values() for row in f.values()))
+    return [s for s in all_steps if s in present]
+
+
+# ---------------- 解析模式: PG 日志 -> 汇总 CSV(表名+抽样数量命名) -> 占比图 ----------------
+def parse_args():
+    ap = argparse.ArgumentParser(
+        description="pgvector 耗时分析: 无参数=用 run-benchmark-loop.sh 产出的 CSV 画默认图; "
+                    "-n 指定抽样数量后=解析 PG 日志模式(支持循环多轮累计日志)")
+    ap.add_argument("-t", "--table",
+                    help="被测数据表名(如 benchmark_sift_128), 用于输出文件名与 analyze 引擎推断;"
+                         "配合 --engine clickhouse/myscale 时为 CK/MS 的数据表名")
+    ap.add_argument("-n", "--row-count", type=int,
+                    help="随机抽样向量条数(数值输入); 给出即进入日志解析/图表模式")
+    ap.add_argument("--engine", choices=["pgvector", "clickhouse", "myscale"],
+                    default="pgvector",
+                    help="-t/-n 模式下的数据库类型: pgvector=解析 PG 日志(默认); "
+                         "clickhouse/myscale=读既有分析 CSV 按多轮平均画图")
+    ap.add_argument("--pglog", default="/usr/local/pgsql/data/log/postgresql.log",
+                    help="PostgreSQL 服务日志路径(默认 /usr/local/pgsql/data/log/postgresql.log)")
+    ap.add_argument("--runs", default="all",
+                    help="合并日志中的运行批次数: all(默认) 或正整数 N(传给 analyze --batches)")
+    ap.add_argument("--no-chart", action="store_true", help="只写解析汇总 CSV, 不画图")
+    ap.add_argument("--cache-charts", action="store_true",
+                    help="额外生成第二组图(各计划缓存档位); 默认只输出无查询计划缓存的默认图")
+    ap.add_argument("--sql-types", default="",
+                    help="绘图包含的 sql_type 清单, 空格/逗号分隔(如 \"normal cast\"), "
+                         "顺序即图中横轴顺序; 默认空=脚本内置默认清单。CSV 中不存在的形态自动跳过")
+    args = ap.parse_args()
+    args.sql_types = split_sql_types(args.sql_types)
+    return args
+
+
+def parse_log_mode(args):
+    """解析 PG 日志(可含循环多轮运行), 按 <表名>-<抽样数量> 命名输出汇总 CSV 并画占比图。
+
+    复用 analyze_pgvector_log.py: --batches all --aggregate 把日志里的每一轮
+    (时间连续批次)独立分析后按格子平均合并, 解决"只能解析一次执行"的问题。
+    """
+    n = args.row_count
+    name = "%s-%d" % (args.table or "unknown", n)
+    out_csv = os.path.join(RAW, "pgvector_log_analysis-%s.csv" % name)
+    analyzer = os.path.join(BASE, "analyze_pgvector_log.py")
+    cmd = [sys.executable, analyzer, "--log", args.pglog, "--batches", str(args.runs),
+           "--aggregate", "--out", out_csv]
+    if args.table:
+        cmd += ["--engine", args.table]
+    print("[cmd]", " ".join(cmd), flush=True)
+    rc = subprocess.call(cmd)
+    if rc != 0:
+        raise SystemExit("[ERR] 日志解析失败(analyze_pgvector_log.py 退出码 %d)" % rc)
+    print("[OK] 日志解析汇总: %s" % out_csv)
+    if args.no_chart:
+        return
+    if not load_mpl():
+        return
+    pg = load_pg_off(out_csv)
+    types = ordered_sql_types(pg.keys(), PG_SQL_TYPES, args.sql_types)
+    if not types:
+        print("[warn] %s 无 cache=0 数据, 跳过占比图" % os.path.basename(out_csv))
+        return
+    dim = args.table or "unknown"
+    steps = PG_CHART_STEPS
+    restrict_steps(pg, steps)
+    chart = os.path.join(CHART_DIR, "pgvector_share_off_%s.png" % name)
+    draw_share({dim: pg}, types, steps, STEP_COLOR7, LIGHT7,
+               {dim: "%s (n=%d)" % (dim, n)},
+               "pgvector %s (n=%d): stage share per query, no plan cache (cache=0); "
+               "top label = ms/query" % (dim, n),
+               chart, dims=[dim], dim_colors={dim: DIM_COLOR['128']})
+    print("[OK] 占比图: %s" % chart)
+
+    # ---- 第二组(可选, --cache-charts): 4 种计划缓存档(cache=0/1/2/3), 含 eval/gcp ----
+    if not args.cache_charts:
+        return
+    caches = load_pg_caches(out_csv)
+    series = {c: caches[c] for c in PG_CACHE_ORDER if c in caches}
+    if not series:
+        return
+    for data in series.values():
+        restrict_steps(data, PG_CACHE_STEPS)
+    cache_types = types_in_all(union_sql_types(series.values(), PG_SQL_TYPES,
+                                              args.sql_types), series)
+    if not cache_types:
+        return
+    chart2 = os.path.join(CHART_DIR, "pgvector_share_cache_%s.png" % name)
+    draw_share(series, cache_types, PG_CACHE_STEPS, STEP_COLOR7, LIGHT7,
+               {c: 'cache=%s' % c for c in series},
+               "pgvector %s (n=%d): stage share per query, plan-cache modes "
+               "(cache=0/1/2/3); top label = ms/query" % (dim, n),
+               chart2, dims=list(series), dim_colors=CACHE_COLORS)
+    print("[OK] 占比图: %s" % chart2)
+
+
+def ck_ms_chart_mode(args):
+    """CK/MyScale 占比图模式: 读 <engine>-<表名>-log-analysis-<n>.csv, 多轮取平均画图。
+
+    循环脚本每个组合跑 R 轮基准后用 analyze_myscale_log.py 产出一份分析 CSV, 其中
+    同一 (profile, sql_type) 有 R 行 (每轮一组); 本函数对无计划缓存档 (clickhouse=
+    ck_off / myscale=off, 经 MS_PMAP 统一映射) 的各行按阶段取算术平均后画占比图。
+    """
+    eng, tbl, n = args.engine, args.table or "unknown", args.row_count
+    name = "%s-%d" % (tbl, n)
+    src = os.path.join(RAW, "%s-%s-log-analysis-%d.csv" % (eng, tbl, n))
+    if not os.path.exists(src):
+        bak = os.path.join(BAK, os.path.basename(src))
+        if os.path.exists(bak):
+            src = bak
+        else:
+            raise SystemExit("[ERR] 找不到日志分析 CSV: %s "
+                             "(请先用 run-benchmark-loop.sh 跑完该组合)" % src)
+    data = load_ck_off_avg(src, OFF_PROF)
+    types = ordered_sql_types(data.keys(), CK_SQL_TYPES, args.sql_types)
+    if not types:
+        raise SystemExit("[ERR] %s 无 %s 数据" % (src, OFF_PROF))
+    steps = pick_steps({tbl: data}, CK_OFF_STEPS)
+    print("[%s] 各 sql_type 平均耗时 (ms/query, %s 轮平均):"
+          % (os.path.basename(src), max(d['rounds'] for d in data.values())))
+    for st in types:
+        row = data[st]
+        det = ", ".join("%s=%s" % (s, fmt_val(row['values'][s]))
+                        for s in steps if row['values'][s] > 0)
+        print("  %-12s 总计 %-8s (%d 轮): %s" % (st, fmt_val(row['total']), row['rounds'], det))
+    if not load_mpl():
+        return
     os.makedirs(CHART_DIR, exist_ok=True)
+    chart = os.path.join(CHART_DIR, "%s_share_off_%s.png" % (eng, name))
+    draw_share({tbl: data}, types, steps, STEP_COLOR12, LIGHT12,
+               {tbl: "%s (n=%d)" % (tbl, n)},
+               "%s %s (n=%d): stage share per query, no plan cache (%s); "
+               "top label = ms/query" % (eng, tbl, n,
+                                         'ck_off' if eng == 'clickhouse' else 'off'),
+               chart, dims=[tbl], dim_colors={tbl: DIM_COLOR['128']})
+    print("[OK] 占比图: %s" % chart)
 
-    G = {
-        'ck_norc': os.path.join(CHART_DIR, 'ck_fusion_norc.png'),
-        'ck_rc': os.path.join(CHART_DIR, 'ck_fusion_rc.png'),
-        'ck_total': os.path.join(CHART_DIR, 'ck_total.png'),
-        'ms_norc': os.path.join(CHART_DIR, 'myscale_fusion_norc.png'),
-        'ms_rc': os.path.join(CHART_DIR, 'myscale_fusion_rc.png'),
-        'ms_total': os.path.join(CHART_DIR, 'myscale_total.png'),
-        'pg_norc': os.path.join(CHART_DIR, 'pgvector_fusion_norc.png'),
-        'pg_rc': os.path.join(CHART_DIR, 'pgvector_fusion_rc.png'),
-        'pg_total': os.path.join(CHART_DIR, 'pgvector_total.png'),
-        'pg1_norc': os.path.join(CHART_DIR, 'pgvector1_fusion_norc.png'),
-        'pg1_rc': os.path.join(CHART_DIR, 'pgvector1_fusion_rc.png'),
-        'pg1_total': os.path.join(CHART_DIR, 'pgvector1_total.png'),
-    }
-
-    if charts:
-        sql_ck, rows_ck, _ = load_cklike(resolve_input('clickhouse-Benchmark_256_290k-log-analysis-1000.csv'), {})
-        sql_ms, rows_ms, _ = load_cklike(resolve_input('myscale-Benchmark_256_290k-log-analysis-1000.csv'), MS_PMAP)
-        sql_pg = PV_SQL_TYPES
-        rows_pg = load_pgvector(resolve_input('pgvector_log_analysis-nytimes-256-angular-1000.csv'),
-                                PV_PARSE_MODE, PV_SQL_TYPES)
-        sql_pg1 = PV_SQL_TYPES
-        rows_pg1 = load_pgvector(resolve_input('pgvector_log_analysis-nytimes-256-angular-1.csv'),
-                                 PV_PARSE_MODE, PV_SQL_TYPES)
-
-        # ---- ClickHouse：3 张图 ----
-        draw_fusion(rows_ck, CK_PROFILES[:3],
-                    {'ck_off': 'off', 'ck_only_plan_cache': 'only_plan', 'ck_plan_cache': 'plan'},
-                    PROF_COLOR6, sql_ck, STEPS12, STEP_COLOR12, LIGHT12,
-                    'ClickHouse: no result cache (off / only_plan_cache / plan_cache)', G['ck_norc'])
-        draw_fusion(rows_ck, CK_PROFILES[3:],
-                    {'result_off': 'off', 'result_only_plan_cache': 'only_plan',
-                     'result_plan_cache': 'plan'},
-                    PROF_COLOR6, sql_ck, STEPS12, STEP_COLOR12, LIGHT12,
-                    'ClickHouse: with result cache (result_off / result_only_plan_cache / result_plan_cache)', G['ck_rc'])
-        draw_total(rows_ck, CK_PROFILES, {p: p for p in CK_PROFILES}, PROF_COLOR6, sql_ck, G['ck_total'],
-                   'ClickHouse: total time per query (6 profiles x 5 sql types)')
-
-        # ---- MyScale：3 张图 ----
-        draw_fusion(rows_ms, CK_PROFILES[:3],
-                    {'ck_off': 'off', 'ck_only_plan_cache': 'only_plan', 'ck_plan_cache': 'plan'},
-                    PROF_COLOR6, sql_ms, STEPS12, STEP_COLOR12, LIGHT12,
-                    'MyScale: no result cache (off / only_plan_cache / plan_cache)', G['ms_norc'])
-        draw_fusion(rows_ms, CK_PROFILES[3:],
-                    {'result_off': 'off', 'result_only_plan_cache': 'only_plan',
-                     'result_plan_cache': 'plan'},
-                    PROF_COLOR6, sql_ms, STEPS12, STEP_COLOR12, LIGHT12,
-                    'MyScale: with result cache (result_off / result_only_plan_cache / result_plan_cache)', G['ms_rc'])
-        draw_total(rows_ms, CK_PROFILES, {p: p for p in CK_PROFILES}, PROF_COLOR6, sql_ms, G['ms_total'],
-                   'MyScale: total time per query (6 profiles x 5 sql types)')
-
-        # ---- pgvector (-1000)：3 张图（横向，含 11 类 sql_type） ----
-        draw_fusion_h(rows_pg, PROF8[:4], PV_SHORT4, PROF8_COLOR, sql_pg, STEPS7, STEP_COLOR7, LIGHT7,
-                      'pgvector (1000): no result cache (cache 0-3)', G['pg_norc'], figw=14.0)
-        draw_fusion_h(rows_pg, PROF8[4:], PV_SHORT4, PROF8_COLOR, sql_pg, STEPS7, STEP_COLOR7, LIGHT7,
-                      'pgvector (1000): with result cache (cache 0-3)', G['pg_rc'], figw=14.0)
-        draw_total_h(rows_pg, PROF8, PROF8_LABEL, PROF8_COLOR, sql_pg, G['pg_total'],
-                     'pgvector (1000): total time per query (8 profiles x 11 sql types)', figw=14.0)
-
-        # ---- pgvector (-1)：3 张图（横向，含 11 类 sql_type） ----
-        draw_fusion_h(rows_pg1, PROF8[:4], PV_SHORT4, PROF8_COLOR, sql_pg1, STEPS7, STEP_COLOR7, LIGHT7,
-                      'pgvector (1): no result cache (cache 0-3)', G['pg1_norc'], figw=14.0)
-        draw_fusion_h(rows_pg1, PROF8[4:], PV_SHORT4, PROF8_COLOR, sql_pg1, STEPS7, STEP_COLOR7, LIGHT7,
-                      'pgvector (1): with result cache (cache 0-3)', G['pg1_rc'], figw=14.0)
-        draw_total_h(rows_pg1, PROF8, PROF8_LABEL, PROF8_COLOR, sql_pg1, G['pg1_total'],
-                     'pgvector (1): total time per query (8 profiles x 11 sql types)', figw=14.0)
-        print('charts saved to', CHART_DIR)
-    return G
+    # ---- 第二组(可选, --cache-charts): 3 种计划缓存档(含复用阶段) ----
+    if not args.cache_charts:
+        return
+    profs = load_ck_profiles_avg(src, CK_CACHE_STEPS)
+    series = {p: profs[p] for p in CK_CACHE_ORDER if p in profs}
+    if not series:
+        return
+    cache_types = types_in_all(union_sql_types(series.values(), CK_SQL_TYPES,
+                                              args.sql_types), series)
+    if not cache_types:
+        return
+    chart2 = os.path.join(CHART_DIR, "%s_share_cache_%s.png" % (eng, name))
+    draw_share(series, cache_types, CK_CACHE_STEPS, STEP_COLOR12, LIGHT12,
+               {k: k for k in series},
+               "%s %s (n=%d): stage share per query, plan-cache modes "
+               "(ck_off/only_plan_cache/plan_cache); top label = ms/query" % (eng, tbl, n),
+               chart2, dims=list(series), dim_colors=CACHE_COLORS)
+    print("[OK] 占比图: %s" % chart2)
 
 
 def main():
-    """脚本入口：生成全部图表（``prepare`` 内部按固定清单逐张绘制）。"""
-    prepare(charts=True)
+    args = parse_args()
+    os.makedirs(CHART_DIR, exist_ok=True)
+    if args.row_count is not None:
+        if args.engine == "pgvector":
+            parse_log_mode(args)
+        else:
+            ck_ms_chart_mode(args)
+        return
+    if not load_mpl():
+        raise SystemExit('[ERR] 生成图表需要 matplotlib, 或改用日志解析模式: '
+                         '%s -t <表名> -n <条数> --no-chart' % os.path.basename(__file__))
+
+    # ---- 默认图: 不使用查询计划缓存（数据文件取自 run-benchmark-loop.sh 的产出） ----
+    # ClickHouse: ck_off
+    ck_paths = {t: resolve_optional(loop_csv('clickhouse', t, CK_ROW_COUNT)) for t in CK_TABLES}
+    ck_paths = {t: p for t, p in ck_paths.items() if p}
+    ck = {t: load_ck_off(p, OFF_PROF) for t, p in ck_paths.items()}
+    if ck:
+        ck_steps = pick_steps(ck, CK_OFF_STEPS)
+        ck_types = union_sql_types(ck.values(), CK_SQL_TYPES, args.sql_types)
+        draw_share(ck, ck_types, ck_steps, STEP_COLOR12, LIGHT12, {t: t for t in ck},
+                   'ClickHouse: stage share per query, no plan cache (ck_off); top label = ms/query',
+                   os.path.join(CHART_DIR, 'clickhouse_share_off.png'),
+                   dims=list(ck), dim_colors={t: table_color(t, '#9aa5b1') for t in ck})
+    else:
+        print('[warn] 未找到 ClickHouse 分析 CSV(clickhouse-*-log-analysis-1000.csv), 跳过',
+              file=sys.stderr)
+
+    # MyScale: off（映射到 ck_off 口径）
+    ms_paths = {t: resolve_optional(loop_csv('myscale', t, CK_ROW_COUNT)) for t in CK_TABLES}
+    ms_paths = {t: p for t, p in ms_paths.items() if p}
+    ms = {t: load_ck_off(p, OFF_PROF) for t, p in ms_paths.items()}
+    if ms:
+        ms_steps = pick_steps(ms, CK_OFF_STEPS)
+        ms_types = union_sql_types(ms.values(), CK_SQL_TYPES, args.sql_types)
+        draw_share(ms, ms_types, ms_steps, STEP_COLOR12, LIGHT12, {t: t for t in ms},
+                   'MyScale: stage share per query, no plan cache (off); top label = ms/query',
+                   os.path.join(CHART_DIR, 'myscale_share_off.png'),
+                   dims=list(ms), dim_colors={t: table_color(t, '#9aa5b1') for t in ms})
+    else:
+        print('[warn] 未找到 MyScale 分析 CSV(myscale-*-log-analysis-1000.csv), 跳过',
+              file=sys.stderr)
+
+    # pgvector: 1000 / 1，cache=0
+    pg_paths_by_n = {}
+    for suffix in ('1000', '1'):
+        paths = {t: resolve_optional(loop_csv('pgvector', t, suffix)) for t in PG_TABLES}
+        paths = {t: p for t, p in paths.items() if p}
+        pg_paths_by_n[suffix] = paths
+        if not paths:
+            print('[warn] 未找到 pgvector_log_analysis-*-%s.csv, 跳过' % suffix, file=sys.stderr)
+            continue
+        pg = {t: load_pg_off(p) for t, p in paths.items()}
+        for t in pg:
+            restrict_steps(pg[t], PG_CHART_STEPS)
+        pg_types = union_sql_types(pg.values(), PG_SQL_TYPES, args.sql_types)
+        draw_share(pg, pg_types, PG_CHART_STEPS, STEP_COLOR7, LIGHT7,
+                   {t: t for t in pg},
+                   'pgvector (n=%s): stage share per query, no plan cache (cache=0); '
+                   'top label = ms/query' % suffix,
+                   os.path.join(CHART_DIR, 'pgvector_%s_share_off.png' % suffix),
+                   dims=list(pg), dim_colors={t: table_color(t, '#9aa5b1') for t in pg})
+        print('pgvector(n=%s) steps: %s' % (suffix, PG_CHART_STEPS))
+
+    if not args.cache_charts:
+        print('charts saved to', CHART_DIR)
+        return
+
+    # ---- 第二组(可选): 各计划缓存档位（每个档位一张图，柱=各表） ----
+    ck_prof = {t: load_ck_profiles_avg(p, CK_CACHE_STEPS) for t, p in ck_paths.items()}
+    for prof in CK_CACHE_ORDER:
+        by_tbl = {t: ck_prof[t][prof] for t in ck_prof if prof in ck_prof[t]}
+        if not by_tbl:
+            continue
+        types2 = types_in_all(union_sql_types(by_tbl.values(), CK_SQL_TYPES,
+                                              args.sql_types), by_tbl)
+        if not types2:
+            continue
+        draw_share(by_tbl, types2, CK_CACHE_STEPS, STEP_COLOR12, LIGHT12,
+                   {t: t for t in by_tbl},
+                   'ClickHouse: stage share per query, plan-cache mode %s; '
+                   'top label = ms/query' % prof,
+                   os.path.join(CHART_DIR, 'clickhouse_share_cache_%s.png' % prof),
+                   dims=list(by_tbl), dim_colors={t: table_color(t, '#9aa5b1') for t in by_tbl})
+
+    ms_prof = {t: load_ck_profiles_avg(p, CK_CACHE_STEPS) for t, p in ms_paths.items()}
+    for prof in CK_CACHE_ORDER:
+        by_tbl = {t: ms_prof[t][prof] for t in ms_prof if prof in ms_prof[t]}
+        if not by_tbl:
+            continue
+        types2 = types_in_all(union_sql_types(by_tbl.values(), CK_SQL_TYPES,
+                                              args.sql_types), by_tbl)
+        if not types2:
+            continue
+        draw_share(by_tbl, types2, CK_CACHE_STEPS, STEP_COLOR12, LIGHT12,
+                   {t: t for t in by_tbl},
+                   'MyScale: stage share per query, plan-cache mode %s; '
+                   'top label = ms/query' % prof,
+                   os.path.join(CHART_DIR, 'myscale_share_cache_%s.png' % prof),
+                   dims=list(by_tbl), dim_colors={t: table_color(t, '#9aa5b1') for t in by_tbl})
+
+    for suffix, paths in pg_paths_by_n.items():
+        if not paths:
+            continue
+        pg_cache = {t: load_pg_caches(p) for t, p in paths.items()}
+        for c in PG_CACHE_ORDER:
+            by_tbl = {t: pg_cache[t][c] for t in pg_cache if c in pg_cache[t]}
+            if not by_tbl:
+                continue
+            for data in by_tbl.values():
+                restrict_steps(data, PG_CACHE_STEPS)
+            types2 = types_in_all(union_sql_types(by_tbl.values(), PG_SQL_TYPES,
+                                                  args.sql_types), by_tbl)
+            if not types2:
+                continue
+            draw_share(by_tbl, types2, PG_CACHE_STEPS, STEP_COLOR7, LIGHT7,
+                       {t: t for t in by_tbl},
+                       'pgvector (n=%s): stage share per query, plan-cache mode cache=%s; '
+                       'top label = ms/query' % (suffix, c),
+                       os.path.join(CHART_DIR, 'pgvector_%s_share_cache_%s.png' % (suffix, c)),
+                       dims=list(by_tbl), dim_colors={t: table_color(t, '#9aa5b1') for t in by_tbl})
+
+    print('charts saved to', CHART_DIR)
 
 
 if __name__ == '__main__':
