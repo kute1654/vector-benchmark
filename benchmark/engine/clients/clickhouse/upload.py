@@ -13,6 +13,7 @@ import time
 from typing import List, Optional
 
 import clickhouse_connect
+from clickhouse_connect.driver.client import Client
 from clickhouse_driver import Client as DriverClient
 
 from benchmark.cli_output import sql, stage, step, warn

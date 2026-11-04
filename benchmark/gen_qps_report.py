@@ -57,12 +57,31 @@ def _on(v):
     return v in ('1', '1.0', 'true', 'True')
 
 
+def _dim_parts(tname):
+    """从表名拆出 (维度, 紧跟其后的数据量段)，找不到维度返回 (None, '')。
+
+    维度是前缀之后第一个纯数字段，而不是固定第 2 段：``Benchmark_1536_1m`` 的维度
+    在第 2 段，``benchmark_sift_128`` 的维度在第 3 段（且没有数据量段）。
+    """
+    parts = tname.split('_')
+    for i in range(1, len(parts)):
+        if parts[i].isdigit():
+            return parts[i], (parts[i + 1] if i + 1 < len(parts) else '')
+    return None, ''
+
+
 def dim_label(tname):
-    """由表名推导维度标签，如 Benchmark_128_10m -> '128\\n10M rows'。"""
-    m = re.match(r'^[^_]+_(\d+)_([\d.]+)([mk]?)', tname)
-    if not m:
+    """由表名推导维度标签，如 Benchmark_128_10m -> '128\\n10M rows'。
+
+    表名不带数据量时（如 benchmark_sift_128）只显示维度，不编造行数。
+    """
+    dim, nxt = _dim_parts(tname)
+    if not dim:
         return tname
-    dim, val, unit = m.group(1), float(m.group(2)), m.group(3)
+    m = re.match(r'^([\d.]+)([mk]?)$', nxt or '')
+    if not m:
+        return dim
+    val, unit = float(m.group(1)), m.group(2)
     if unit == 'm':
         rows = val * 1000000
     elif unit == 'k':
@@ -79,9 +98,9 @@ def dim_label(tname):
 
 
 def _dim_num(tname):
-    """由表名取维度数值用于排序，如 Benchmark_1536_1m -> 1536。"""
-    m = re.match(r'^[^_]+_(\d+)_', tname)
-    return int(m.group(1)) if m else 1 << 30
+    """由表名取维度数值用于排序，如 Benchmark_1536_1m -> 1536、benchmark_sift_128 -> 128。"""
+    dim, _ = _dim_parts(tname)
+    return int(dim) if dim else 1 << 30
 
 
 def dim_short(tname):
@@ -123,15 +142,25 @@ def run_values(row):
     return vals
 
 
+def run_mean(row):
+    """一行 CSV = 一轮基准运行；返回该轮有效 run_N 样本的均值（无有效样本返回 0）。
+
+    多次运行的汇总口径是"先算每轮均值，再对轮次求均值"，让每一轮权重相同，
+    而不是把不同轮次的样本混在一起按样本数加权。"""
+    vals = run_values(row)
+    return sum(vals) / len(vals) if vals else 0.0
+
+
 def load_ckms(fname, concurrency=DEFAULT_CONCURRENCY):
     """读 ClickHouse/MyScale CSV（只取指定并发的行），推导 SQL 类型、表、profile 及缓存口径。
-    同一 (表, profile, sql_type) 组合的所有原始 run_N 样本（跨全部轮次、列数随表头
-    动态）一起取算术平均；不再用每行 qps_avg（那是固定 REPEAT 次、去极值的均值）。
+    同一 (表, profile, sql_type) 组合可能有多行(多轮运行)：每行先取该轮 run_1..run_N 的
+    均值，再对各轮均值取算术平均，每轮权重相同；不再用单行 qps_avg（那是固定 REPEAT 次、
+    去极值的均值），也不再跨轮混池按样本数加权。返回的 rounds 为该组合的最大轮数。
     数据供 ck_qps_norc/rc.png、ck_dim_qps.png、ck_corr_256.png 与默认 8 并发图使用。
     注意：不按 index_status 过滤（该列不可靠），直接取全部行，仅剔除无有效样本的行。"""
     rows = [r for r in csv_reader(fname) if r['concurrency'] == str(concurrency)]
     sql_types, tables, order = [], [], []
-    recs, pflag = {}, {}
+    recs, pflag, nrun = {}, {}, {}
     col = ENG_COL['ClickHouse'] if fname == CK_SRC else ENG_COL['MyScale']
     for r in rows:
         vals = run_values(r)
@@ -141,13 +170,15 @@ def load_ckms(fname, concurrency=DEFAULT_CONCURRENCY):
         for seq, v in ((sql_types, st), (tables, t), (order, p)):
             if v not in seq:
                 seq.append(v)
-        recs.setdefault((t, p, st), []).extend(vals)
+        recs.setdefault((t, p, st), []).append(sum(vals) / len(vals))  # 每轮一个均值样本
+        nrun[(t, p, st)] = nrun.get((t, p, st), 0) + 1
         pflag[p] = {'rc': _on(r['use_query_cache']), 'plan': _on(r[col['plan']]),
                     'only': _on(r[col['only']]), 'cast': _on(r[col['cast']]),
                     'ovec': _on(r[col['ovec']])}
     recs = {k: sum(v) / len(v) for k, v in recs.items()}
     return {'types': sql_types, 'tables': tables, 'order': order,
-            'recs': recs, 'pflag': pflag}
+            'recs': recs, 'pflag': pflag,
+            'rounds': max(nrun.values() or [0])}
 
 
 def csv_reader(fname):
@@ -769,9 +800,9 @@ def dims_with_base(recs, tables, base, sql_types):
 def load_pg_loop(concurrency=DEFAULT_CONCURRENCY, row_count=None):
     """读 run-benchmark-loop.sh 产出的 pgvector 结果 CSV（按并发过滤）。
 
-    记录 (表, plan_mode, sql_type) -> qps_avg；同一组合有多轮（n=1 时每轮一组单条
-    SQL）时把所有轮次的原始 run_N 样本（列数随表头动态）一起求算术平均，与循环
-    脚本"多轮按阶段取平均"的口径一致；不再用每行 qps_avg（固定 REPEAT 次、去极值）。
+    记录 (表, plan_mode, sql_type) -> 各轮运行均值；同一组合有多轮（n=1 时每轮一组
+    单条 SQL）时，每轮先对 run_1..run_N 求均值，再对各轮均值取算术平均（每轮权重相同）。
+    与循环脚本"多轮按阶段取平均"的口径一致；不再用每行 qps_avg（固定 REPEAT 次、去极值）。
     plan_mode 即计划缓存状态：raw(无计划缓存) / prepare_auto / prepare_generic /
     prepare_custom。row_count 是抽样 SQL 条数：n=1 与 n=1000 的 QPS 不能混算，
     默认优先 1000(与 CK/MS 口径一致)，该并发下还没有 1000 的数据时退回可用最大值。
@@ -798,10 +829,10 @@ def load_pg_loop(concurrency=DEFAULT_CONCURRENCY, row_count=None):
         for seq, v in ((tables, key[0]), (modes, key[1]), (types, key[2])):
             if v not in seq:
                 seq.append(v)
-        recs.setdefault(key, []).extend(vals)          # 跨轮次累积原始样本
-        nrow[key] = nrow.get(key, 0) + 1                # 该组合贡献的 CSV 行数
+        recs.setdefault(key, []).append(sum(vals) / len(vals))  # 每轮一个均值样本
+        nrow[key] = nrow.get(key, 0) + 1                        # 该组合贡献的 CSV 行数(轮数)
     rounds = max(nrow.values() or [0])                  # 轮次数量动态，不写死次数
-    samples = max([len(v) for v in recs.values()] or [0])
+    samples = sum(nrow.values())                        # 参与平均的轮次总数
     recs = {k: sum(v) / len(v) for k, v in recs.items()}
     return {'tables': tables, 'modes': modes, 'types': types, 'recs': recs,
             'row_count': row_count, 'rounds': rounds, 'samples': samples}
@@ -862,8 +893,15 @@ def _draw_dim_qps(recs, dims, modes, T, base, title, fname, color, label):
     plt.close(fig)
 
 
+def runs_txt(n):
+    """轮数文案：1 -> '1 run'，其余 -> 'N runs'。"""
+    n = int(n or 0)
+    return '%d run%s' % (n, '' if n == 1 else 's')
+
+
 def build_ckms_qps(db, meta, concurrency, tables, sql_types, fname):
-    """CK/MS QPS 图：3 个计划缓存档位(无缓存为基准)，组内按维度升序并排。"""
+    """CK/MS QPS 图：3 个计划缓存档位(无缓存为基准)，组内按维度升序并排。
+    柱值 = 该组合全部轮次"轮内均值"的算术平均。"""
     pflag = meta['pflag']
     modes = [p for p in meta['order']
              if not pflag[p]['rc'] and not pflag[p]['cast'] and not pflag[p]['ovec']]
@@ -875,13 +913,14 @@ def build_ckms_qps(db, meta, concurrency, tables, sql_types, fname):
     if not dims or not T:
         raise SystemExit('[ERR] %s 无可用 QPS 数据(检查 -t/--sql-types 或结果 CSV)' % db)
     _draw_dim_qps(meta['recs'], dims, modes, T, base,
-                  '%s · concurrency=%s · baseline=no plan cache · %s dims'
-                  % (db, concurrency, len(dims)),
+                  '%s · concurrency=%s · avg of %s · baseline=no plan cache · %s dims'
+                  % (db, concurrency, runs_txt(meta.get('rounds')), len(dims)),
                   fname, lambda p: color_of(pflag[p]), lambda p: cn_of(pflag[p]))
 
 
 def build_pg_qps(pg, concurrency, tables, sql_types, fname):
-    """pgvector QPS 图：4 个计划缓存状态(raw 为基准)，组内按维度升序并排。"""
+    """pgvector QPS 图：4 个计划缓存状态(raw 为基准)，组内按维度升序并排。
+    柱值 = 该组合全部轮次"轮内均值"的算术平均。"""
     modes = [m for m in PG_CACHE_MODES if m in pg['modes']] + \
             [m for m in pg['modes'] if m not in PG_CACHE_MODES]
     base = 'raw' if 'raw' in modes else modes[0]
@@ -891,8 +930,8 @@ def build_pg_qps(pg, concurrency, tables, sql_types, fname):
     if not dims or not T:
         raise SystemExit('[ERR] pgvector 无可用 QPS 数据(检查 -t/--sql-types 或结果 CSV)')
     _draw_dim_qps(pg['recs'], dims, modes, T, base,
-                  'pgvector · concurrency=%s · row_count=%s · baseline=raw (no plan cache)'
-                  % (concurrency, pg['row_count']),
+                  'pgvector · concurrency=%s · row_count=%s · avg of %s · baseline=raw (no plan cache)'
+                  % (concurrency, pg['row_count'], runs_txt(pg.get('rounds'))),
                   fname, lambda m: PG_MODE_COLOR.get(m, '#9aa5b1'),
                   lambda m: PG_MODE_LABEL.get(m, m))
 
@@ -911,8 +950,8 @@ def parse_args():
                     help='限定 sql_type 清单(空格/逗号分隔); 默认取结果 CSV 中出现的全部形态')
     ap.add_argument('--row-count', default='',
                     help='pgvector 抽样 SQL 条数(1/1000), 可给多个(空格/逗号分隔), '
-                         '每个各出一张 pg_qps_c8_n<条数>.png; 不给时优先 1000, '
-                         '该并发下没有时退回可用最大值(CK/MS 忽略此项)')
+                         '每个各出一张 pg_qps_c8_n<条数>.png; 不给时按结果 CSV 中实际'
+                         '存在的全部条数各出一张(CK/MS 忽略此项)')
     ap.add_argument('--engine', choices=['all', 'clickhouse', 'myscale', 'pgvector'], default='all',
                     help='只画某一类(默认 all)')
     ap.add_argument('--legacy-charts', action='store_true',
@@ -947,9 +986,19 @@ def main():
 
     if args.engine in ('all', 'pgvector'):
         rcs = split_types(args.row_count)   # 可多个: --row-count "1 1000" 各出一张图
+        if not rcs:
+            # 未指定时按结果 CSV 中实际存在的 row_count 各出一张(如 n=1 与 n=1000)
+            try:
+                rcs = sorted({r['row_count'] for r in csv_reader(PG_LOOP_SRC)
+                              if r['concurrency'] == str(c)}, key=int)
+            except FileNotFoundError:
+                rcs = []
         for rc in (rcs or ['']):
             try:
                 pg = load_pg_loop(c, rc or None)
+            except SystemExit as e:
+                print('[warn] %s' % e, file=sys.stderr)
+                continue
             except FileNotFoundError:
                 print('[warn] 缺少 %s, 跳过 pgvector' % PG_LOOP_SRC, file=sys.stderr)
                 break
@@ -959,8 +1008,8 @@ def main():
             if args.table and args.table not in pg['tables']:
                 print('[warn] %s 中没有表 %s, 跳过' % (PG_LOOP_SRC, args.table), file=sys.stderr)
                 continue
-            print('(info) pgvector: row_count=%s, 每组合 %s 轮共 %s 个原始 QPS 样本求平均'
-                  % (pg['row_count'], pg['rounds'], pg['samples']), file=sys.stderr)
+            print('(info) pgvector: row_count=%s, 每组合平均 %s (共 %s 行样本)'
+                  % (pg['row_count'], runs_txt(pg['rounds']), pg['samples']), file=sys.stderr)
             tables = [args.table] if args.table else pg['tables']
             # 显式指定 row_count 时文件名带上条数, 避免多张图互相覆盖
             fname = 'pg_qps_c%s%s.png' % (c, ('_n%s' % pg['row_count']) if rc else '')

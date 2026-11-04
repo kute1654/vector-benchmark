@@ -17,12 +17,12 @@
         "cast_array",
         "raw_bytes"
       ],
-      "search_number": 5
+      "search_number": 1
     },
     "search_params": {
-      "parallel": [1,8],
+      "parallel": [1],
       "top": [10],
-      "test_duration": 10,
+      "test_duration": 1,
       "params": {
         "ef_s": [
           100
@@ -48,12 +48,12 @@
         "cast_array",
         "raw_bytes"
       ],
-      "search_number": 5
+      "search_number": 1
     },
     "search_params": {
-      "parallel": [1,8],
+      "parallel": [1],
       "top": [10],
-      "test_duration": 10,
+      "test_duration": 1,
       "params": {
         "ef_s": [
           100
@@ -79,12 +79,12 @@
         "cast_array",
         "raw_bytes"
       ],
-      "search_number": 5
+      "search_number": 1
     },
     "search_params": {
-      "parallel": [1,8],
+      "parallel": [1],
       "top": [10],
-      "test_duration": 10,
+      "test_duration": 1,
       "params": {
         "ef_s": [
           100
@@ -110,12 +110,12 @@
         "cast_array",
         "raw_bytes"
       ],
-      "search_number": 5
+      "search_number": 1
     },
     "search_params": {
-      "parallel": [1,8],
+      "parallel": [1],
       "top": [10],
-      "test_duration": 10,
+      "test_duration": 1,
       "params": {
         "ef_s": [
           100
@@ -141,12 +141,12 @@
         "cast_array",
         "raw_bytes"
       ],
-      "search_number": 5
+      "search_number": 1
     },
     "search_params": {
-      "parallel": [1,8],
+      "parallel": [1],
       "top": [10],
-      "test_duration": 10,
+      "test_duration": 1,
       "params": {
         "ef_s": [
           100
@@ -172,12 +172,12 @@
         "cast_array",
         "raw_bytes"
       ],
-      "search_number": 5
+      "search_number": 1
     },
     "search_params": {
-      "parallel": [1,8],
+      "parallel": [1],
       "top": [10],
-      "test_duration": 10,
+      "test_duration": 1,
       "params": {
         "ef_s": [
           100
@@ -203,12 +203,12 @@
         "cast_array",
         "raw_bytes"
       ],
-      "search_number": 5
+      "search_number": 1
     },
     "search_params": {
-      "parallel": [1,8],
+      "parallel": [1],
       "top": [10],
-      "test_duration": 10,
+      "test_duration": 1,
       "params": {
         "ef_s": [
           100
@@ -234,12 +234,12 @@
         "cast_array",
         "raw_bytes"
       ],
-      "search_number": 5
+      "search_number": 1
     },
     "search_params": {
-      "parallel": [1,8],
+      "parallel": [1],
       "top": [10],
-      "test_duration": 10,
+      "test_duration": 1,
       "params": {
         "ef_s": [
           100
@@ -265,12 +265,12 @@
         "cast_array",
         "raw_bytes"
       ],
-      "search_number": 5
+      "search_number": 1
     },
     "search_params": {
-      "parallel": [1,8],
+      "parallel": [1],
       "top": [10],
-      "test_duration": 10,
+      "test_duration": 1,
       "params": {
         "ef_s": [
           100
@@ -296,12 +296,12 @@
         "cast_array",
         "raw_bytes"
       ],
-      "search_number": 5
+      "search_number": 1
     },
     "search_params": {
-      "parallel": [1,8],
+      "parallel": [1],
       "top": [10],
-      "test_duration": 10,
+      "test_duration": 1,
       "params": {
         "ef_s": [
           100
@@ -335,12 +335,12 @@
         "array_real_cast",
         "with_array_cast"
       ],
-      "search_number": 5
+      "search_number": 1
     },
     "search_params": {
-      "parallel": [1,8],
+      "parallel": [1],
       "top": [10],
-      "test_duration": 10,
+      "test_duration": 1,
       "params": {
         "ef_s": [
           100
@@ -371,12 +371,12 @@
         "array_real_cast",
         "with_array_cast"
       ],
-      "search_number": 5
+      "search_number": 1
     },
     "search_params": {
-      "parallel": [1,8],
+      "parallel": [1],
       "top": [10],
-      "test_duration": 10,
+      "test_duration": 1,
       "params": {
         "ef_s": [
           100
@@ -407,12 +407,12 @@
         "array_real_cast",
         "with_array_cast"
       ],
-      "search_number": 5
+      "search_number": 1
     },
     "search_params": {
-      "parallel": [1,8],
+      "parallel": [1],
       "top": [10],
-      "test_duration": 10,
+      "test_duration": 1,
       "params": {
         "ef_s": [
           100
@@ -443,12 +443,12 @@
         "array_real_cast",
         "with_array_cast"
       ],
-      "search_number": 5
+      "search_number": 1
     },
     "search_params": {
-      "parallel": [1,8],
+      "parallel": [1],
       "top": [10],
-      "test_duration": 10,
+      "test_duration": 1,
       "params": {
         "ef_s": [
           100
@@ -479,12 +479,12 @@
         "array_real_cast",
         "with_array_cast"
       ],
-      "search_number": 5
+      "search_number": 1
     },
     "search_params": {
-      "parallel": [1,8],
+      "parallel": [1],
       "top": [10],
-      "test_duration": 10,
+      "test_duration": 1,
       "params": {
         "ef_s": [
           100
@@ -522,12 +522,12 @@
         0,
         1
       ],
-      "search_number": 5
+      "search_number": 1
     },
     "search_params": {
-      "parallel": 16,
+      "parallel": 1,
       "top": 10,
-      "test_duration": 10,
+      "test_duration": 1,
       "params": {
         "ef_s": [
           100
