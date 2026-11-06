@@ -217,11 +217,11 @@ def draw_panel(ax, panel, show_ylabel):
                        color=step_colors[step], edgecolor='white', linewidth=0.35, zorder=3)
                 if share >= 5.0:
                     ax.text(xi, bottom + share / 2.0, '%d%%' % round(share),
-                            ha='center', va='center', fontsize=5.8,
+                            ha='center', va='center', fontsize=10,
                             color=gst.INK if step in light else 'white', zorder=4)
                 bottom += share
             ax.text(xi, 102.0, gst.fmt_val(row['total']), ha='center', va='bottom',
-                    fontsize=6.0, color='#c0392b', fontweight='bold',
+                    fontsize=8.5, color='#c0392b', fontweight='bold',
                     rotation=90, zorder=5)
             ax.plot([xi - w * 0.40, xi + w * 0.40], [-8.0, -8.0],
                     color=cache_colors.get(cache, '#9aa5b1'), lw=2.6,
@@ -233,10 +233,10 @@ def draw_panel(ax, panel, show_ylabel):
     ax.set_ylim(0, 110)
     ax.set_yticks([0, 20, 40, 60, 80, 100])
     ax.set_xticks(range(len(types)))
-    ax.set_xticklabels(types, fontsize=8.5, color=gst.INK)
+    ax.set_xticklabels(types, fontsize=11, color=gst.INK)
     if show_ylabel:
-        ax.set_ylabel('share of per-query time (%)', fontsize=9, color=gst.MUTED)
-    ax.tick_params(axis='y', labelsize=8, colors=gst.MUTED)
+        ax.set_ylabel('share of per-query time (%)', fontsize=11, color=gst.MUTED)
+    ax.tick_params(axis='y', labelsize=10, colors=gst.MUTED)
     ax.grid(axis='y', color=gst.RULE, linewidth=0.7, zorder=0)
     ax.set_axisbelow(True)
     for sp in ('top', 'right'):
@@ -245,8 +245,8 @@ def draw_panel(ax, panel, show_ylabel):
         ax.spines[sp].set_color(gst.RULE)
 
     # 面板名与阶段图例都放到 axes 外上方（紧贴），避免与柱顶耗时标注重叠
-    ax.text(0.0, 1.01, panel['name'], transform=ax.transAxes,
-            ha='left', va='bottom', fontsize=10.5, color=gst.INK,
+    ax.text(0.0, 1.095, panel['name'], transform=ax.transAxes,
+            ha='left', va='bottom', fontsize=16, color=gst.INK,
             fontweight='bold')
 
     def step_is_used(s):
@@ -261,8 +261,8 @@ def draw_panel(ax, panel, show_ylabel):
                      if s != 'vin' and step_is_used(s)]
     # 阶段图例（紧贴轴外右上方，整行排列）——用 add_artist 保留，避免被后面的 cache legend 覆盖
     if stage_handles:
-        leg_stage = ax.legend(handles=stage_handles, loc='lower right', bbox_to_anchor=(1.0, 1.01),
-                              ncol=len(stage_handles), fontsize=6.2, frameon=False,
+        leg_stage = ax.legend(handles=stage_handles, loc='lower right', bbox_to_anchor=(1.0, 1.005),
+                              ncol=len(stage_handles), fontsize=10, frameon=False,
                               columnspacing=0.8, handlelength=1.0, handleheight=0.7)
         ax.add_artist(leg_stage)
     # 面板自己的缓存图例（放在轴外下方，下移一点但不过头）
@@ -271,7 +271,7 @@ def draw_panel(ax, panel, show_ylabel):
                      for c in caches]
     if cache_handles:
         ax.legend(handles=cache_handles, loc='upper center', bbox_to_anchor=(0.5, -0.16),
-                  ncol=nc, fontsize=6.5, frameon=False, columnspacing=1.2,
+                  ncol=nc, fontsize=11, frameon=False, columnspacing=1.2,
                   handlelength=1.0, handleheight=0.7)
 
 
@@ -356,15 +356,15 @@ def main():
     for k, (ax, panel) in enumerate(zip(axes.flat, panels)):
         draw_panel(ax, panel, show_ylabel=(k % 2 == 0))
     fig.suptitle('768-dim per-query time: query plan cache OFF vs ON '
-                 '(four databases × four SQL types)', fontsize=13.5, color=gst.INK,
+                 '(four databases × four SQL types)', fontsize=18, color=gst.INK,
                  y=0.97)
 
     fig.text(0.5, 0.018,
              'stacked bars = stage share of per-query time (100%); '
              'top label = total ms/query',
-             ha='center', fontsize=9, color=gst.MUTED)
+             ha='center', fontsize=14, color=gst.MUTED)
     fig.subplots_adjust(left=0.06, right=0.985, top=0.88, bottom=0.12,
-                        hspace=0.28, wspace=0.10)
+                        hspace=0.45, wspace=0.10)
     fig.savefig(args.out, facecolor='white', bbox_inches='tight', pad_inches=0.3)
     gst.plt.close(fig)
     print('[OK] 图已保存: %s' % args.out)

@@ -118,10 +118,10 @@ def draw_gain_panel(ax, panel, show_ylabel):
                    edgecolor='white', linewidth=0.35, zorder=3)
             # 柱体中标注平均 QPS 绝对值（竖排白字）
             ax.text(xi, gain / 2.0, '%.0f' % q, ha='center', va='center',
-                    fontsize=5.2, color='white', rotation=90, zorder=5)
+                    fontsize=16, color='white', rotation=90, zorder=5)
             # 柱顶标注收益倍数（竖排红粗）
             ax.text(xi, gain + 0.035, '×%.2f' % gain, ha='center', va='bottom',
-                    fontsize=6.0, color='#c0392b', fontweight='bold',
+                    fontsize=16, color='#c0392b', fontweight='bold',
                     rotation=90, zorder=5)
             ax.plot([xi - w * 0.40, xi + w * 0.40], [-8.0, -8.0],
                     color=color, lw=2.6, solid_capstyle='butt',
@@ -133,10 +133,10 @@ def draw_gain_panel(ax, panel, show_ylabel):
     ax.set_xlim(-0.5, len(types) - 0.5)
     ax.set_ylim(0, maxg * 1.30)
     ax.set_xticks(range(len(types)))
-    ax.set_xticklabels(types, fontsize=8.5, color=gst.INK)
+    ax.set_xticklabels(types, fontsize=16, color=gst.INK)
     if show_ylabel:
-        ax.set_ylabel('QPS gain vs no plan cache (×)', fontsize=9, color=gst.MUTED)
-    ax.tick_params(axis='y', labelsize=8, colors=gst.MUTED)
+        ax.set_ylabel('QPS gain vs no plan cache (×)', fontsize=16, color=gst.MUTED)
+    ax.tick_params(axis='y', labelsize=16, colors=gst.MUTED)
     ax.grid(axis='y', color=gst.RULE, linewidth=0.7, zorder=0)
     ax.set_axisbelow(True)
     for sp in ('top', 'right'):
@@ -146,14 +146,14 @@ def draw_gain_panel(ax, panel, show_ylabel):
 
     # 面板名放 axes 外上方（紧贴）
     ax.text(0.0, 1.01, '%s · %s' % (panel['name'], panel['dim']),
-            transform=ax.transAxes, ha='left', va='bottom', fontsize=10.5,
+            transform=ax.transAxes, ha='left', va='bottom', fontsize=16,
             color=gst.INK, fontweight='bold')
     # 面板自己的缓存档位图例（轴外下方）
     handles = [gst.Patch(facecolor=panel['colf'](m), label=panel['labf'](m))
                for m in modes]
     if handles:
         ax.legend(handles=handles, loc='upper center', bbox_to_anchor=(0.5, -0.16),
-                  ncol=nc, fontsize=6.5, frameon=False, columnspacing=1.2,
+                  ncol=nc, fontsize=11, frameon=False, columnspacing=1.2,
                   handlelength=1.0, handleheight=0.7)
 
 
@@ -200,13 +200,13 @@ def main():
         draw_gain_panel(ax, panel, show_ylabel=(k % 2 == 0))
     fig.suptitle('768-dim QPS gain: query plan cache ON vs OFF '
                  '(concurrency=%s, benchmark results)' % CONC,
-                 fontsize=13.5, color=gst.INK, y=0.97)
+                 fontsize=18, color=gst.INK, y=0.97)
     fig.text(0.5, 0.018,
              'bar height = QPS(profile) / QPS(no plan cache), baseline = ×1.00; '
              'number inside bar = mean QPS (avg over runs)',
-             ha='center', fontsize=9, color=gst.MUTED)
+             ha='center', fontsize=18, color=gst.MUTED)
     fig.subplots_adjust(left=0.06, right=0.985, top=0.88, bottom=0.12,
-                        hspace=0.28, wspace=0.10)
+                        hspace=0.47, wspace=0.10)
     fig.savefig(args.out, facecolor='white', bbox_inches='tight', pad_inches=0.3)
     gst.plt.close(fig)
     print('[OK] 图已保存: %s' % args.out)

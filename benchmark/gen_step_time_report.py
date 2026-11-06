@@ -408,7 +408,7 @@ def draw_share(by_dim, sql_types, steps, step_colors, light_set, dim_labels,
                 # 段内占比标注：>=4% 才画，避免过密；浅色段用深色字
                 if share >= 4.0:
                     ax.text(xi, b + share / 2.0, '%d%%' % round(share), ha='center', va='center',
-                            fontsize=7.0, color=INK if s in light_set else 'white', zorder=4)
+                            fontsize=11.0, color=INK if s in light_set else 'white', zorder=4)
             bottom = [b + sh for b, sh in zip(bottom, shares)]
         for xi, st in zip(xj, sql_types):
             row = by_dim.get(d, {}).get(st)
@@ -416,7 +416,7 @@ def draw_share(by_dim, sql_types, steps, step_colors, light_set, dim_labels,
                 continue
             tot = row['total']
             ax.text(xi, 101.5, fmt_val(tot), ha='center', va='bottom',   # 柱顶 ms/query 总耗时
-                    fontsize=6.6, color=INK, zorder=5)
+                    fontsize=11, color=INK, zorder=5)
             # 柱底维度色条（画在轴下方，clip_on=False），与下方维度图例对应；
             # y=-5.5 让色条落在 sql_type 刻度文字下方，避免与刻度名重叠
             ax.plot([xi - w * 0.38, xi + w * 0.38], [-5.5, -5.5], color=dim_colors[d],
@@ -427,9 +427,9 @@ def draw_share(by_dim, sql_types, steps, step_colors, light_set, dim_labels,
     ax.set_ylim(0, 108)   # 顶部留出总耗时标注空间
     ax.set_yticks([0, 20, 40, 60, 80, 100])
     ax.set_xticks(range(nsql))
-    ax.set_xticklabels(sql_types, fontsize=9.5, color=INK)
-    ax.set_ylabel('share of per-query time (%)', fontsize=10, color=MUTED)
-    ax.tick_params(axis='y', labelsize=8.5, colors=MUTED)
+    ax.set_xticklabels(sql_types, fontsize=12, color=INK)
+    ax.set_ylabel('share of per-query time (%)', fontsize=11, color=MUTED)
+    ax.tick_params(axis='y', labelsize=10, colors=MUTED)
     ax.grid(axis='y', color=RULE, linewidth=0.7, zorder=0)
     ax.set_axisbelow(True)
     for sp in ('top', 'right'):
@@ -437,12 +437,12 @@ def draw_share(by_dim, sql_types, steps, step_colors, light_set, dim_labels,
     for sp in ('left', 'bottom'):
         ax.spines[sp].set_color(RULE)
     ax.legend(handles=step_handles, loc='lower center', bbox_to_anchor=(0.5, 1.002),
-              ncol=min(len(steps), 12), fontsize=8, frameon=False, columnspacing=1.2,
+              ncol=min(len(steps), 12), fontsize=11.5, frameon=False, columnspacing=1.2,
               handlelength=1.2, handleheight=0.9)   # 阶段图例：贴顶
     fig.legend(handles=dim_handles, loc='lower center', bbox_to_anchor=(0.5, -0.075), ncol=len(dims),
-               fontsize=8, frameon=False, columnspacing=1.4, handlelength=1.2,
+               fontsize=11, frameon=False, columnspacing=1.4, handlelength=1.2,
                handleheight=0.9)                   # 维度图例：贴底（与柱底色条对应，留出刻度文字空间）
-    ax.set_title(title, loc='left', fontsize=11.5, color=INK, pad=30)
+    ax.set_title(title, loc='left', fontsize=17, color=INK, pad=30)
     fig.tight_layout()
     fig.savefig(out_path, bbox_inches='tight', pad_inches=0.35, facecolor='white')
     plt.close(fig)

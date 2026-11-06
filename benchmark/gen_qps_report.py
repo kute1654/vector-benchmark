@@ -237,7 +237,7 @@ def color_of(f):
 
 
 def _annotate(ax, bars, vals, base_vals, maxv, top_off=0.03, mult_off=0.02,
-              qps_color='white', qps_size=5.0, mult_color='#c0392b', mult_size=7.2):
+              qps_color='white', qps_size=16, mult_color='#c0392b', mult_size=15):
     """统一柱状图标注规则（用于 QPS 所有图）：
       - 只有基准柱显示 QPS：默认纵向写在柱体内部(白字)，柱太短则改到柱顶。
       - 非基准柱不体现 QPS，只在其柱状图顶部标相对基准的倍数。
@@ -839,7 +839,7 @@ def load_pg_loop(concurrency=DEFAULT_CONCURRENCY, row_count=None):
 
 
 CLUSTER_W = 1.0     # 每个维度簇占的横向宽度(组宽单位)
-GROUP_GAP = 0.6     # 相邻 sql_type 组之间的间隔
+GROUP_GAP = 0.3     # 相邻 sql_type 组之间的间隔
 
 
 def _draw_dim_qps(recs, dims, modes, T, base, title, fname, color, label):
@@ -853,7 +853,7 @@ def _draw_dim_qps(recs, dims, modes, T, base, title, fname, color, label):
     n, nd = len(modes), len(dims)
     group_w = nd * CLUSTER_W + GROUP_GAP           # 每组总宽(含组间距)
     span = len(T) * group_w - GROUP_GAP            # 横轴实际跨度
-    bw = CLUSTER_W * 0.86 / n                      # 单根柱宽(簇宽 86% 均分给各档位)
+    bw = CLUSTER_W * 0.93 / n                      # 单根柱宽(簇宽 86% 均分给各档位)
     fig, ax = plt.subplots(figsize=(max(10.0, span * 0.82), 6.4), dpi=200)
     tr = blended_transform_factory(ax.transData, ax.transAxes)
     bars, vals, bvals, maxv = [], [], [], 0.0
@@ -864,7 +864,7 @@ def _draw_dim_qps(recs, dims, modes, T, base, title, fname, color, label):
                 ax.axvspan(cx - CLUSTER_W / 2.0, cx + CLUSTER_W / 2.0,
                            color='#eef3fa', zorder=0, lw=0)
             ax.text(cx, -0.012, str(_dim_num(t)), transform=tr, ha='center', va='top',
-                    fontsize=7.5, color='#5b6673')
+                    fontsize=18, color='#5b6673')
             for i, m in enumerate(modes):
                 v = recs.get((t, m, st), 0.0)
                 bar = ax.bar(cx + (i - (n - 1) / 2.0) * bw, v, bw * 0.92,
@@ -876,17 +876,17 @@ def _draw_dim_qps(recs, dims, modes, T, base, title, fname, color, label):
                 maxv = max(maxv, v)
     top = maxv * 1.2
     ax.set_ylim(0, top * 1.10)                      # 顶部留白给图例与倍数标注
-    _annotate(ax, bars, vals, bvals, top, qps_size=4.2, mult_size=5.8)
+    _annotate(ax, bars, vals, bvals, top, qps_size=12, mult_size=14)
     ax.set_xlim(-0.2, span + 0.2)
     ax.set_xticks([g * group_w + nd * CLUSTER_W / 2.0 for g in range(len(T))])
-    ax.set_xticklabels(T, fontsize=11)
+    ax.set_xticklabels(T, fontsize=24)
     ax.tick_params(axis='x', pad=18)                 # 给簇下方的维度标注让位
-    ax.set_ylabel('QPS (queries/sec)', fontsize=10)
-    ax.set_title(title, fontsize=12)
+    ax.set_ylabel('QPS (queries/sec)', fontsize=11.5)
+    ax.set_title(title, fontsize=20)
     ax.grid(axis='y', color='#dfe6f0', lw=0.8, zorder=0)
     for s in ('top', 'right'):
         ax.spines[s].set_visible(False)
-    ax.legend(fontsize=8, ncol=n, frameon=False, loc='upper right', reverse=True,
+    ax.legend(fontsize=12, ncol=n, frameon=False, loc='upper right', reverse=True,
               columnspacing=1.0, handlelength=1.2, handletextpad=0.5)
     fig.tight_layout()
     fig.savefig(os.path.join(CHART_DIR, fname), bbox_inches='tight')

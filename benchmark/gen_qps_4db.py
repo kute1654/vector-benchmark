@@ -48,17 +48,17 @@ def main():
             ax.axis('off')
             ax.text(0.5, 0.5, 'missing: %s' % os.path.basename(path),
                     transform=ax.transAxes, ha='center', va='center',
-                    fontsize=10, color='#c0392b')
+                    fontsize=18, color='#c0392b')
             continue
         img = plt.imread(path)
         # aspect='auto' 让图片拉伸填满整个 axes，消掉左右空白
         ax.imshow(img, aspect='auto')
         ax.axis('off')
-        ax.set_title('%s' % name, loc='left', fontsize=11,
+        ax.set_title('%s' % name, loc='left', fontsize=19,
                      color='#2c3e50', pad=3)
 
     fig.suptitle('QPS comparison (concurrency=8) — four databases',
-                 fontsize=14, color='#2c3e50')
+                 fontsize=20, color='#2c3e50')
     fig.subplots_adjust(left=0.005, right=0.995, top=0.93, bottom=0.005,
                         hspace=0.02, wspace=0.01)
     fig.savefig(OUT_PATH, facecolor='white', pad_inches=0.02)
