@@ -217,15 +217,14 @@ def draw_panel(ax, panel, show_ylabel):
                        color=step_colors[step], edgecolor='white', linewidth=0.35, zorder=3)
                 if share >= 5.0:
                     ax.text(xi, bottom + share / 2.0, '%d%%' % round(share),
-                            ha='center', va='center', fontsize=10,
+                            ha='center', va='center', fontsize=12,
                             color=gst.INK if step in light else 'white', zorder=4)
                 bottom += share
             ax.text(xi, 102.0, gst.fmt_val(row['total']), ha='center', va='bottom',
-                    fontsize=8.5, color='#c0392b', fontweight='bold',
-                    rotation=90, zorder=5)
-            ax.plot([xi - w * 0.40, xi + w * 0.40], [-8.0, -8.0],
-                    color=cache_colors.get(cache, '#9aa5b1'), lw=2.6,
-                    solid_capstyle='butt', clip_on=False, zorder=5)
+                    fontsize=13.5, color=gst.INK, zorder=5)   # 柱顶 ms/query 总耗时：横向黑字，与占比图一致
+            ax.plot([xi - w * 0.40, xi + w * 0.40], [-13.0, -13.0],
+                    color=cache_colors.get(cache, '#9aa5b1'), lw=8.0,
+                    solid_capstyle='butt', clip_on=False, zorder=5)   # 色条加高并下移，避开刻度文字
 
     for i in range(0, len(types), 2):
         ax.axvspan(i - 0.5, i + 0.5, color='#2f6fed', alpha=0.045, zorder=0)
@@ -233,10 +232,10 @@ def draw_panel(ax, panel, show_ylabel):
     ax.set_ylim(0, 110)
     ax.set_yticks([0, 20, 40, 60, 80, 100])
     ax.set_xticks(range(len(types)))
-    ax.set_xticklabels(types, fontsize=11, color=gst.INK)
+    ax.set_xticklabels(types, fontsize=15, color=gst.INK)
     if show_ylabel:
-        ax.set_ylabel('share of per-query time (%)', fontsize=11, color=gst.MUTED)
-    ax.tick_params(axis='y', labelsize=10, colors=gst.MUTED)
+        ax.set_ylabel('share of per-query time (%)', fontsize=14, color=gst.MUTED)
+    ax.tick_params(axis='y', labelsize=13, colors=gst.MUTED)
     ax.grid(axis='y', color=gst.RULE, linewidth=0.7, zorder=0)
     ax.set_axisbelow(True)
     for sp in ('top', 'right'):
@@ -246,7 +245,7 @@ def draw_panel(ax, panel, show_ylabel):
 
     # 面板名与阶段图例都放到 axes 外上方（紧贴），避免与柱顶耗时标注重叠
     ax.text(0.0, 1.095, panel['name'], transform=ax.transAxes,
-            ha='left', va='bottom', fontsize=16, color=gst.INK,
+            ha='left', va='bottom', fontsize=21, color=gst.INK,
             fontweight='bold')
 
     def step_is_used(s):
@@ -262,17 +261,17 @@ def draw_panel(ax, panel, show_ylabel):
     # 阶段图例（紧贴轴外右上方，整行排列）——用 add_artist 保留，避免被后面的 cache legend 覆盖
     if stage_handles:
         leg_stage = ax.legend(handles=stage_handles, loc='lower right', bbox_to_anchor=(1.0, 1.005),
-                              ncol=len(stage_handles), fontsize=10, frameon=False,
-                              columnspacing=0.8, handlelength=1.0, handleheight=0.7)
+                              ncol=len(stage_handles), fontsize=13, frameon=False,
+                              columnspacing=0.8, handlelength=1.4, handleheight=1.2)
         ax.add_artist(leg_stage)
     # 面板自己的缓存图例（放在轴外下方，下移一点但不过头）
     cache_handles = [gst.Patch(facecolor=cache_colors.get(c, '#9aa5b1'),
                                label=panel['labels'].get(c, c))
                      for c in caches]
     if cache_handles:
-        ax.legend(handles=cache_handles, loc='upper center', bbox_to_anchor=(0.5, -0.16),
-                  ncol=nc, fontsize=11, frameon=False, columnspacing=1.2,
-                  handlelength=1.0, handleheight=0.7)
+        ax.legend(handles=cache_handles, loc='upper center', bbox_to_anchor=(0.5, -0.18),
+                  ncol=nc, fontsize=15, frameon=False, columnspacing=1.6,
+                  handlelength=1.6, handleheight=1.4)   # 缓存图例保持原高度
 
 
 def build_panels(wanted):
@@ -352,19 +351,16 @@ def main():
         raise SystemExit('[ERR] 生成图表需要 matplotlib')
 
     os.makedirs(os.path.dirname(os.path.abspath(args.out)), exist_ok=True)
-    fig, axes = gst.plt.subplots(2, 2, figsize=(19.0, 10.5), dpi=170, sharex=False, sharey=True)
-    for k, (ax, panel) in enumerate(zip(axes.flat, panels)):
-        draw_panel(ax, panel, show_ylabel=(k % 2 == 0))
+    # 4×1 纵向排列：每个子图占满整行宽度（更宽更矮），便于看清柱内细节
+    fig, axes = gst.plt.subplots(4, 1, figsize=(19.0, 23.0), dpi=170, sharex=False, sharey=True)
+    for ax, panel in zip(axes, panels):
+        draw_panel(ax, panel, show_ylabel=True)
     fig.suptitle('768-dim per-query time: query plan cache OFF vs ON '
-                 '(four databases × four SQL types)', fontsize=18, color=gst.INK,
-                 y=0.97)
+                 '(four databases × four SQL types)', fontsize=20, color=gst.INK,
+                 y=0.99)
 
-    fig.text(0.5, 0.018,
-             'stacked bars = stage share of per-query time (100%); '
-             'top label = total ms/query',
-             ha='center', fontsize=14, color=gst.MUTED)
-    fig.subplots_adjust(left=0.06, right=0.985, top=0.88, bottom=0.12,
-                        hspace=0.45, wspace=0.10)
+    fig.subplots_adjust(left=0.05, right=0.99, top=0.93, bottom=0.03,
+                        hspace=0.45)   # top 留出空带：首行阶段图例/面板名与总标题分层，不再重叠
     fig.savefig(args.out, facecolor='white', bbox_inches='tight', pad_inches=0.3)
     gst.plt.close(fig)
     print('[OK] 图已保存: %s' % args.out)

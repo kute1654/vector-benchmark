@@ -19,6 +19,8 @@
 
 加 --legacy-charts 时额外生成脚本原有的历史图表（结果缓存口径等，数据来自旧
 run.py 结果的 pgvector_benchmark_results.csv）。
+加 --no-title 时图内不画长标题（gen_qps_4db.py 拼接 4 库总图时用，
+总图只在顶部保留一条总标题）。
 
 除源文件名与 CSV 表头（读取/分组依据）外，所有内容均从数据推导：
 SQL 类型、表名、profile（按表头布尔列划分缓存口径）、基准/最优配置、图例颜色。
@@ -31,6 +33,7 @@ BASE = os.path.dirname(os.path.abspath(__file__))
 CSV_DIR = os.path.join(BASE, 'results', 'csv')
 BAK_DIR = os.path.join(BASE, 'results', 'bak')
 CHART_DIR = os.path.join(BASE, 'results', 'charts')
+SUPPRESS_TITLES = False    # --no-title 时置 True：图内不画左上角长标题（供 4 库组合图拼接）
 
 # ---------- 固定：源文件名 + CSV 表头字段（读取/分组依据） ----------
 CK_SRC = 'clickhouse-benchmark-results.csv'
@@ -842,11 +845,13 @@ CLUSTER_W = 1.0     # 每个维度簇占的横向宽度(组宽单位)
 GROUP_GAP = 0.3     # 相邻 sql_type 组之间的间隔
 
 
-def _draw_dim_qps(recs, dims, modes, T, base, title, fname, color, label):
+def _draw_dim_qps(recs, dims, modes, T, base, title, fname, color, label,
+                  qps_size=17, mult_size=20):
     """画 "sql_type 组 × 维度簇 × 缓存档位柱" 的 QPS 图并保存。
 
     每组内按维度(128→1536)分成小簇，簇内并排各缓存档位；
     基准档(base)柱内标 QPS 值，同维度其它档柱顶标相对基准的倍数(由 _annotate 统一处理)。
+    qps_size/mult_size: 标注字号；pg 每簇 4 柱(柱距窄)由调用方传更小的 mult_size 防止相邻倍数重叠。
     """
     plt = _plt()
     from matplotlib.transforms import blended_transform_factory
@@ -854,7 +859,7 @@ def _draw_dim_qps(recs, dims, modes, T, base, title, fname, color, label):
     group_w = nd * CLUSTER_W + GROUP_GAP           # 每组总宽(含组间距)
     span = len(T) * group_w - GROUP_GAP            # 横轴实际跨度
     bw = CLUSTER_W * 0.93 / n                      # 单根柱宽(簇宽 86% 均分给各档位)
-    fig, ax = plt.subplots(figsize=(max(10.0, span * 0.82), 6.4), dpi=200)
+    fig, ax = plt.subplots(figsize=(max(10.0, span * 0.95), 5.4), dpi=200)
     tr = blended_transform_factory(ax.transData, ax.transAxes)
     bars, vals, bvals, maxv = [], [], [], 0.0
     for g, st in enumerate(T):
@@ -864,7 +869,7 @@ def _draw_dim_qps(recs, dims, modes, T, base, title, fname, color, label):
                 ax.axvspan(cx - CLUSTER_W / 2.0, cx + CLUSTER_W / 2.0,
                            color='#eef3fa', zorder=0, lw=0)
             ax.text(cx, -0.012, str(_dim_num(t)), transform=tr, ha='center', va='top',
-                    fontsize=18, color='#5b6673')
+                    fontsize=26, color='#5b6673')
             for i, m in enumerate(modes):
                 v = recs.get((t, m, st), 0.0)
                 bar = ax.bar(cx + (i - (n - 1) / 2.0) * bw, v, bw * 0.92,
@@ -876,17 +881,18 @@ def _draw_dim_qps(recs, dims, modes, T, base, title, fname, color, label):
                 maxv = max(maxv, v)
     top = maxv * 1.2
     ax.set_ylim(0, top * 1.10)                      # 顶部留白给图例与倍数标注
-    _annotate(ax, bars, vals, bvals, top, qps_size=12, mult_size=14)
+    _annotate(ax, bars, vals, bvals, top, qps_size=qps_size, mult_size=mult_size)
     ax.set_xlim(-0.2, span + 0.2)
     ax.set_xticks([g * group_w + nd * CLUSTER_W / 2.0 for g in range(len(T))])
-    ax.set_xticklabels(T, fontsize=24)
-    ax.tick_params(axis='x', pad=18)                 # 给簇下方的维度标注让位
-    ax.set_ylabel('QPS (queries/sec)', fontsize=11.5)
-    ax.set_title(title, fontsize=20)
+    ax.set_xticklabels(T, fontsize=32)
+    ax.tick_params(axis='x', pad=26)                 # 给簇下方的维度标注让位
+    ax.set_ylabel('QPS (queries/sec)', fontsize=17)
+    if not SUPPRESS_TITLES:
+        ax.set_title(title, fontsize=28)   # --no-title 时不画长标题（组合图拼接用）
     ax.grid(axis='y', color='#dfe6f0', lw=0.8, zorder=0)
     for s in ('top', 'right'):
         ax.spines[s].set_visible(False)
-    ax.legend(fontsize=12, ncol=n, frameon=False, loc='upper right', reverse=True,
+    ax.legend(fontsize=17, ncol=n, frameon=False, loc='upper right', reverse=True,
               columnspacing=1.0, handlelength=1.2, handletextpad=0.5)
     fig.tight_layout()
     fig.savefig(os.path.join(CHART_DIR, fname), bbox_inches='tight')
@@ -933,7 +939,8 @@ def build_pg_qps(pg, concurrency, tables, sql_types, fname):
                   'pgvector · concurrency=%s · row_count=%s · avg of %s · baseline=raw (no plan cache)'
                   % (concurrency, pg['row_count'], runs_txt(pg.get('rounds'))),
                   fname, lambda m: PG_MODE_COLOR.get(m, '#9aa5b1'),
-                  lambda m: PG_MODE_LABEL.get(m, m))
+                  lambda m: PG_MODE_LABEL.get(m, m),
+                  qps_size=14, mult_size=14)   # pg 每簇 4 柱、柱距窄，基准 QPS 与倍数字号调小防止重叠
 
 
 def parse_args():
@@ -956,13 +963,17 @@ def parse_args():
                     help='只画某一类(默认 all)')
     ap.add_argument('--legacy-charts', action='store_true',
                     help='额外生成脚本原有的历史图表(结果缓存口径, 需要旧结果 CSV)')
+    ap.add_argument('--no-title', action='store_true',
+                    help='图内不画左上角长标题(用于 4 库组合图拼接源图)')
     return ap.parse_args()
 
 
 # ---------------- main ----------------
 def main():
     """总入口：默认按并发数(默认 8)为每类数据库画一张 QPS 图（5 个维度并排）。"""
+    global SUPPRESS_TITLES
     args = parse_args()
+    SUPPRESS_TITLES = args.no_title
     os.makedirs(CHART_DIR, exist_ok=True)
     types = split_types(args.sql_types)
     c = args.concurrency

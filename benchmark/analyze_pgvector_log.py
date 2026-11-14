@@ -40,10 +40,11 @@ sql_type 的判定(用户要求: cache=0 无 PREPARE 名, >0 才有):
 要点:
 - PID 即后端进程号, 每个测试执行单元新建连接 => 独立 PID; PGVECTOR_TIMING 行记账,
   PLAN_CACHE_TRACE 行只补充语句名/缓存动作, 不计入记录数。
-- 向量查询与非向量查询的区分: 每条向量查询后紧随一条向量转换事件
+- 向量查询与非向量查询的区分: 每条向量查询的处理过程中会触发一条向量转换事件
   (vector_in/halfvec_in/array_to_vector), 非向量语句(SET/PREPARE/BEGIN/COMMIT)
-  没有; summarize 按 "simple_query 后紧跟向量事件" 配对, 只统计真正的向量查询
-  (setup 与间杂非向量语句一律剔除, 含延迟探针的 BEGIN/COMMIT)。
+  没有; 该事件总落在所属语句 simple_query 行之前的窗口内(EXECUTE 语句在事件与
+  sq 行之间还隔一条 execute_query 行, 见 split_vector_sq), summarize 按窗口配对,
+  只统计真正的向量查询(setup 与间杂非向量语句一律剔除, 含延迟探针的 BEGIN/COMMIT)。
 - 旧日志(曾移除向量事件的版本)无该标记: 退回"首个向量事件之前的前导 sq 条数"
   实测, 完全无向量事件的 PID(cache=0 旧日志)按经验值 sq_drop_count 兜底剥离。
 - 数组类 SQL 类型在 cache=0 走 array_to_vector, 耗时与 vector_in 同口径计入 vi 列。
@@ -1508,13 +1509,25 @@ def setup_len(rec, cache=None):
 
 
 def split_vector_sq(rec):
-    """按事件配对一个 PID 的 simple_query, 精确区分向量查询与非向量查询。
+    """按事件窗口配对一个 PID 的 simple_query, 精确区分向量查询与非向量查询。
 
-    新版插桩在每条向量查询的服务端日志里, 于其 PGVECTOR_TIMING simple_query 行
-    之后紧随一条向量转换事件(vector_in/halfvec_in/array_to_vector); 非向量语句
-    (SET/PREPARE/BEGIN/COMMIT 等)没有该事件。因此事件序列中 "sq 且下一个事件是
-    向量转换" 的即为向量查询, 其余 sq 为 setup 或间杂的非向量语句 —— 即使出现在
-    首个向量查询之后(如延迟探针的 BEGIN/COMMIT)也能被准确剔除。
+    插桩打印顺序(见 PG 源码 postgres.c / prepare.c / plancache.c): 向量转换事件
+    (vector_in/halfvec_in/array_to_vector)在查询的【处理过程中】触发 —— raw 在
+    analyze 期、custom 在 GetCachedPlan 内联参数期、generic 在执行期 —— 而该语句
+    的 PGVECTOR_TIMING simple_query 行在语句结束时打印; EXECUTE 语句还会在
+    GetCachedPlan 结束后先打一条 execute_query 行。因此每条向量查询的事件序列是
+        raw:     ... vi(k) sq(k) ...
+        custom:  ... vi(k) eq(k) sq(k) ...
+        generic: ... eq(k) vi(k) sq(k) ...
+    即向量转换事件总落在该语句 sq 行的【窗口】(上一条 sq 之后、本条 sq 之前)内。
+    据此配对: 窗口内出现向量转换事件的 sq 是向量查询, 其余 sq(SET/PREPARE/
+    BEGIN/COMMIT 等)归入 other —— 即使出现在首个向量查询之后(如延迟探针的
+    BEGIN/COMMIT)也能被准确剔除。
+
+    旧实现按 "sq 的下一个事件是向量转换" 向后配对: raw/custom 档错位一格(认领了
+    下一条查询的窗口, 计数恰好相同而未暴露), auto 档只认领首 5 次 custom 邻接
+    (exec# 骤降到 5/PID), generic 档因 eq 插在 vi 与 sq 之间而全部失配 ——
+    cache=3 的 exec#=0、est_QPS 为空即由此而来。
 
     参数: rec —— parse_log() 里单个 PID 的记录(events 与 sq 同源: 第 j 个 "sq"
           事件对应 sq[j])。
@@ -1527,21 +1540,27 @@ def split_vector_sq(rec):
     sq = rec.get("sq", [])
     vector, other = [], []
     j = 0                          # events 里第 j 个 "sq" 事件对应 sq[j]
-    for i, kind in enumerate(events):
-        if kind != "sq":
-            continue
-        nxt = events[i + 1] if i + 1 < len(events) else None
-        (vector if nxt in VECTOR_MARKS else other).append(sq[j])
-        j += 1
+    pending = 0                    # 上一条 sq 之后尚未认领的向量转换事件数
+    for kind in events:
+        if kind in VECTOR_MARKS:
+            pending += 1           # 归入当前窗口, 等语句末尾的 sq 行认领
+        elif kind == "sq":
+            if pending:
+                vector.append(sq[j])
+                pending = 0        # 消费窗口内全部向量事件(正常每语句恰一条)
+            else:
+                other.append(sq[j])
+            j += 1
     return vector, other
 
 
 def summarize(pid_recs, cache=None):
     """对一个 cell 的 1..N 个 PID 汇总(跨 PID 池化样本)。
 
-    向量查询筛选: 新日志按 split_vector_sq() 的 "sq 后紧跟向量转换事件" 配对,
-    精确区分向量查询与非向量查询(SET/PREPARE/BEGIN 等一律剔除); 旧日志(无向量
-    事件)回退 setup_len() 前导剥离。各耗时均值沿用 avg() 的"去掉第一条"口径
+    向量查询筛选: 新日志按 split_vector_sq() 的 "窗口内出现向量转换事件" 配对
+    (向量转换事件在该语句 sq 行之前的窗口内, 详见其 docstring), 精确区分向量
+    查询与非向量查询(SET/PREPARE/BEGIN 等一律剔除); 旧日志(无向量事件)回退
+    setup_len() 前导剥离。各耗时均值沿用 avg() 的"去掉第一条"口径
     (去除首次热路径)。
 
     参数: pid_recs —— 单个 rec 或 rec 列表(同格多个 search PID 池化);
@@ -1688,6 +1707,18 @@ def analyze_batch(pids, pid_data, grid, per_sql, combos, table, dim=None):
             if expected_mode and s_mode not in ("-", expected_mode):
                 print(f"  (warn) {sql} cache={cache}: 日志动作推断为 {s_mode}, "
                       f"config 期望 {expected_mode}", file=sys.stderr)
+
+            # 诊断: 正常每条查询只应触发 1 次向量转换。prepared 档若把查询向量作为
+            # text/real[] 参数传入(generic 计划下 $1::vector 逐输出行求值),
+            # 事件数会变成 ~(LIMIT+1) 倍, 文本解析成本被计入 exec(数组转换便宜,
+            # 影响小)。只告警不改数: 该 exec 是真实耗时, 但跨档不可直接比较。
+            if ss.get("exec_count") and ss.get("vi_count"):
+                per_q = ss["vi_count"] / float(ss["exec_count"])
+                if per_q > 1.5:
+                    print(f"  (warn) {sql} cache={cache}: 每条查询触发 "
+                          f"{per_q:.2f} 次向量转换(正常为 1), 多为 generic 计划逐行"
+                          f"求值 $1::vector, text 类写法的 exec 会被抬高",
+                          file=sys.stderr)
 
             info = combo_lookup(sql, cache, rc, pm, searcher, combos, table, dim)
             rps = _num((info or {}).get("qps"))

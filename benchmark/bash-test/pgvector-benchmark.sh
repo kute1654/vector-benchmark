@@ -52,8 +52,18 @@
 #                         PREPARE + SET plan_cache_mode=force_custom_plan (每次重规划)
 #        prepare_generic= 使用查询计划缓存 + generic(enable_query_plan_cache=3)
 #                         PREPARE + SET plan_cache_mode=force_generic_plan (复用 generic plan)
-#      prepare_* 均采用类型化绑定 (PREPARE (vector), 参数 $1 无 cast), 与 searcher
-#      的 typed_bind=True 完全对齐; 档位差异只由 plan_cache_mode 承载。
+#      prepare_* 的 PREPARE 按 raw 档 analyze 量级分三条路线 (对齐 searcher 的
+#      _render_prepare_sql/_param_type):
+#        1) 文本族 (raw analyze≈0.09): 参数 vector, 正文 $1, 实参 '[...]'::vector;
+#        2) array_int_cast (raw analyze≈0.15): 参数 numeric[], 正文 (SELECT $1::vector),
+#           实参 '{...}'::numeric[];
+#        3) array_real_cast / with_array_cast 等 (raw analyze≈0.45): 参数 vector,
+#           实参保留 cast 链 '{...}'::numeric[]::real[]::vector。
+#      目标是让 prepared 档 eval_ms 贴近 raw 档 analyze_ms:
+#        路线 1/3 的转换在 Bind 阶段 (eval_ms); 路线 2 在语句体内, 用 (SELECT ...)
+#        包一层保证每条语句只求值一次 (InitPlan), 计入 exec_ms 且无 n+1。
+#      with_* 保留 CTE 外形 (不可 MATERIALIZED, 否则 HNSW 有序扫描失效)。
+#      档位差异只由 plan_cache_mode 承载。
 #   2) 查询结果缓存 (result_mode):
 #        on  = SET pgvector.result_cache_debug = on   (开启; 同时把主开关
 #              pgvector.result_cache 对齐为 on, 保证 QPS 差异可观测)
@@ -185,6 +195,7 @@ SORT_DIR="${SORT_DIR:-ASC}"
 #   result_mode: on=SET result_cache_debug on; off=SET result_cache_debug off
 # =====================================================================
 CACHE_PROFILES=(
+    
     "raw_off|raw|off"
     # "raw_on|raw|on"
     "prepare_auto_off|prepare_auto|off"
@@ -199,9 +210,16 @@ RESULT_MODES=(off on)
 
 SQL_TYPES=(
     text_literal
+    # text_cast
+    # vector_fn
     array_int_cast
     array_real_cast
+    # array_cast
+    # array_to_vector_fn
+    # halfvec_literal
+    # with_text_literal
     with_array_cast
+    # with_vector_fn
 )
 # ROW_COUNTS 为"每组随机抽样的向量条数"(10 个一组); prep 文件按序循环这 ROW_COUNTS
 # 条向量生成 EXECUTE 语句, 直到写满 PREP_EXEC_TOTAL 条 (默认 1000 条)。
@@ -417,9 +435,56 @@ plan_mode_to_cache_mode() {
         *)               echo "" ;;
     esac
 }
-# 生成 PREPARE 语句体 (typed_bind 形态: PREPARE (vector), 参数 $1 无 cast, 与 searcher 对齐)
+# sql_type -> PREPARE 参数类型 (按 raw 档 analyze 量级分档, 见文件头):
+#   array_int_cast : numeric[]  —— raw analyze≈0.15, 参数保持数组形态,
+#                                  numeric[] -> vector 的转换留在语句体内;
+#   其余           : vector     —— 文本族与 array_real_cast 等 raw analyze 分别为
+#                                  ≈0.09/≈0.45, 转换放在 EXECUTE 实参 (Bind 的 eval)。
+render_prepare_param_type() {  # st
+    case "$1" in
+        array_int_cast) echo "numeric[]" ;;
+        *)              echo "vector" ;;
+    esac
+}
+
+# sql_type -> EXECUTE 实参表达式 (__I__ 为向量的分量文本, 不含外层括号/花括号)。
+# 统一用"单一字符串字面量 + 显式 cast 链"表示: ARRAY[...] 是数组表达式,
+# EvaluateParams 里的 ExecPrepareExpr 会先折叠一次、ExecEvalExpr 再求值一次,
+# 同一份构造做两遍 (实测 eval ≈ 2 x raw analyze), 所以一律不用 ARRAY[...]。
+#   array_int_cast : 实参只做到 numeric[] (与 raw 的 ARRAY[...] 元素类型一致),
+#                    numeric[] -> vector 由语句体内的 (SELECT $1::vector) 完成;
+#   其余           : 实参做到与 raw 同形的最终 vector (array_real_cast/with_array_cast
+#                    保留 numeric[]::real[]::vector 整条 cast 链)。
+render_execute_arg() {  # st dim
+    case "$1" in
+        text_literal)       echo "'[__I__]'::vector" ;;
+        text_cast)          echo "CAST('[__I__]' AS vector)" ;;
+        vector_fn)          echo "vector('[__I__]')" ;;
+        halfvec_literal)    echo "'[__I__]'::halfvec(${2})::vector" ;;
+        array_int_cast)     echo "'{__I__}'::numeric[]" ;;
+        array_real_cast)    echo "'{__I__}'::numeric[]::real[]::vector" ;;
+        array_cast)         echo "CAST('{__I__}'::numeric[]::real[] AS vector)" ;;
+        array_to_vector_fn) echo "array_to_vector('{__I__}'::numeric[]::real[], ${2}, false)" ;;
+        with_text_literal)  echo "'[__I__]'::vector" ;;
+        with_array_cast)    echo "'{__I__}'::numeric[]::real[]::vector" ;;
+        with_vector_fn)     echo "vector('[__I__]')" ;;
+        *)                  echo "'[__I__]'::vector" ;;
+    esac
+}
+
+# 生成 PREPARE 语句体。
+#   array_int_cast : 参数 numeric[], 体内 (SELECT $1::vector) —— 不相关标量子查询
+#                    会被规划成 InitPlan, 每条语句只求值一次 (计入 exec_ms),
+#                    既保住 numeric[] -> vector 这步转换, 又不会像裸 $1::vector
+#                    那样在 generic 计划下按输出行重复求值 (n+1)。
+#   其余           : 参数已是 vector, 正文只引用 $1, 无转换表达式。
+# with_* 类型保留 CTE 外形; 不可用 MATERIALIZED —— 物化后 kv.v 是 CTE 扫描的普通列,
+# ORDER BY (vector <=> kv.v) 不再是"列 op 常量", HNSW 有序扫描失效 (会退化为全表扫描)。
 render_prepare_body() {  # st table col dim
     local st="$1" table="$2" col="$3" dim="$4" expr='$1'
+    case "$st" in
+        array_int_cast) expr='(SELECT $1::vector)' ;;
+    esac
     if is_with_type "$st"; then
         echo "WITH kv AS (SELECT ${expr} AS v) SELECT t.id, (t.${col} ${DISTANCE_FUNC} kv.v) AS dis FROM ${table} t CROSS JOIN kv ORDER BY dis ${SORT_DIR} LIMIT ${TOP_K}"
     else
@@ -818,8 +883,25 @@ for table in "$@"; do
         fi
         if [ "$reuse" = "1" ]; then
             for st in "${SQL_TYPES[@]}"; do
+                prep_check="${SQL_DIR}/pgv_prep_${table}_${st}_${row_count}${suffix}.sql"
                 { [ -s "${SQL_DIR}/pgv_raw_${table}_${st}_${row_count}${suffix}.sql" ] && \
-                  [ -s "${SQL_DIR}/pgv_prep_${table}_${st}_${row_count}${suffix}.sql" ]; } || { reuse=0; break; }
+                  [ -s "$prep_check" ]; } || { reuse=0; break; }
+                # 校验 PREPARE 参数类型: 按路线区分 (array_int_cast 为 numeric[],
+                # 其余为 vector)。历史上生成过 (text)/(real[])/(统一 vector) 的
+                # 旧文件不匹配, 视为过期强制重建。
+                if ! grep -m1 '^PREPARE ' "$prep_check" | grep -qF "($(render_prepare_param_type "$st"))"; then
+                    reuse=0; break
+                fi
+                if [ "$st" = "array_int_cast" ]; then
+                    # 路线 2: 体内必须是 (SELECT $1::vector) 单次求值,
+                    # 实参只做到 numeric[] (再往后的转换交给正文)。
+                    grep -qF '(SELECT $1::vector)' "$prep_check" || { reuse=0; break; }
+                    grep -qF '::numeric[]);' "$prep_check" || { reuse=0; break; }
+                else
+                    # 路线 1/3: 正文无转换表达式; 实参为"字面量 + cast 链", 不用 ARRAY[...]。
+                    grep -q '(SELECT ' "$prep_check" && { reuse=0; break; }
+                    grep -q '^EXECUTE .*ARRAY\[' "$prep_check" && { reuse=0; break; }
+                fi
             done
             if [ "$reuse" = "1" ]; then
                 rep="${SQL_DIR}/pgv_raw_${table}_${SQL_TYPES[0]}_${row_count}${suffix}.sql"
@@ -829,7 +911,8 @@ for table in "$@"; do
         if [ "$reuse" = "1" ]; then
             for st in "${SQL_TYPES[@]}"; do
                 # prep 文件头部的 DEALLOCATE 是幂等的 (DO 块捕获异常), 每个事务重跑
-                # 也不会报 "already exists", 因此旧 prep 文件可直接复用, 无需重建。
+                # 也不会报 "already exists"; 旧格式 (统一 vector / text / real[] 参数)
+                # 已被上面的逐路线校验拦截, 到这里的都是当前三条路线的格式。
                 RAW_BASE["${table}|${row_count}|${st}"]="${SQL_DIR}/pgv_raw_${table}_${st}_${row_count}${suffix}.sql"
                 PREP_BASE["${table}|${row_count}|${st}"]="${SQL_DIR}/pgv_prep_${table}_${st}_${row_count}${suffix}.sql"
             done
@@ -848,8 +931,11 @@ for table in "$@"; do
             pname="pgv_ps_${st}_${RANDOM}${RANDOM}"
             PREP_NAME["${table}|${row_count}|${st}"]="$pname"
             PREP_BASE["${table}|${row_count}|${st}"]="$local_prep_path"
+            # PREPARE 参数类型按路线区分 (array_int_cast=numeric[], 其余=vector),
+            # 语句体与 EXECUTE 实参配套生成 (见 render_prepare_body/render_execute_arg)。
+            ptype=$(render_prepare_param_type "$st")
             echo "DO \$\$ BEGIN EXECUTE 'DEALLOCATE ${pname}'; EXCEPTION WHEN invalid_sql_statement_name THEN NULL; END \$\$;" > "$local_prep_path"
-            echo "PREPARE ${pname}(vector) AS $(render_prepare_body "$st" "$table" "$col" "$dim");" >> "$local_prep_path"
+            echo "PREPARE ${pname}(${ptype}) AS $(render_prepare_body "$st" "$table" "$col" "$dim");" >> "$local_prep_path"
         done
 
         echo "抽样 ${row_count} 条向量: $table (col=$col dim=$dim)"
@@ -886,7 +972,10 @@ for table in "$@"; do
             else
                 raw_tpl="SELECT id, (${col} ${DISTANCE_FUNC} ${expr}) AS dis FROM ${table} ORDER BY dis ${SORT_DIR} LIMIT ${TOP_K};"
             fi
-            prep_tpl="EXECUTE ${PREP_NAME["${table}|${row_count}|${st}"]}('[__I__]');"
+            # EXECUTE 实参: 直接复用该 sql_type 在 raw 里的向量构造表达式
+            # (见 render_execute_arg), 参数类型统一 vector。这样 prepared 档的
+            # parse/analyze 与 raw 同口径, 计划缓存只减少 plan。
+            prep_tpl="EXECUTE ${PREP_NAME["${table}|${row_count}|${st}"]}($(render_execute_arg "$st" "$dim"));"
             # raw: 抽样的 row_count 条向量按序回卷循环写满 PREP_EXEC_TOTAL 条;
             # prep: 同序 EXECUTE 行 (头部 DEALLOCATE/PREPARE 已在上面写入)。
             awk -v total="$PREP_EXEC_TOTAL" \

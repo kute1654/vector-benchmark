@@ -59,6 +59,7 @@ BASE = os.path.dirname(os.path.abspath(__file__))                            # �
 RAW = os.path.join(BASE, 'results', 'csv')                                   # 数据目录
 BAK = os.path.join(BASE, 'results', 'bak')                                   # 表头迁移/覆盖前的备份目录
 CHART_DIR = os.path.join(BASE, 'results', 'charts')                          # 图输出目录
+SUPPRESS_TITLES = False           # --no-title 时置 True：图内不画左上角长标题（供 4 库组合图拼接）
 
 
 def load_mpl():
@@ -378,7 +379,7 @@ def fmt_val(v):
 
 
 def draw_share(by_dim, sql_types, steps, step_colors, light_set, dim_labels,
-               title, out_path, figw=13.0, dims=None, dim_colors=None):
+               title, out_path, figw=20.0, dims=None, dim_colors=None):
     """阶段耗时占比图（100% 堆叠）：横轴=sql_type 分组，组内每根柱=一个维度。
 
     柱内按阶段堆叠并归一化到 100%，段内标注占比；柱顶标注 ms/query 总耗时；
@@ -388,7 +389,7 @@ def draw_share(by_dim, sql_types, steps, step_colors, light_set, dim_labels,
     dims = dims if dims is not None else list(by_dim)
     dim_colors = dim_colors if dim_colors is not None else {d: DIM_COLOR.get(d, '#9aa5b1') for d in dims}
     ndim, nsql = len(dims), len(sql_types)
-    fig, ax = plt.subplots(figsize=(figw, 6.8), dpi=200)
+    fig, ax = plt.subplots(figsize=(figw, 4.9), dpi=200)
     step_handles = [Patch(facecolor=step_colors[s], label=s) for s in steps]
     dim_handles = [Patch(facecolor=dim_colors[d], label=dim_labels[d]) for d in dims]
     w = 0.84 / ndim                     # 柱宽：组内 5 根
@@ -405,10 +406,10 @@ def draw_share(by_dim, sql_types, steps, step_colors, light_set, dim_labels,
                            color=step_colors[s], edgecolor='white', linewidth=0.4, zorder=3)
                 shares.append(share)
             for xi, share, b in zip(xj, shares, bottoms):
-                # 段内占比标注：>=4% 才画，避免过密；浅色段用深色字
-                if share >= 4.0:
+                # 段内占比标注：>=5% 才画（画布压矮后 12pt 约占 5% 段高），浅色段用深色字
+                if share >= 5.0:
                     ax.text(xi, b + share / 2.0, '%d%%' % round(share), ha='center', va='center',
-                            fontsize=11.0, color=INK if s in light_set else 'white', zorder=4)
+                            fontsize=12.0, color=INK if s in light_set else 'white', zorder=4)
             bottom = [b + sh for b, sh in zip(bottom, shares)]
         for xi, st in zip(xj, sql_types):
             row = by_dim.get(d, {}).get(st)
@@ -416,20 +417,20 @@ def draw_share(by_dim, sql_types, steps, step_colors, light_set, dim_labels,
                 continue
             tot = row['total']
             ax.text(xi, 101.5, fmt_val(tot), ha='center', va='bottom',   # 柱顶 ms/query 总耗时
-                    fontsize=11, color=INK, zorder=5)
+                    fontsize=13.5, color=INK, zorder=5)
             # 柱底维度色条（画在轴下方，clip_on=False），与下方维度图例对应；
-            # y=-5.5 让色条落在 sql_type 刻度文字下方，避免与刻度名重叠
-            ax.plot([xi - w * 0.38, xi + w * 0.38], [-5.5, -5.5], color=dim_colors[d],
-                    lw=3.0, solid_capstyle='butt', clip_on=False, zorder=5)
+            # y=-14 让加高后的色条避开 sql_type 刻度文字，留出明显空隙
+            ax.plot([xi - w * 0.38, xi + w * 0.38], [-14.0, -14.0], color=dim_colors[d],
+                    lw=8.0, solid_capstyle='butt', clip_on=False, zorder=5)   # 色条加高，颜色更易区分
     for i in range(0, nsql, 2):
         ax.axvspan(i - 0.5, i + 0.5, color='#2f6fed', alpha=0.045, zorder=0)   # 隔列底色条
     ax.set_xlim(-0.5, nsql - 0.5)
     ax.set_ylim(0, 108)   # 顶部留出总耗时标注空间
     ax.set_yticks([0, 20, 40, 60, 80, 100])
     ax.set_xticks(range(nsql))
-    ax.set_xticklabels(sql_types, fontsize=12, color=INK)
-    ax.set_ylabel('share of per-query time (%)', fontsize=11, color=MUTED)
-    ax.tick_params(axis='y', labelsize=10, colors=MUTED)
+    ax.set_xticklabels(sql_types, fontsize=16, color=INK)
+    ax.set_ylabel('share of per-query time (%)', fontsize=14, color=MUTED)
+    ax.tick_params(axis='y', labelsize=13, colors=MUTED)
     ax.grid(axis='y', color=RULE, linewidth=0.7, zorder=0)
     ax.set_axisbelow(True)
     for sp in ('top', 'right'):
@@ -437,12 +438,13 @@ def draw_share(by_dim, sql_types, steps, step_colors, light_set, dim_labels,
     for sp in ('left', 'bottom'):
         ax.spines[sp].set_color(RULE)
     ax.legend(handles=step_handles, loc='lower center', bbox_to_anchor=(0.5, 1.002),
-              ncol=min(len(steps), 12), fontsize=11.5, frameon=False, columnspacing=1.2,
-              handlelength=1.2, handleheight=0.9)   # 阶段图例：贴顶
-    fig.legend(handles=dim_handles, loc='lower center', bbox_to_anchor=(0.5, -0.075), ncol=len(dims),
-               fontsize=11, frameon=False, columnspacing=1.4, handlelength=1.2,
-               handleheight=0.9)                   # 维度图例：贴底（与柱底色条对应，留出刻度文字空间）
-    ax.set_title(title, loc='left', fontsize=17, color=INK, pad=30)
+              ncol=min(len(steps), 12), fontsize=15, frameon=False, columnspacing=1.2,
+              handlelength=1.4, handleheight=1.2)   # 阶段图例：贴顶（色块加高更易辨认）
+    fig.legend(handles=dim_handles, loc='lower center', bbox_to_anchor=(0.5, -0.12), ncol=len(dims),
+               fontsize=15, frameon=False, columnspacing=1.6, handlelength=1.6,
+               handleheight=1.4)                   # 维度图例：贴底（保持原高度）
+    if not SUPPRESS_TITLES:
+        ax.set_title(title, loc='left', fontsize=22, color=INK, pad=52)
     fig.tight_layout()
     fig.savefig(out_path, bbox_inches='tight', pad_inches=0.35, facecolor='white')
     plt.close(fig)
@@ -479,6 +481,9 @@ def parse_args():
     ap.add_argument("--sql-types", default="",
                     help="绘图包含的 sql_type 清单, 空格/逗号分隔(如 \"normal cast\"), "
                          "顺序即图中横轴顺序; 默认空=脚本内置默认清单。CSV 中不存在的形态自动跳过")
+    ap.add_argument("--no-title", action="store_true",
+                    help="图内不画左上角长标题(用于生成 4 库组合图 share_off_4db 的拼接源图); "
+                         "组合图自带总标题, 无需每张子图重复标题")
     args = ap.parse_args()
     args.sql_types = split_sql_types(args.sql_types)
     return args
@@ -607,7 +612,9 @@ def ck_ms_chart_mode(args):
 
 
 def main():
+    global SUPPRESS_TITLES
     args = parse_args()
+    SUPPRESS_TITLES = args.no_title
     os.makedirs(CHART_DIR, exist_ok=True)
     if args.row_count is not None:
         if args.engine == "pgvector":
