@@ -128,7 +128,13 @@ def table_color(name, fallback):
 # sql_type 的默认绘制清单（题设指定）：默认图只画这里列出的形态。可用命令行
 # --sql-types 覆盖（传了就按参数清单/顺序画），CSV 中没跑到的形态自动跳过。
 CK_SQL_TYPES = ['normal', 'cast', 'cast_array', 'raw_bytes']
-PG_SQL_TYPES = ['text_literal', 'array_int_cast', 'array_real_cast', 'with_array_cast']
+STEP_DISPLAY = {
+    'check_qp': 'check_ast',
+    'prep_plan': 'build_querytree',
+    'pipe': 'exec',
+    'after_pipe': 'log',
+}
+PG_SQL_TYPES = ['text_literal', 'array_int_cast', 'array_real_cast']
 
 # MyScale profile 名 -> CK 口径名（本脚本只用无计划缓存那一档：off ≈ ck_off）
 MS_PMAP = {'off': 'ck_off', 'only_plan_cache': 'ck_only_plan_cache', 'plan_cache': 'ck_plan_cache'}
@@ -390,7 +396,7 @@ def draw_share(by_dim, sql_types, steps, step_colors, light_set, dim_labels,
     dim_colors = dim_colors if dim_colors is not None else {d: DIM_COLOR.get(d, '#9aa5b1') for d in dims}
     ndim, nsql = len(dims), len(sql_types)
     fig, ax = plt.subplots(figsize=(figw, 4.9), dpi=200)
-    step_handles = [Patch(facecolor=step_colors[s], label=s) for s in steps]
+    step_handles = [Patch(facecolor=step_colors[s], label=STEP_DISPLAY.get(s, s)) for s in steps]
     dim_handles = [Patch(facecolor=dim_colors[d], label=dim_labels[d]) for d in dims]
     w = 0.84 / ndim                     # 柱宽：组内 5 根
     for j, d in enumerate(dims):
@@ -523,7 +529,7 @@ def parse_log_mode(args):
     chart = os.path.join(CHART_DIR, "pgvector_share_off_%s.png" % name)
     draw_share({dim: pg}, types, steps, STEP_COLOR7, LIGHT7,
                {dim: "%s (n=%d)" % (dim, n)},
-               "pgvector %s (n=%d): stage share per query, no plan cache (cache=0); "
+               "PG %s (n=%d): stage share per query, no plan cache (cache=0); "
                "top label = ms/query" % (dim, n),
                chart, dims=[dim], dim_colors={dim: DIM_COLOR['128']})
     print("[OK] 占比图: %s" % chart)
@@ -544,7 +550,7 @@ def parse_log_mode(args):
     chart2 = os.path.join(CHART_DIR, "pgvector_share_cache_%s.png" % name)
     draw_share(series, cache_types, PG_CACHE_STEPS, STEP_COLOR7, LIGHT7,
                {c: 'cache=%s' % c for c in series},
-               "pgvector %s (n=%d): stage share per query, plan-cache modes "
+               "PG %s (n=%d): stage share per query, plan-cache modes "
                "(cache=0/1/2/3); top label = ms/query" % (dim, n),
                chart2, dims=list(series), dim_colors=CACHE_COLORS)
     print("[OK] 占比图: %s" % chart2)
@@ -635,7 +641,7 @@ def main():
         ck_steps = pick_steps(ck, CK_OFF_STEPS)
         ck_types = union_sql_types(ck.values(), CK_SQL_TYPES, args.sql_types)
         draw_share(ck, ck_types, ck_steps, STEP_COLOR12, LIGHT12, {t: t for t in ck},
-                   'ClickHouse: stage share per query, no plan cache (ck_off); top label = ms/query',
+                   'ClickHouse: stage share per query, no plan cache; top label = ms/query',
                    os.path.join(CHART_DIR, 'clickhouse_share_off.png'),
                    dims=list(ck), dim_colors={t: table_color(t, '#9aa5b1') for t in ck})
     else:
@@ -650,7 +656,7 @@ def main():
         ms_steps = pick_steps(ms, CK_OFF_STEPS)
         ms_types = union_sql_types(ms.values(), CK_SQL_TYPES, args.sql_types)
         draw_share(ms, ms_types, ms_steps, STEP_COLOR12, LIGHT12, {t: t for t in ms},
-                   'MyScale: stage share per query, no plan cache (off); top label = ms/query',
+                   'MyScale: stage share per query, no plan cache; top label = ms/query',
                    os.path.join(CHART_DIR, 'myscale_share_off.png'),
                    dims=list(ms), dim_colors={t: table_color(t, '#9aa5b1') for t in ms})
     else:
@@ -672,7 +678,7 @@ def main():
         pg_types = union_sql_types(pg.values(), PG_SQL_TYPES, args.sql_types)
         draw_share(pg, pg_types, PG_CHART_STEPS, STEP_COLOR7, LIGHT7,
                    {t: t for t in pg},
-                   'pgvector (n=%s): stage share per query, no plan cache (cache=0); '
+                   'PG (n=%s): stage share per query, no plan cache; '
                    'top label = ms/query' % suffix,
                    os.path.join(CHART_DIR, 'pgvector_%s_share_off.png' % suffix),
                    dims=list(pg), dim_colors={t: table_color(t, '#9aa5b1') for t in pg})
@@ -731,7 +737,7 @@ def main():
                 continue
             draw_share(by_tbl, types2, PG_CACHE_STEPS, STEP_COLOR7, LIGHT7,
                        {t: t for t in by_tbl},
-                       'pgvector (n=%s): stage share per query, plan-cache mode cache=%s; '
+                       'PG (n=%s): stage share per query, plan-cache mode cache=%s; '
                        'top label = ms/query' % (suffix, c),
                        os.path.join(CHART_DIR, 'pgvector_%s_share_cache_%s.png' % (suffix, c)),
                        dims=list(by_tbl), dim_colors={t: table_color(t, '#9aa5b1') for t in by_tbl})

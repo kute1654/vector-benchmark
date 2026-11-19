@@ -221,10 +221,10 @@ def cn_of(f):
     if f['rc']:
         return 'RC only'
     if f['only']:
-        return 'plan-only cache'
+        return 'only plan cache'
     if f['plan']:
-        return 'plan cache'
-    return 'no cache'
+        return 'full plan cache'
+    return 'no plan cache'
 
 
 # 统一配色：(是否用结果缓存[0/1], 缓存档位[0=无,1=缓存only,2=完整计划缓存,3=扩展]) -> 颜色
@@ -782,8 +782,8 @@ def cn_of_pg(f):
 
 # ---------------- 默认 8 并发 QPS 图（计划缓存基准对比） ----------------
 PG_CACHE_MODES = ['raw', 'prepare_auto', 'prepare_generic', 'prepare_custom']
-PG_MODE_LABEL = {'raw': 'no plan cache', 'prepare_auto': 'auto (plan cache)',
-                 'prepare_generic': 'generic (plan cache)', 'prepare_custom': 'custom (plan cache)'}
+PG_MODE_LABEL = {'raw': 'no plan cache', 'prepare_auto': 'plan cache (auto)',
+                 'prepare_generic': 'plan cache (generic)', 'prepare_custom': 'plan cache (custom)'}
 PG_MODE_COLOR = {'raw': '#9aa5b1', 'prepare_auto': '#8fb3e8',
                  'prepare_generic': '#2c5fc4', 'prepare_custom': '#b07aa1'}
 

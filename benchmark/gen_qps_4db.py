@@ -23,8 +23,8 @@ OUT_PATH = os.path.join(CHART_DIR, 'qps_4db.png')
 PANELS = [
     ('ClickHouse',        os.path.join(CHART_DIR, 'ck_qps_c8.png')),
     ('MyScale',           os.path.join(CHART_DIR, 'myscale_qps_c8.png')),
-    ('pgvector (n=1000)', os.path.join(CHART_DIR, 'pg_qps_c8_n1000.png')),
-    ('pgvector (n=1)',    os.path.join(CHART_DIR, 'pg_qps_c8_n1.png')),
+    ('PG (n=1000)', os.path.join(CHART_DIR, 'pg_qps_c8_n1000.png')),
+    ('PG (n=1)',    os.path.join(CHART_DIR, 'pg_qps_c8_n1.png')),
 ]
 
 

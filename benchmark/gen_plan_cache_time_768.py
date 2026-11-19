@@ -51,8 +51,8 @@ PG_CACHE_STEPS = ['parse', 'analyze', 'plan', 'eval', 'gcp', 'exec']
 # 缓存档位显示名
 CK_LABELS = {
     'ck_off': 'no plan cache',
-    'ck_only_plan_cache': 'plan cache (only-vector)',
-    'ck_plan_cache': 'plan cache',
+    'ck_only_plan_cache': 'only plan cache',
+    'ck_plan_cache': 'full plan cache',
 }
 PG_LABELS = {
     '0': 'no plan cache',
