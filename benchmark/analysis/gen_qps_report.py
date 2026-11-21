@@ -7,15 +7,15 @@
     pgvector-benchmark-results.csv
 
 默认行为：按并发数（默认 8）为每类数据库各画一张 QPS 图
-  ck_qps_c8.png / myscale_qps_c8.png / pg_qps_c8.png
+  ck_qps_c8.eps / myscale_qps_c8.eps / pg_qps_c8.eps
   横轴以 sql_type 为一组；组内按维度(128/256/768/960/1536)分成若干小簇，
   每簇内并排该维度的各计划缓存档位，簇下方标注维度数值。
   基准档（不使用查询计划缓存）柱内标注 QPS 值，其它档柱顶标注相对基准的倍数。
   CK/MS 有 3 个档位(ck_off/only_plan_cache/plan_cache)，pgvector 有 4 个
   (raw/prepare_auto/prepare_generic/prepare_custom)。默认画全部维度，
   可用 -t 只画一张表、--sql-types 指定形态、--engine 只画某一类。
-  pgvector 还可用 --row-count "1 1000" 一次出多张（pg_qps_c8_n1.png /
-  pg_qps_c8_n1000.png），对应不同的每脚本查询条数。
+  pgvector 还可用 --row-count "1 1000" 一次出多张（pg_qps_c8_n1.eps /
+  pg_qps_c8_n1000.eps），对应不同的每脚本查询条数。
 
 加 --legacy-charts 时额外生成脚本原有的历史图表（结果缓存口径等，数据来自旧
 run.py 结果的 pgvector_benchmark_results.csv）。
@@ -29,10 +29,15 @@ SQL 类型、表名、profile（按表头布尔列划分缓存口径）、基准
 import os, re, sys
 import numpy as np
 
+try:
+    from chart_export import save_chart
+except ImportError:  # support `python -m benchmark.<script>`
+    from benchmark.chart_export import save_chart
+
 BASE = os.path.dirname(os.path.abspath(__file__))
-CSV_DIR = os.path.join(BASE, 'results', 'csv')
-BAK_DIR = os.path.join(BASE, 'results', 'bak')
-CHART_DIR = os.path.join(BASE, 'results', 'charts')
+CSV_DIR = os.path.join(BASE, '../results', 'csv')
+BAK_DIR = os.path.join(BASE, '../results', 'bak')
+CHART_DIR = os.path.join(BASE, '../results', 'charts')
 SUPPRESS_TITLES = False    # --no-title 时置 True：图内不画左上角长标题（供 4 库组合图拼接）
 
 # ---------- 固定：源文件名 + CSV 表头字段（读取/分组依据） ----------
@@ -159,7 +164,7 @@ def load_ckms(fname, concurrency=DEFAULT_CONCURRENCY):
     同一 (表, profile, sql_type) 组合可能有多行(多轮运行)：每行先取该轮 run_1..run_N 的
     均值，再对各轮均值取算术平均，每轮权重相同；不再用单行 qps_avg（那是固定 REPEAT 次、
     去极值的均值），也不再跨轮混池按样本数加权。返回的 rounds 为该组合的最大轮数。
-    数据供 ck_qps_norc/rc.png、ck_dim_qps.png、ck_corr_256.png 与默认 8 并发图使用。
+    数据供 ck_qps_norc/rc.eps、ck_dim_qps.eps、ck_corr_256.eps 与默认 8 并发图使用。
     注意：不按 index_status 过滤（该列不可靠），直接取全部行，仅剔除无有效样本的行。"""
     rows = [r for r in csv_reader(fname) if r['concurrency'] == str(concurrency)]
     sql_types, tables, order = [], [], []
@@ -271,7 +276,7 @@ def grouped_chart(ax, data, profs, T, title, meta, base, speed_flag, color, cn, 
                   xlabel_fn=None, legend_loc='upper left', legend_anchor=None,
                   top_margin=None):
     """单个 SQL 类型组内 profile 柱对比图：被 build_corr(256 印证图) 与 pg 256 印证图复用，
-    对应输出 *_corr_256.png / pg_corr_256_*.png。"""
+    对应输出 *_corr_256.eps / pg_corr_256_*.eps。"""
     n = len(profs)
     x = np.arange(len(T))
     w = 0.92 / n                              # 柱宽：组内柱子总数越少则单根越宽；0.92 可整体放大/缩小柱宽
@@ -337,14 +342,14 @@ def _plt():
 
 
 # ---------------- ClickHouse / MyScale ----------------
-_SQL_SHADE = ['#f4f7fb', '#ffffff']   # 相邻维度块底色(交替使用)：可改颜色或透明度美化分块背景
+_SQL_SHADE = ['#f2f2f2', '#ffffff']   # 相邻维度块底色(交替使用)：浅灰/白交替
 
 
 def _block_chart(ax, blocks, T, profs, pflag, getval, block_label, db, use_rc,
                  colr=color_of, lbl=cn_of, barw=None, xlabel_fn=None,
                  legend_loc='upper left', legend_anchor=None):
     """通用分块图：维度块 × SQL 类型(子簇) × 核心 profile(柱组)。块按输入顺序。
-    供 CK/MyScale 与 pg 的分块图使用，对应输出 *_qps_norc/rc.png（由 build_ckms/build_pg 调用并保存）。"""
+    供 CK/MyScale 与 pg 的分块图使用，对应输出 *_qps_norc/rc.eps（由 build_ckms/build_pg 调用并保存）。"""
     pf = pflag
     nd, ns = len(blocks), len(T)
     # ---- 布局参数（效果微调，改后重跑即可） ----
@@ -416,7 +421,7 @@ def _block_chart(ax, blocks, T, profs, pflag, getval, block_label, db, use_rc,
 
 def ckms_chart(ax, meta, profs, db, use_rc):
     """单张轴：维度(块) × SQL 类型(子簇) × 核心 profile(3 组柱)，维度按大小升序。
-    供 build_ckms 调用，对应输出 *_qps_norc/rc.png。"""
+    供 build_ckms 调用，对应输出 *_qps_norc/rc.eps。"""
     tabs = sorted(meta['tables'], key=_dim_num)
     return _block_chart(ax, tabs, meta['types'], profs, meta['pflag'],
                         lambda tb, p, st: meta['recs'].get((tb, p, st), 0.0),
@@ -425,7 +430,7 @@ def ckms_chart(ax, meta, profs, db, use_rc):
 
 def build_ckms(meta, db):
     """每个库 2 张图：no/with result cache，各自在单轴中呈现 维度×SQL类型×3 profile。
-    输出：ck_qps_norc.png / ck_qps_rc.png（或 myscale_*），并转调 build_corr 输出 *_corr_256.png。"""
+    输出：ck_qps_norc.eps / ck_qps_rc.eps（或 myscale_*），并转调 build_corr 输出 *_corr_256.eps。"""
     plt = _plt()
     norc, rc = core_axes(meta)
     nd, ns = len(meta['tables']), len(meta['types'])
@@ -433,16 +438,16 @@ def build_ckms(meta, db):
     for tag, profs, use_rc in (('norc', norc, False), ('rc', rc, True)):
         fig, ax = plt.subplots(figsize=(max(9.0, extent * 0.62), 5.0), dpi=200)   # 0.62=横向缩放系数，5.0=图高
         ckms_chart(ax, meta, profs, db, use_rc)
-        fname = ('ck' if db == 'ClickHouse' else 'myscale') + '_qps_%s.png' % tag
-        fig.savefig(os.path.join(CHART_DIR, fname), bbox_inches='tight')
+        fname = ('ck' if db == 'ClickHouse' else 'myscale') + '_qps_%s.eps' % tag
+        save_chart(fig, os.path.join(CHART_DIR, fname), bbox_inches='tight')
         plt.close(fig)
     corr = build_corr(meta, db)
-    return ['%s_qps_%s.png' % ('ck' if db == 'ClickHouse' else 'myscale', t) for t in ('norc', 'rc')] + [corr]
+    return ['%s_qps_%s.eps' % ('ck' if db == 'ClickHouse' else 'myscale', t) for t in ('norc', 'rc')] + [corr]
 
 
 def build_corr(meta, db):
     """256 维度数据集单块图：用于印证耗时(step-time)分析，采用无结果缓存核心 profile。
-    输出：ck_corr_256.png（或 myscale_corr_256.png）。"""
+    输出：ck_corr_256.eps（或 myscale_corr_256.eps）。"""
     plt = _plt()
     norc, _ = core_axes(meta)
     tabs = sorted(meta['tables'], key=_dim_num)
@@ -457,15 +462,15 @@ def build_corr(meta, db):
                   lambda c: color_of(meta['pflag'][c]),
                   lambda c: cn_of(meta['pflag'][c]), 'off')
     fig.tight_layout()
-    fname = ('ck' if db == 'ClickHouse' else 'myscale') + '_corr_256.png'
-    fig.savefig(os.path.join(CHART_DIR, fname), bbox_inches='tight')
+    fname = ('ck' if db == 'ClickHouse' else 'myscale') + '_corr_256.eps'
+    save_chart(fig, os.path.join(CHART_DIR, fname), bbox_inches='tight')
     plt.close(fig)
     return fname
 
 
 def build_dim(meta, db):
     """每个库单独的维度图：该库实际存在的全部表，off vs 最优结果缓存配置。
-    输出：ck_dim_qps.png（或 myscale_dim_qps.png）。"""
+    输出：ck_dim_qps.eps（或 myscale_dim_qps.eps）。"""
     plt = _plt()
     norc, rc = core_axes(meta)
     off = norc[0]   # 基准状态 = 不用结果缓存 + 最低缓存档位（一般是无缓存）
@@ -500,8 +505,8 @@ def build_dim(meta, db):
     ax.set_ylim(0, dtop)
     ax.margins(x=0.02)   # 删除图中两边大空白：留 2% 最小左右留白
     fig.tight_layout()
-    fname = ('ck' if db == 'ClickHouse' else 'myscale') + '_dim_qps.png'
-    fig.savefig(os.path.join(CHART_DIR, fname), bbox_inches='tight')
+    fname = ('ck' if db == 'ClickHouse' else 'myscale') + '_dim_qps.eps'
+    save_chart(fig, os.path.join(CHART_DIR, fname), bbox_inches='tight')
     plt.close(fig)
     return fname
 
@@ -561,7 +566,7 @@ def _pg_group(flat, pdata=None, pmodes=None):
 
 def load_pg():
     """读 pgvector CSV，按召回率拆两组（recall=1 单条 SQL / recall!=1 多语句），
-    每组保留各 key 最后一条稳定记录。数据供 build_pg（pg_qps_*.png 等）使用。
+    每组保留各 key 最后一条稳定记录。数据供 build_pg（pg_qps_*.eps 等）使用。
     每组按缓存组合推导 profile，按主口径(par=8/dur=60)取最后连续数据。"""
     rows = [r for r in csv_reader(PG_SRC) if r['experiment_name'].startswith('pgvector-')]
     groups = {True: {}, False: {}}
@@ -597,8 +602,8 @@ def load_pg():
 
 def build_pg(pg):
     """pg 全量图：按召回率两组(recall=1 / recall<1)分别输出。
-    每组输出：pg_qps_norc/r1.png·pg_qps_rc/r1.png（分块）、pg_dim_qps/r1.png（维度）、
-              pg_corr_256/r1.png（256 印证）；recall<1 组文件名后缀为 rn1。"""
+    每组输出：pg_qps_norc/r1.eps·pg_qps_rc/r1.eps（分块）、pg_dim_qps/r1.eps（维度）、
+              pg_corr_256/r1.eps（256 印证）；recall<1 组文件名后缀为 rn1。"""
     plt = _plt()
     vdim = pg['vdim']
     for rl, g in pg['groups'].items():
@@ -632,7 +637,7 @@ def build_pg(pg):
                          xlabel_fn=two_line,
                          legend_loc='upper left',
                          legend_anchor=(0.0, 0.93))   # 图例纵向位置：0.93≈从顶部下移一点(1.0=紧贴顶)，改小则更靠下
-            fig.savefig(os.path.join(CHART_DIR, 'pg_qps_%s_%s.png' % (tag, rtag)),
+            save_chart(fig, os.path.join(CHART_DIR, 'pg_qps_%s_%s.eps' % (tag, rtag)),
                         bbox_inches='tight')
             plt.close(fig)
         # 维度图：基于 text_literal 绘制 8 种缓存状态的 QPS（每数据集 8 柱），并标注相对基准的倍数
@@ -667,7 +672,7 @@ def build_pg(pg):
         ax.legend(fontsize=6.2, frameon=False, loc='upper right', ncol=nst,
                   reverse=True)   # 图例单行靠右、从右到左(reverse=True)，8 个缓存状态一次排开
         fig.tight_layout()
-        fig.savefig(os.path.join(CHART_DIR, 'pg_dim_qps_%s.png' % rtag), bbox_inches='tight')
+        save_chart(fig, os.path.join(CHART_DIR, 'pg_dim_qps_%s.eps' % rtag), bbox_inches='tight')
         plt.close(fig)
         # 256 维度（nytimes）印证耗时图，仅 5 类 SQL 类型；含计划缓存与结果缓存全部剖面
         d256 = next((d for d in blocks if '256' in d[0]), blocks[0])
@@ -679,7 +684,7 @@ def build_pg(pg):
                       cc, off, False, lambda c: col(pf[c]), lambda c: cn_of_pg(pf[c]), 'off',
                       xlabel_fn=two_line, legend_loc='upper left', legend_anchor=(0.0, 1))
         fig.tight_layout()
-        fig.savefig(os.path.join(CHART_DIR, 'pg_corr_256_%s.png' % rtag), bbox_inches='tight')
+        save_chart(fig, os.path.join(CHART_DIR, 'pg_corr_256_%s.eps' % rtag), bbox_inches='tight')
         plt.close(fig)
     build_pg_parse(pg)   # 额外输出三种 vector_in parse 模式的收益对比图
 
@@ -700,9 +705,9 @@ def _parse_avg(pdata, ds, sql_types, useqc, usec_set, pms):
 
 def build_pg_parse(pg):
     """三种 vector_in parse(strtof/inline/fast_float)的维度收益对比，以 strtof 为基准：
-      - pg_parse_qps_norc_*.png ：不使用查询结果缓存(use_query_cache=0)，剔除 cache=2
-      - pg_parse_qps_rc_*.png   ：使用查询结果缓存(use_query_cache=1)，剔除 cache=2
-      - pg_parse_qps_cache2_*.png：use_cache=2 单独一张，对比无结果缓存 vs 有结果缓存
+      - pg_parse_qps_norc_*.eps ：不使用查询结果缓存(use_query_cache=0)，剔除 cache=2
+      - pg_parse_qps_rc_*.eps   ：使用查询结果缓存(use_query_cache=1)，剔除 cache=2
+      - pg_parse_qps_cache2_*.eps：use_cache=2 单独一张，对比无结果缓存 vs 有结果缓存
     * 为 r1/rn1。X 轴均为 5 个维度数据集。"""
     plt = _plt()
     palette = {'strtof': '#9aa5b1', 'inline': '#7fd0cb', 'fast_float': '#0ea5a4'}   # 三种 parse 配色
@@ -749,24 +754,24 @@ def build_pg_parse(pg):
             ax.legend(fontsize=8, ncol=3, frameon=False, loc='upper right',
                       reverse=True)   # 图例单行靠右、从右到左(reverse=True)，各 parse 方式一次排开
             _style(ax); fig.tight_layout()
-            fig.savefig(os.path.join(CHART_DIR, fname), bbox_inches='tight'); plt.close(fig)
+            save_chart(fig, os.path.join(CHART_DIR, fname), bbox_inches='tight'); plt.close(fig)
         # 图 A：不使用查询结果缓存（剔除 cache=2）
         r0 = _parse_avg(pdata, dims, sql_types, '0', {'0', '1', '3'}, pms)
         _draw_dims(r0, 'pgvector · parse mode · no result cache · %s' % kind,
-                   'pg_parse_qps_norc_%s.png' % rtag)
+                   'pg_parse_qps_norc_%s.eps' % rtag)
         # 图 B：使用查询结果缓存（剔除 cache=2）
         r1 = _parse_avg(pdata, dims, sql_types, '1', {'0', '1', '3'}, pms)
         _draw_dims(r1, 'pgvector · parse mode · with result cache · %s' % kind,
-                   'pg_parse_qps_rc_%s.png' % rtag)
+                   'pg_parse_qps_rc_%s.eps' % rtag)
         # 图 C：cache=2 单独处理（因三种 parse 转换方式均执行了 11 次、权重特殊故单独成图），
         # 且按「不使用/使用查询结果缓存」分开成两张图（处理方式与图 A/B 相同：5 维度 × 3 parse，
         # 对 5 种 SQL 平均、以 strtof 为基准）。r1/rn1 各 2 张，共 4 张。
         r2_norc = _parse_avg(pdata, dims, sql_types, '0', {'2'}, pms)
         _draw_dims(r2_norc, 'pgvector · parse mode · use_cache=2 · no result cache · %s' % kind,
-                   'pg_parse_qps_cache2_norc_%s.png' % rtag)
+                   'pg_parse_qps_cache2_norc_%s.eps' % rtag)
         r2_rc = _parse_avg(pdata, dims, sql_types, '1', {'2'}, pms)
         _draw_dims(r2_rc, 'pgvector · parse mode · use_cache=2 · with result cache · %s' % kind,
-                   'pg_parse_qps_cache2_rc_%s.png' % rtag)
+                   'pg_parse_qps_cache2_rc_%s.eps' % rtag)
 
 
 def cn_of_pg(f):
@@ -784,6 +789,9 @@ def cn_of_pg(f):
 PG_CACHE_MODES = ['raw', 'prepare_auto', 'prepare_generic', 'prepare_custom']
 PG_MODE_LABEL = {'raw': 'no plan cache', 'prepare_auto': 'plan cache (auto)',
                  'prepare_generic': 'plan cache (generic)', 'prepare_custom': 'plan cache (custom)'}
+CK_QPS_TYPES = ['normal', 'cast', 'cast_array']
+PG_QPS_TYPES = ['text_literal', 'array_int_cast', 'array_real_cast']
+
 PG_MODE_COLOR = {'raw': '#9aa5b1', 'prepare_auto': '#8fb3e8',
                  'prepare_generic': '#2c5fc4', 'prepare_custom': '#b07aa1'}
 
@@ -859,7 +867,7 @@ def _draw_dim_qps(recs, dims, modes, T, base, title, fname, color, label,
     group_w = nd * CLUSTER_W + GROUP_GAP           # 每组总宽(含组间距)
     span = len(T) * group_w - GROUP_GAP            # 横轴实际跨度
     bw = CLUSTER_W * 0.93 / n                      # 单根柱宽(簇宽 86% 均分给各档位)
-    fig, ax = plt.subplots(figsize=(max(10.0, span * 0.95), 5.4), dpi=200)
+    fig, ax = plt.subplots(figsize=(max(12.5, span * 1.05), 4.4), dpi=200)
     tr = blended_transform_factory(ax.transData, ax.transAxes)
     bars, vals, bvals, maxv = [], [], [], 0.0
     for g, st in enumerate(T):
@@ -867,7 +875,7 @@ def _draw_dim_qps(recs, dims, modes, T, base, title, fname, color, label,
             cx = g * group_w + (j + 0.5) * CLUSTER_W
             if j % 2 == 0:                          # 偶数簇铺浅底, 便于区分维度簇
                 ax.axvspan(cx - CLUSTER_W / 2.0, cx + CLUSTER_W / 2.0,
-                           color='#eef3fa', zorder=0, lw=0)
+                           color='#f2f2f2', zorder=0, lw=0)
             ax.text(cx, -0.012, str(_dim_num(t)), transform=tr, ha='center', va='top',
                     fontsize=26, color='#5b6673')
             for i, m in enumerate(modes):
@@ -892,10 +900,16 @@ def _draw_dim_qps(recs, dims, modes, T, base, title, fname, color, label,
     ax.grid(axis='y', color='#dfe6f0', lw=0.8, zorder=0)
     for s in ('top', 'right'):
         ax.spines[s].set_visible(False)
-    ax.legend(fontsize=17, ncol=n, frameon=False, loc='upper right', reverse=True,
-              columnspacing=1.0, handlelength=1.2, handletextpad=0.5)
+    if SUPPRESS_TITLES:
+        # 组合图模式：图例放到坐标区上方，避免压住柱顶倍数标注
+        ax.legend(fontsize=17, ncol=n, frameon=False, loc='lower center',
+                  bbox_to_anchor=(0.5, 1.01), reverse=True,
+                  columnspacing=1.0, handlelength=1.2, handletextpad=0.5)
+    else:
+        ax.legend(fontsize=17, ncol=n, frameon=False, loc='upper right', reverse=True,
+                  columnspacing=1.0, handlelength=1.2, handletextpad=0.5)
     fig.tight_layout()
-    fig.savefig(os.path.join(CHART_DIR, fname), bbox_inches='tight')
+    save_chart(fig, os.path.join(CHART_DIR, fname), bbox_inches='tight')
     plt.close(fig)
 
 
@@ -913,9 +927,10 @@ def build_ckms_qps(db, meta, concurrency, tables, sql_types, fname):
              if not pflag[p]['rc'] and not pflag[p]['cast'] and not pflag[p]['ovec']]
     modes.sort(key=lambda p: cache_level(pflag[p]))          # 无缓存(基准)在最前
     base = next((p for p in modes if cache_level(pflag[p]) == 0), modes[0])
-    dims = dims_with_base(meta['recs'], tables, base, sql_types or meta['types'])
-    T = [st for st in (sql_types or meta['types'])
-         if any((t, base, st) in meta['recs'] for t in dims)]
+    wanted = sql_types or CK_QPS_TYPES
+    T = [st for st in wanted
+         if st in meta['types'] and any((t, base, st) in meta['recs'] for t in dims_with_base(meta['recs'], tables, base, [st]))]
+    dims = dims_with_base(meta['recs'], tables, base, T)
     if not dims or not T:
         raise SystemExit('[ERR] %s 无可用 QPS 数据(检查 -t/--sql-types 或结果 CSV)' % db)
     _draw_dim_qps(meta['recs'], dims, modes, T, base,
@@ -930,9 +945,10 @@ def build_pg_qps(pg, concurrency, tables, sql_types, fname):
     modes = [m for m in PG_CACHE_MODES if m in pg['modes']] + \
             [m for m in pg['modes'] if m not in PG_CACHE_MODES]
     base = 'raw' if 'raw' in modes else modes[0]
-    dims = dims_with_base(pg['recs'], tables, base, sql_types or pg['types'])
-    T = [st for st in (sql_types or pg['types'])
-         if any((t, base, st) in pg['recs'] for t in dims)]
+    wanted = sql_types or PG_QPS_TYPES
+    T = [st for st in wanted
+         if st in pg['types'] and any((t, base, st) in pg['recs'] for t in dims_with_base(pg['recs'], tables, base, [st]))]
+    dims = dims_with_base(pg['recs'], tables, base, T)
     if not dims or not T:
         raise SystemExit('[ERR] pgvector 无可用 QPS 数据(检查 -t/--sql-types 或结果 CSV)')
     _draw_dim_qps(pg['recs'], dims, modes, T, base,
@@ -954,10 +970,10 @@ def parse_args():
                     help='只画一张表(CK/MS 如 Benchmark_1536_1m, pg 如 benchmark_1536_1m); '
                          '默认画全部维度(5 张表)')
     ap.add_argument('--sql-types', default='',
-                    help='限定 sql_type 清单(空格/逗号分隔); 默认取结果 CSV 中出现的全部形态')
+                    help='限定 sql_type 清单(空格/逗号分隔); 默认只画 normal/cast/cast_array 或 text_literal/array_int_cast/array_real_cast')
     ap.add_argument('--row-count', default='',
                     help='pgvector 抽样 SQL 条数(1/1000), 可给多个(空格/逗号分隔), '
-                         '每个各出一张 pg_qps_c8_n<条数>.png; 不给时按结果 CSV 中实际'
+                         '每个各出一张 pg_qps_c8_n<条数>.eps; 不给时按结果 CSV 中实际'
                          '存在的全部条数各出一张(CK/MS 忽略此项)')
     ap.add_argument('--engine', choices=['all', 'clickhouse', 'myscale', 'pgvector'], default='all',
                     help='只画某一类(默认 all)')
@@ -991,7 +1007,7 @@ def main():
             print('[warn] %s 中没有表 %s, 跳过' % (src, args.table), file=sys.stderr)
             continue
         tables = [args.table] if args.table else meta['tables']
-        fname = '%s_qps_c%s.png' % (tag, c)
+        fname = '%s_qps_c%s.eps' % (tag, c)
         build_ckms_qps(db, meta, c, tables, types, fname)
         made.append(fname)
 
@@ -1023,7 +1039,7 @@ def main():
                   % (pg['row_count'], runs_txt(pg['rounds']), pg['samples']), file=sys.stderr)
             tables = [args.table] if args.table else pg['tables']
             # 显式指定 row_count 时文件名带上条数, 避免多张图互相覆盖
-            fname = 'pg_qps_c%s%s.png' % (c, ('_n%s' % pg['row_count']) if rc else '')
+            fname = 'pg_qps_c%s%s.eps' % (c, ('_n%s' % pg['row_count']) if rc else '')
             build_pg_qps(pg, c, tables, types, fname)
             made.append(fname)
 

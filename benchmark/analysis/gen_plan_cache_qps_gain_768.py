@@ -16,12 +16,17 @@
 
 用法：
   python gen_plan_cache_qps_gain_768.py
-  python gen_plan_cache_qps_gain_768.py --out results/charts/xxx.png
+  python gen_plan_cache_qps_gain_768.py --out results/charts/xxx.eps
 """
 
 import argparse
 import os
 import sys
+
+try:
+    from chart_export import save_chart
+except ImportError:  # support `python -m benchmark.<script>`
+    from benchmark.chart_export import save_chart
 
 try:
     import gen_qps_report as gqr
@@ -30,7 +35,7 @@ except ImportError:          # 支持 python -m benchmark.gen_plan_cache_qps_gai
     from benchmark import gen_qps_report as gqr
     from benchmark import gen_step_time_report as gst
 
-OUT_NAME = 'plan_cache_qps_gain_768_4db.png'
+OUT_NAME = 'plan_cache_qps_gain_768_4db.eps'
 DIM_KEY = '768'
 CONC = gqr.DEFAULT_CONCURRENCY
 
@@ -128,7 +133,7 @@ def draw_gain_panel(ax, panel, show_ylabel):
                     clip_on=False, zorder=5)
 
     for i in range(0, len(types), 2):
-        ax.axvspan(i - 0.5, i + 0.5, color='#2f6fed', alpha=0.045, zorder=0)
+        ax.axvspan(i - 0.5, i + 0.5, color='#f2f2f2', zorder=0)
     ax.axhline(1.0, color=gst.MUTED, lw=0.9, ls=(0, (4, 3)), zorder=2)
     ax.set_xlim(-0.5, len(types) - 0.5)
     ax.set_ylim(0, maxg * 1.30)
@@ -161,7 +166,7 @@ def parse_args():
     ap = argparse.ArgumentParser(
         description='768 维：查询计划缓存开/关的 QPS 收益倍数（四库合一图，基准结果 CSV）')
     ap.add_argument('--out', default=os.path.join(gst.CHART_DIR, OUT_NAME),
-                    help='输出 PNG 路径（默认 results/charts/%s）' % OUT_NAME)
+                    help='输出 EPS 路径（默认 results/charts/%s）' % OUT_NAME)
     return ap.parse_args()
 
 
@@ -207,7 +212,7 @@ def main():
              ha='center', fontsize=18, color=gst.MUTED)
     fig.subplots_adjust(left=0.06, right=0.985, top=0.88, bottom=0.12,
                         hspace=0.47, wspace=0.10)
-    fig.savefig(args.out, facecolor='white', bbox_inches='tight', pad_inches=0.3)
+    save_chart(fig, args.out, facecolor='white', bbox_inches='tight', pad_inches=0.3)
     gst.plt.close(fig)
     print('[OK] 图已保存: %s' % args.out)
 

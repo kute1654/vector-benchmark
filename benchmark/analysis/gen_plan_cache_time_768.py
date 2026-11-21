@@ -17,7 +17,7 @@ gen_step_time_report.py 的占比图一致。
 用法：
   python gen_plan_cache_time_768.py
   python gen_plan_cache_time_768.py --sql-types "normal cast raw_bytes"
-  python gen_plan_cache_time_768.py --out results/charts/xxx.png
+  python gen_plan_cache_time_768.py --out results/charts/xxx.eps
 """
 
 import argparse
@@ -27,12 +27,17 @@ import os
 import sys
 
 try:
+    from chart_export import save_chart
+except ImportError:  # support `python -m benchmark.<script>`
+    from benchmark.chart_export import save_chart
+
+try:
     import gen_step_time_report as gst
 except ImportError:          # 支持 python -m benchmark.gen_plan_cache_time_768
     from benchmark import gen_step_time_report as gst
 
 DIM_KEY = '768'
-OUT_NAME = 'plan_cache_time_768_4db.png'
+OUT_NAME = 'plan_cache_time_768_4db.eps'
 
 # PG 计划缓存档阶段：按"自底向上"语义顺序定义。
 # 原始列里 parse/analyze/plan/eval/gcp/exec 六段，但 analyze 与 eval、plan 与 gcp
@@ -227,7 +232,7 @@ def draw_panel(ax, panel, show_ylabel):
                     solid_capstyle='butt', clip_on=False, zorder=5)   # 色条加高并下移，避开刻度文字
 
     for i in range(0, len(types), 2):
-        ax.axvspan(i - 0.5, i + 0.5, color='#2f6fed', alpha=0.045, zorder=0)
+        ax.axvspan(i - 0.5, i + 0.5, color='#f2f2f2', zorder=0)
     ax.set_xlim(-0.5, len(types) - 0.5)
     ax.set_ylim(0, 110)
     ax.set_yticks([0, 20, 40, 60, 80, 100])
@@ -336,7 +341,7 @@ def parse_args():
     ap.add_argument('--sql-types', default='',
                     help='要绘制的 sql_type 清单，空格/逗号分隔；默认各引擎内置 4 种形态')
     ap.add_argument('--out', default=os.path.join(gst.CHART_DIR, OUT_NAME),
-                    help='输出 PNG 路径（默认 results/charts/%s）' % OUT_NAME)
+                    help='输出 EPS 路径（默认 results/charts/%s）' % OUT_NAME)
     args = ap.parse_args()
     args.sql_types = gst.split_sql_types(args.sql_types)
     return args
@@ -361,7 +366,7 @@ def main():
 
     fig.subplots_adjust(left=0.05, right=0.99, top=0.93, bottom=0.03,
                         hspace=0.45)   # top 留出空带：首行阶段图例/面板名与总标题分层，不再重叠
-    fig.savefig(args.out, facecolor='white', bbox_inches='tight', pad_inches=0.3)
+    save_chart(fig, args.out, facecolor='white', bbox_inches='tight', pad_inches=0.3)
     gst.plt.close(fig)
     print('[OK] 图已保存: %s' % args.out)
 

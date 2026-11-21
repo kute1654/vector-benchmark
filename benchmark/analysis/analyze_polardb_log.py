@@ -67,7 +67,7 @@ from collections import OrderedDict
 
 # ---- 路径常量 ----
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))       # benchmark/ 目录
-RESULTS_DIR = os.path.join(BASE_DIR, "results", "csv")     # 结果 CSV 与输出目录
+RESULTS_DIR = os.path.join(BASE_DIR, "../results", "csv")     # 结果 CSV 与输出目录
 LOG_PATH = "/home/polar/tmp_polardb_pg_17_primary/log/postgresql_error.log"  # PASE 日志
 CSV_PATH = os.path.join(RESULTS_DIR, "pgvector_benchmark_results.csv")       # 结果 CSV
 OUT_DIR = RESULTS_DIR                                       # 汇总 CSV 输出目录

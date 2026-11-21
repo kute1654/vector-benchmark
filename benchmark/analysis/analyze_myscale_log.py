@@ -42,7 +42,7 @@ from bisect import bisect_left
 from collections import OrderedDict
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-RESULTS_DIR = os.path.join(BASE_DIR, "results", "csv")
+RESULTS_DIR = os.path.join(BASE_DIR, "../results", "csv")
 
 # 各数据库(结果文件前缀, 默认日志路径)。命名与 engine/base_client/client.py 中的
 # 输出文件一致: MyScale 写入 benchmark_results.csv, ClickHouse 写入

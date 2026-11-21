@@ -110,8 +110,8 @@ from collections import OrderedDict, Counter
 # ---- 路径常量 ----
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))         # benchmark/ 目录
 LOG_PATH = "/usr/local/pgsql/data/log/postgresql.log"         # pgvector 服务端日志默认路径
-RESULTS_DIR = os.path.join(BASE_DIR, "results/csv")           # 结果 CSV 与输出 CSV 所在目录
-CONFIG_PATH = os.path.join(BASE_DIR, "configurations", "config.json")  # 实测网格配置
+RESULTS_DIR = os.path.join(BASE_DIR, "../results/csv")           # 结果 CSV 与输出 CSV 所在目录
+CONFIG_PATH = os.path.join(BASE_DIR, "../configurations", "config.json")  # 实测网格配置
 
 # ---- 日志行正则 ----
 # 行首: "<日期> <时间>.<毫秒> <用户名> [PID]"。

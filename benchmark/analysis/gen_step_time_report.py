@@ -3,22 +3,22 @@
 向量数据库耗时分析：读 run-benchmark-loop.sh 产出的 log-analysis CSV -> 生成阶段耗时占比图。
 
 默认只输出第一组图（不使用查询计划缓存，阶段只取核心耗时；sql_type 只画内置清单）：
-  clickhouse_share_off.png       ClickHouse 5 张表 × 默认 sql_type，profile=ck_off;
+  clickhouse_share_off.eps       ClickHouse 5 张表 × 默认 sql_type，profile=ck_off;
                                  阶段 build_ast/check_qp/prep_plan/build_plan/pipe/after_pipe
-  myscale_share_off.png          MyScale   同上，profile=off（口径同 ck_off）
-  pgvector_1000_share_off.png    pgvector  5 张表 × 默认 sql_type，cache=0;
+  myscale_share_off.eps          MyScale   同上，profile=off（口径同 ck_off）
+  pgvector_1000_share_off.eps    pgvector  5 张表 × 默认 sql_type，cache=0;
                                  阶段 parse/analyze/plan/exec
-  pgvector_1_share_off.png       pgvector  同上，1 条 SQL 的负载
-单表模式（-t/-n）对应：<engine>_share_off_<表名>-<条数>.png / pgvector_share_off_<...>.png
+  pgvector_1_share_off.eps       pgvector  同上，1 条 SQL 的负载
+单表模式（-t/-n）对应：<engine>_share_off_<表名>-<条数>.eps / pgvector_share_off_<...>.eps
 
 第二组（仅 --cache-charts 时输出）：显示各计划缓存档位（阶段额外包含缓存相关耗时）
   CK/MS 3 档: ck_off / ck_only_plan_cache / ck_plan_cache，阶段在 6 段基础上加
   reuse_ast/reuse_plan/normalized_ast；全量模式按档出图
-  clickhouse_share_cache_<profile>.png / myscale_share_cache_<profile>.png
+  clickhouse_share_cache_<profile>.eps / myscale_share_cache_<profile>.eps
   pgvector 4 档: cache=0/1/2/3，阶段 parse/analyze/plan/exec/eval/gcp；
-  全量模式按档出图 pgvector_{1000,1}_share_cache_{0,1,2,3}.png；
-  单表模式在同一张图内并排显示 4 档：pgvector_share_cache_<表名>-<条数>.png，
-  CK/MS 单表模式为 <engine>_share_cache_<表名>-<条数>.png（并排 3 档）。
+  全量模式按档出图 pgvector_{1000,1}_share_cache_{0,1,2,3}.eps；
+  单表模式在同一张图内并排显示 4 档：pgvector_share_cache_<表名>-<条数>.eps，
+  CK/MS 单表模式为 <engine>_share_cache_<表名>-<条数>.eps（并排 3 档）。
 
 每张图：横轴按 sql_type 分组，组内每根柱对应一张表（全量模式）或一个缓存档
 （单表模式），柱内按阶段堆叠并归一化为 100%（段内标注占比），柱顶标注 ms/query。
@@ -36,13 +36,13 @@
       解析 /usr/local/pgsql/data/log/postgresql.log 中累计的多轮运行
       (循环跑 N 次基准未清日志), 按批次平均合并, 输出
       results/csv/pgvector_log_analysis-<表名>-<条数>.csv 并画占比图
-      (results/charts/pgvector_share_off_<表名>-<条数>.png;
-       加 --cache-charts 再输出 pgvector_share_cache_<表名>-<条数>.png)
+      (results/charts/pgvector_share_off_<表名>-<条数>.eps;
+       加 --cache-charts 再输出 pgvector_share_cache_<表名>-<条数>.eps)
   python gen_step_time_report.py --engine clickhouse -t <表名> -n <条数>   # CK/MS 模式:
       读循环脚本产出的 results/csv/<engine>-<表名>-log-analysis-<条数>.csv
       (每轮基准一组数据, 默认 10 组), 同一 sql_type 的各组按阶段取算术平均后
-      画占比图 (results/charts/<engine>_share_off_<表名>-<条数>.png;
-       加 --cache-charts 再输出 <engine>_share_cache_<表名>-<条数>.png);
+      画占比图 (results/charts/<engine>_share_off_<表名>-<条数>.eps;
+       加 --cache-charts 再输出 <engine>_share_cache_<表名>-<条数>.eps);
       无缓存档 profile (clickhouse=ck_off / myscale=off)
 可选: --pglog <路径> 指定日志; --runs all|N 指定合并的批次数; --no-chart 只出 CSV;
       --sql-types "a b" 指定要画的 sql_type(空格/逗号分隔, 顺序即横轴顺序;
@@ -55,10 +55,15 @@ import re
 import subprocess
 import sys
 
+try:
+    from chart_export import save_chart
+except ImportError:  # support `python -m benchmark.<script>`
+    from benchmark.chart_export import save_chart
+
 BASE = os.path.dirname(os.path.abspath(__file__))                            # 脚本目录
-RAW = os.path.join(BASE, 'results', 'csv')                                   # 数据目录
-BAK = os.path.join(BASE, 'results', 'bak')                                   # 表头迁移/覆盖前的备份目录
-CHART_DIR = os.path.join(BASE, 'results', 'charts')                          # 图输出目录
+RAW = os.path.join(BASE, '../results', 'csv')                                   # 数据目录
+BAK = os.path.join(BASE, '../results', 'bak')                                   # 表头迁移/覆盖前的备份目录
+CHART_DIR = os.path.join(BASE, '../results', 'charts')                          # 图输出目录
 SUPPRESS_TITLES = False           # --no-title 时置 True：图内不画左上角长标题（供 4 库组合图拼接）
 
 
@@ -127,7 +132,7 @@ def table_color(name, fallback):
 
 # sql_type 的默认绘制清单（题设指定）：默认图只画这里列出的形态。可用命令行
 # --sql-types 覆盖（传了就按参数清单/顺序画），CSV 中没跑到的形态自动跳过。
-CK_SQL_TYPES = ['normal', 'cast', 'cast_array', 'raw_bytes']
+CK_SQL_TYPES = ['normal', 'cast', 'cast_array']
 STEP_DISPLAY = {
     'check_qp': 'check_ast',
     'prep_plan': 'build_querytree',
@@ -384,8 +389,16 @@ def fmt_val(v):
     return '%.4f' % v
 
 
+def _dim_num(name) -> str:
+    """取数据集名中的维度数字：Benchmark_128_10m -> 128。"""
+    for p in str(name).split('_')[1:]:
+        if p.isdigit():
+            return p
+    return str(name)
+
+
 def draw_share(by_dim, sql_types, steps, step_colors, light_set, dim_labels,
-               title, out_path, figw=20.0, dims=None, dim_colors=None):
+               title, out_path, figw=11.4, dims=None, dim_colors=None):
     """阶段耗时占比图（100% 堆叠）：横轴=sql_type 分组，组内每根柱=一个维度。
 
     柱内按阶段堆叠并归一化到 100%，段内标注占比；柱顶标注 ms/query 总耗时；
@@ -395,9 +408,10 @@ def draw_share(by_dim, sql_types, steps, step_colors, light_set, dim_labels,
     dims = dims if dims is not None else list(by_dim)
     dim_colors = dim_colors if dim_colors is not None else {d: DIM_COLOR.get(d, '#9aa5b1') for d in dims}
     ndim, nsql = len(dims), len(sql_types)
-    fig, ax = plt.subplots(figsize=(figw, 4.9), dpi=200)
+    fig, ax = plt.subplots(figsize=(figw, 3.2), dpi=200)
+    from matplotlib.transforms import blended_transform_factory
+    tr = blended_transform_factory(ax.transData, ax.transAxes)
     step_handles = [Patch(facecolor=step_colors[s], label=STEP_DISPLAY.get(s, s)) for s in steps]
-    dim_handles = [Patch(facecolor=dim_colors[d], label=dim_labels[d]) for d in dims]
     w = 0.84 / ndim                     # 柱宽：组内 5 根
     for j, d in enumerate(dims):
         xj = [i + (j - (ndim - 1) / 2.0) * (w * 1.04) for i in range(nsql)]   # *1.04=组内柱间留缝
@@ -413,9 +427,9 @@ def draw_share(by_dim, sql_types, steps, step_colors, light_set, dim_labels,
                 shares.append(share)
             for xi, share, b in zip(xj, shares, bottoms):
                 # 段内占比标注：>=5% 才画（画布压矮后 12pt 约占 5% 段高），浅色段用深色字
-                if share >= 5.0:
+                if share >= 8.0:
                     ax.text(xi, b + share / 2.0, '%d%%' % round(share), ha='center', va='center',
-                            fontsize=12.0, color=INK if s in light_set else 'white', zorder=4)
+                            fontsize=10.0, color=INK if s in light_set else 'white', zorder=4)
             bottom = [b + sh for b, sh in zip(bottom, shares)]
         for xi, st in zip(xj, sql_types):
             row = by_dim.get(d, {}).get(st)
@@ -423,20 +437,20 @@ def draw_share(by_dim, sql_types, steps, step_colors, light_set, dim_labels,
                 continue
             tot = row['total']
             ax.text(xi, 101.5, fmt_val(tot), ha='center', va='bottom',   # 柱顶 ms/query 总耗时
-                    fontsize=13.5, color=INK, zorder=5)
-            # 柱底维度色条（画在轴下方，clip_on=False），与下方维度图例对应；
-            # y=-14 让加高后的色条避开 sql_type 刻度文字，留出明显空隙
-            ax.plot([xi - w * 0.38, xi + w * 0.38], [-14.0, -14.0], color=dim_colors[d],
-                    lw=8.0, solid_capstyle='butt', clip_on=False, zorder=5)   # 色条加高，颜色更易区分
+                    fontsize=11.5, color=INK, zorder=5)
+            # 每根柱下方标注其维度（与 QPS 图一致：组内每根柱对应一个维度）
+            ax.text(xi, -0.012, _dim_num(d), transform=tr, ha='center', va='top',
+                    fontsize=15, color='#5b6673', clip_on=False)
     for i in range(0, nsql, 2):
-        ax.axvspan(i - 0.5, i + 0.5, color='#2f6fed', alpha=0.045, zorder=0)   # 隔列底色条
+        ax.axvspan(i - 0.5, i + 0.5, color='#f2f2f2', zorder=0)   # 隔列底色条（浅灰）
     ax.set_xlim(-0.5, nsql - 0.5)
     ax.set_ylim(0, 108)   # 顶部留出总耗时标注空间
     ax.set_yticks([0, 20, 40, 60, 80, 100])
     ax.set_xticks(range(nsql))
-    ax.set_xticklabels(sql_types, fontsize=16, color=INK)
-    ax.set_ylabel('share of per-query time (%)', fontsize=14, color=MUTED)
-    ax.tick_params(axis='y', labelsize=13, colors=MUTED)
+    ax.set_xticklabels(sql_types, fontsize=20, color=INK)
+    ax.tick_params(axis='x', pad=20)     # 给柱下方的维度标注让位
+    ax.set_ylabel('share of per-query time (%)', fontsize=15, color=MUTED)
+    ax.tick_params(axis='y', labelsize=14, colors=MUTED)
     ax.grid(axis='y', color=RULE, linewidth=0.7, zorder=0)
     ax.set_axisbelow(True)
     for sp in ('top', 'right'):
@@ -444,15 +458,12 @@ def draw_share(by_dim, sql_types, steps, step_colors, light_set, dim_labels,
     for sp in ('left', 'bottom'):
         ax.spines[sp].set_color(RULE)
     ax.legend(handles=step_handles, loc='lower center', bbox_to_anchor=(0.5, 1.002),
-              ncol=min(len(steps), 12), fontsize=15, frameon=False, columnspacing=1.2,
-              handlelength=1.4, handleheight=1.2)   # 阶段图例：贴顶（色块加高更易辨认）
-    fig.legend(handles=dim_handles, loc='lower center', bbox_to_anchor=(0.5, -0.12), ncol=len(dims),
-               fontsize=15, frameon=False, columnspacing=1.6, handlelength=1.6,
-               handleheight=1.4)                   # 维度图例：贴底（保持原高度）
+              ncol=min(len(steps), 12), fontsize=12, frameon=False, columnspacing=1.2,
+              handlelength=1.4, handleheight=1.2)   # 阶段图例：贴顶（与 QPS 图例一致）
     if not SUPPRESS_TITLES:
         ax.set_title(title, loc='left', fontsize=22, color=INK, pad=52)
     fig.tight_layout()
-    fig.savefig(out_path, bbox_inches='tight', pad_inches=0.35, facecolor='white')
+    save_chart(fig, out_path, bbox_inches='tight', pad_inches=0.35, facecolor='white')
     plt.close(fig)
 
 
@@ -526,7 +537,7 @@ def parse_log_mode(args):
     dim = args.table or "unknown"
     steps = PG_CHART_STEPS
     restrict_steps(pg, steps)
-    chart = os.path.join(CHART_DIR, "pgvector_share_off_%s.png" % name)
+    chart = os.path.join(CHART_DIR, "pgvector_share_off_%s.eps" % name)
     draw_share({dim: pg}, types, steps, STEP_COLOR7, LIGHT7,
                {dim: "%s (n=%d)" % (dim, n)},
                "PG %s (n=%d): stage share per query, no plan cache (cache=0); "
@@ -547,7 +558,7 @@ def parse_log_mode(args):
                                               args.sql_types), series)
     if not cache_types:
         return
-    chart2 = os.path.join(CHART_DIR, "pgvector_share_cache_%s.png" % name)
+    chart2 = os.path.join(CHART_DIR, "pgvector_share_cache_%s.eps" % name)
     draw_share(series, cache_types, PG_CACHE_STEPS, STEP_COLOR7, LIGHT7,
                {c: 'cache=%s' % c for c in series},
                "PG %s (n=%d): stage share per query, plan-cache modes "
@@ -588,7 +599,7 @@ def ck_ms_chart_mode(args):
     if not load_mpl():
         return
     os.makedirs(CHART_DIR, exist_ok=True)
-    chart = os.path.join(CHART_DIR, "%s_share_off_%s.png" % (eng, name))
+    chart = os.path.join(CHART_DIR, "%s_share_off_%s.eps" % (eng, name))
     draw_share({tbl: data}, types, steps, STEP_COLOR12, LIGHT12,
                {tbl: "%s (n=%d)" % (tbl, n)},
                "%s %s (n=%d): stage share per query, no plan cache (%s); "
@@ -608,7 +619,7 @@ def ck_ms_chart_mode(args):
                                               args.sql_types), series)
     if not cache_types:
         return
-    chart2 = os.path.join(CHART_DIR, "%s_share_cache_%s.png" % (eng, name))
+    chart2 = os.path.join(CHART_DIR, "%s_share_cache_%s.eps" % (eng, name))
     draw_share(series, cache_types, CK_CACHE_STEPS, STEP_COLOR12, LIGHT12,
                {k: k for k in series},
                "%s %s (n=%d): stage share per query, plan-cache modes "
@@ -642,7 +653,7 @@ def main():
         ck_types = union_sql_types(ck.values(), CK_SQL_TYPES, args.sql_types)
         draw_share(ck, ck_types, ck_steps, STEP_COLOR12, LIGHT12, {t: t for t in ck},
                    'ClickHouse: stage share per query, no plan cache; top label = ms/query',
-                   os.path.join(CHART_DIR, 'clickhouse_share_off.png'),
+                   os.path.join(CHART_DIR, 'clickhouse_share_off.eps'),
                    dims=list(ck), dim_colors={t: table_color(t, '#9aa5b1') for t in ck})
     else:
         print('[warn] 未找到 ClickHouse 分析 CSV(clickhouse-*-log-analysis-1000.csv), 跳过',
@@ -657,7 +668,7 @@ def main():
         ms_types = union_sql_types(ms.values(), CK_SQL_TYPES, args.sql_types)
         draw_share(ms, ms_types, ms_steps, STEP_COLOR12, LIGHT12, {t: t for t in ms},
                    'MyScale: stage share per query, no plan cache; top label = ms/query',
-                   os.path.join(CHART_DIR, 'myscale_share_off.png'),
+                   os.path.join(CHART_DIR, 'myscale_share_off.eps'),
                    dims=list(ms), dim_colors={t: table_color(t, '#9aa5b1') for t in ms})
     else:
         print('[warn] 未找到 MyScale 分析 CSV(myscale-*-log-analysis-1000.csv), 跳过',
@@ -680,7 +691,7 @@ def main():
                    {t: t for t in pg},
                    'PG (n=%s): stage share per query, no plan cache; '
                    'top label = ms/query' % suffix,
-                   os.path.join(CHART_DIR, 'pgvector_%s_share_off.png' % suffix),
+                   os.path.join(CHART_DIR, 'pgvector_%s_share_off.eps' % suffix),
                    dims=list(pg), dim_colors={t: table_color(t, '#9aa5b1') for t in pg})
         print('pgvector(n=%s) steps: %s' % (suffix, PG_CHART_STEPS))
 
@@ -702,7 +713,7 @@ def main():
                    {t: t for t in by_tbl},
                    'ClickHouse: stage share per query, plan-cache mode %s; '
                    'top label = ms/query' % prof,
-                   os.path.join(CHART_DIR, 'clickhouse_share_cache_%s.png' % prof),
+                   os.path.join(CHART_DIR, 'clickhouse_share_cache_%s.eps' % prof),
                    dims=list(by_tbl), dim_colors={t: table_color(t, '#9aa5b1') for t in by_tbl})
 
     ms_prof = {t: load_ck_profiles_avg(p, CK_CACHE_STEPS) for t, p in ms_paths.items()}
@@ -718,7 +729,7 @@ def main():
                    {t: t for t in by_tbl},
                    'MyScale: stage share per query, plan-cache mode %s; '
                    'top label = ms/query' % prof,
-                   os.path.join(CHART_DIR, 'myscale_share_cache_%s.png' % prof),
+                   os.path.join(CHART_DIR, 'myscale_share_cache_%s.eps' % prof),
                    dims=list(by_tbl), dim_colors={t: table_color(t, '#9aa5b1') for t in by_tbl})
 
     for suffix, paths in pg_paths_by_n.items():
@@ -739,7 +750,7 @@ def main():
                        {t: t for t in by_tbl},
                        'PG (n=%s): stage share per query, plan-cache mode cache=%s; '
                        'top label = ms/query' % (suffix, c),
-                       os.path.join(CHART_DIR, 'pgvector_%s_share_cache_%s.png' % (suffix, c)),
+                       os.path.join(CHART_DIR, 'pgvector_%s_share_cache_%s.eps' % (suffix, c)),
                        dims=list(by_tbl), dim_colors={t: table_color(t, '#9aa5b1') for t in by_tbl})
 
     print('charts saved to', CHART_DIR)
